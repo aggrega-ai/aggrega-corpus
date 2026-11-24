@@ -140,7 +140,7 @@ jobs:
       - name: Build the binary with its embedded guests
         run: aggrega-cli/scripts/build.sh
 
-      - name: Run the binary
+      - name: Check that the binary runs, and stage it for upload
         run: |
           set -euo pipefail
           aggrega-cli/aggrega version

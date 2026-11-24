@@ -105,9 +105,9 @@ Each prints its name and `ok` and exits 0, or names every expected refusal it di
 
 - **Guard** (`.github/workflows/guard.yml`), on every push to `main` and every pull request:
   `scripts/check-frozen.sh --rev HEAD` and both self-tests.
-- **Corpus** (`.github/workflows/corpus.yml`), nightly when aggrega-cli's `main` has moved since its last
-  green run, and on demand: builds `aggrega` from aggrega-cli's `main` once, then runs `fast`, `live`
-  (against aggrega-hub's `main`) and `full` as parallel jobs over that binary.
+- **Corpus** (`.github/workflows/corpus.yml`), nightly when aggrega-cli's `main` or this repository has moved
+  since its last green run, and on demand: builds `aggrega` from aggrega-cli's `main` once, then runs `fast`,
+  `live` (against aggrega-hub's `main`) and `full` as parallel jobs over that binary.
 
 ## License
 
