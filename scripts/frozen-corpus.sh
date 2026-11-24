@@ -643,7 +643,7 @@ read_accepted() {
   if tail -n +2 "$ACCEPTED" | awk -F'\t' 'NF != 5 || $5 == "" || ($3 != "fast" && $3 != "live" && $3 != "full") { bad = 1 } END { exit !bad }'; then
     not_judged "$ACCEPTED has a line that is not <workspace> TAB <release> TAB fast|live|full TAB <now> TAB <reason>"
   fi
-  if tail -n +2 "$ACCEPTED" | cut -f1-3 | sort | uniq -d | grep -q .; then
+  if [ -n "$(tail -n +2 "$ACCEPTED" | cut -f1-3 | sort | uniq -d)" ]; then
     not_judged "$ACCEPTED lists one Release twice for one tier"
   fi
   tail -n +2 "$ACCEPTED" | awk -F'\t' -v tier="$1" 'BEGIN { OFS = "\t" } $3 == tier { print $1, $2, $4 }' > "$SCRATCH/accepted"
