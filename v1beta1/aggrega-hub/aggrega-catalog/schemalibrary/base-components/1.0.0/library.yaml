@@ -1,0 +1,136 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: SchemaLibrary
+metadata:
+  name: BaseComponents
+  version: 1.0.0
+  description: |
+    Universal base schemas shared by every Component in the core catalog.
+    BaseComponentParameter carries the display_name + description fields
+    every Component supports as developer-tunable documentation knobs.
+spec:
+  schemas:
+    BaseComponentParameter:
+      # Explicit `type: object, properties: { ... }` form is required because
+      # `description:` is reserved by the compact-form schema vocabulary.
+      # Inferred-form authoring would surface "unknown keyword" errors on
+      # the property names. Cross-document `$ref:` composition enforces
+      # closure (`additionalProperties: false`) on the merged shape
+      # regardless of how this library entry is authored, so the library
+      # entry's openness is not a concern for consumers.
+      type: object
+      properties:
+        display_name:
+          type: string
+        description:
+          type: string
+    BaseToolParameter:
+      # Tool security and execution boundaries shared by every Tool
+      # Component. Composes the universal BaseComponentParameter via
+      # cross-document `$ref:` and adds the side_effects + timeout
+      # +  optional LLM-description-override fields. side_effects is the
+      # zero-trust default for tools: secure (mutating) unless explicitly
+      # downgraded by the Tool author.
+      $ref: "BaseComponents#/schemas/BaseComponentParameter"
+      properties:
+        side_effects: { type: string, enum: [mutating, read_only, none], default: mutating }
+        timeout_seconds: { type: integer, default: 30 }
+        llm_description_override: { type: string }
+      required: [side_effects, timeout_seconds]
+    BaseModelParameter:
+      # AI Model identity and capability hints shared by every Model
+      # Component. Composes the universal BaseComponentParameter via
+      # cross-document `$ref:` and adds the model identifier + optional
+      # context-window hint. `model` carries the provider-specific model
+      # string (e.g. "gpt-4o", "meta-llama/Llama-3-70b"). `context_window`
+      # is an Ops-consumable hint for sizing inference-server parameters
+      # like vLLM `max_model_len`, in tokens and at least 1: a context
+      # length of 0 leaves the model no room for a prompt, so schema
+      # validation refuses it on every Component composing this schema.
+      $ref: "BaseComponents#/schemas/BaseComponentParameter"
+      properties:
+        model: { type: string }
+        context_window: { type: integer, min: 1 }
+      required: [model]
+    BaseAgentParameter:
+      # AI Agent reference fields shared by every Agent Component.
+      # Composes the universal BaseComponentParameter via cross-document
+      # `$ref:` and adds four optional name-list fields connecting the
+      # Agent to the entities it works with: models it uses, tools it can
+      # invoke, datastores it persists state to, and other agents it can
+      # delegate to. The lists hold names of catalog entities of the
+      # stated category — a documented authoring convention the compiler
+      # does not evaluate. An Agent platform that treats one of these
+      # references as a compiler-wired topology edge declares a
+      # `usesSchema:` socket for it at its own component scope; the
+      # socket, not the list, is what the selector gate enforces.
+      # The referenced entity (Model / Tool / Datastore) publishes its
+      # endpoint through that edge. The credential the Agent needs to reach
+      # it is chosen by the Release, not by the catalog: a Release may
+      # either fill the Agent's own optional credential slot, or attach one
+      # credential at a shared scope covering several Agents. Both forms render
+      # a `secretKeyRef` on every consumer, so the same Agent Component serves
+      # per-application keys and one shared key with no change to the catalog
+      # entity. What the shared form shares is the declaration, and so the
+      # material every consumer receives — not the emitted resource: the
+      # standard-library referenceable-credential FeatureRecipes derive the
+      # produced Secret's name from the consuming component, so a credential
+      # attached once at a shared scope still emits one Secret per consumer,
+      # each carrying the same value. The Agent's Recipe delivers that Secret
+      # to the application under the environment-variable name the client SDK
+      # reads; the Agent never embeds a credential value in its own values.
+      $ref: "BaseComponents#/schemas/BaseComponentParameter"
+      properties:
+        models:
+          type: array
+          items: { type: string }
+          description: Names of ai-model-category catalog Components this agent uses. Documented convention; not a compiler-enforced edge.
+        tools_allowed:
+          type: array
+          items: { type: string }
+          description: Names of ai-tool-category catalog Components this agent may invoke. Documented convention; not a compiler-enforced edge.
+        datastores:
+          type: array
+          items: { type: string }
+          description: Names of datastore-category catalog Components this agent persists state to. Documented convention; not a compiler-enforced edge.
+        agents_allowed:
+          type: array
+          items: { type: string }
+          description: Names of ai-agent-category catalog Components this agent may delegate to. Documented convention; not a compiler-enforced edge.
+    BaseFeatureParameter:
+      # Universal optional documentation knobs and the Feature-exclusive
+      # Universal Injection Contract shared by every Feature in the core
+      # catalog. Standalone entry; does NOT compose BaseComponentParameter
+      # via cross-document `$ref:`. This base is declared as a standalone
+      # definition that duplicates the display_name + description fields
+      # rather than chain-extending the Component-side base. The
+      # architectural reason is the entity-kind distinction (Feature CRD
+      # vs Component CRD) — the `as:` Universal Injection Contract here
+      # is strictly for Features, never Components, motivating a separate
+      # definition rather than shared inheritance. Explicit
+      # `type: object, properties: { ... }` form is required because
+      # `description:` collides with compact-form vocabulary. The nested
+      # `as:` object carries explicit `additionalProperties: false` so
+      # the closed-struct semantic survives at the merged consumer shape
+      # (the outer scope's closure is injected automatically by
+      # cross-document `$ref:` expansion; nested-scope closure inside a
+      # library entry needs author-side injection).
+      type: object
+      properties:
+        display_name:
+          type: string
+        description:
+          type: string
+        severity:
+          type: string
+          enum: [info, warning, critical]
+          default: info
+        as:
+          type: object
+          properties:
+            env: { type: string }
+            file: { type: string }
+            arg: { type: string }
+          additionalProperties: false

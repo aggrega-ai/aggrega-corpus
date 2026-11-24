@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Release
+metadata:
+  name: cloudformation-name-collision
+  environment: production
+  version: "1.0.0"
+spec:
+  aggregate: aggregate-name-collision
+  manifest: manifest
+  boundaries:
+    app:
+      directory: name-collision
+      components:
+        payments-db:
+          # The engine owns the root password on this target, so the operator
+          # binds the Component's root_password slot with the credential Feature
+          # that delegates it to the engine, as the working releases do, and
+          # attaches the same backup they do.
+          features:
+            root_password:
+              type: core/generated-secret
+            backup:
+              type: core/backup
+              infra:
+                retention_days: 14
+          infra:
+            engine_version: "11.4"
+            storage:
+              size: 100Gi
+              type: gp3
+            ha:
+              enabled: false
+              read_replicas: 0

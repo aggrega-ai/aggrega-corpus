@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Manifest
+metadata:
+  name: manifest-compose
+  version: "1.0.0"
+  description: >
+    Ops mapping for the Docker Compose target. The Fluent Bit forwarder is
+    realized by the compose Recipe and the Fluentd aggregator by the Fluentd
+    compose Recipe. Both references are provider-scoped because helm Recipes of
+    the same names also exist. Recipe selection at build time is by component
+    type against the loaded catalog.
+spec:
+  mappings:
+    components:
+      type:
+        core/observability/fluent-bit:1.0.0: compose/fluent-bit:1.0.0
+        core/observability/fluentd:1.0.0: compose/fluentd:1.0.0

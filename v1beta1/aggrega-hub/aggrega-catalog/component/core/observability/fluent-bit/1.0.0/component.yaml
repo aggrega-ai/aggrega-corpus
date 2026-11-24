@@ -1,0 +1,173 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/observability/fluent-bit
+  version: 1.0.0
+  description: >
+    A Fluent Bit log processor and forwarder, collecting log records from its
+    inputs and shipping them to a downstream sink wired through its
+    `forward_target` uses-socket: the selected component's host and port arrive
+    on the injection context and are rendered into a `forward` output, so Fluent
+    Bit forwards to whichever sink the topology binds. That output speaks the
+    Fluentd forward protocol, so a sink wired there that publishes a protocol
+    other than forward, or none, halts the build; Fluentd publishes forward.
+    Fluent Bit holds no persistent state, so it renders as a stateless server.
+    Exports its HTTP monitoring endpoint's host and port to consumers, and where
+    Prometheus finds the metrics served there.
+
+    Realized for local development by a Compose Recipe, and on Kubernetes by
+    two realizations the Manifest chooses between, which differ in where the
+    records come from. `fluent-bit` synthesizes a single forwarding pod with
+    its own declared input and fetches nothing, so it is the one to reach for
+    where the build must complete with no chart repository reachable.
+    `fluent-bit-chart` renders the official Fluent Helm chart in its
+    node-collector shape — one pod per node reading that node's container logs,
+    with the cluster read grants the record-enrichment filter needs — so reach
+    for it where records are to be collected from the cluster itself. Both
+    publish the same monitoring endpoint and forward to the wired sink; for its
+    metrics the chart-backed one publishes the Service a scraper discovers every
+    node's collector behind. With the Prometheus Operator,
+    `core/prometheus-exporter` attached to the synthesized realization, port
+    `http` and path `/api/v2/metrics/prometheus`, emits a ServiceMonitor for it.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: observability
+    component.aggrega.ai/upstream-licensing: osi-approved
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # Self-inject allowlist: the component may inject resolved uses-edge values
+  # into the env delivery mechanism.
+  inject: [env]
+
+  usesSchema:
+    # The downstream sink Fluent Bit forwards to. The selected component's
+    # provides host and port arrive on the injection context; each Recipe
+    # renders them into the Host and Port of a `forward` output. That output
+    # speaks the Fluentd forward protocol and the selector admits any server, so
+    # a sink publishing a protocol other than forward, or none, halts the build;
+    # Fluentd publishes forward.
+    forward_target:
+      selector: "component.aggrega.ai/type in (server, stateful-server)"
+      inject: [env]
+
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      forward_match:
+        type: string
+        default: "*"
+        description: Tag-match pattern selecting which log records are shipped on the forward output wired to the `forward_target` socket. Defaults to `*`, which forwards every record.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 2020
+        description: HTTP port the Fluent Bit monitoring endpoint listens on. Most operators should omit this and let the Recipe assign the default (2020).
+      # Read only by the compose realization, which publishes the monitoring
+      # port on the host so the endpoint opens on the developer's own machine.
+      # False, it publishes the port on the host's loopback address, 127.0.0.1,
+      # only; true, on every host interface, where any machine that reaches the
+      # host reaches it. The endpoint checks no caller, so this decides who
+      # outside the stack can read the processor's metrics, health, uptime and
+      # build and plugin listings. Containers on the compose network reach the
+      # port either way. The Kubernetes realizations publish no host port and
+      # ignore it; there the port stays inside the cluster.
+      publish_on_all_interfaces:
+        type: boolean
+        default: false
+        description: Publishes the monitoring port on every host interface rather than on the host's loopback address only. Read only by the compose realization; false publishes the port on 127.0.0.1 only, and true on every host interface, where any machine that reaches the host reaches it — the monitoring endpoint authenticates no caller and answers metrics, health, uptime and build and plugin listings. The Kubernetes realizations ignore it.
+      engine_version:
+        type: string
+        default: "4.0.8"
+        description: Fluent Bit container image tag. Selects the image tag on container targets; the chart-backed realization pins its own image tag.
+      source_version:
+        type: string
+        description: Version of the Helm chart the chart-backed realization pulls. Read only by that realization; the workload-synthesis and Compose realizations pull no source artifact and ignore it. Changing it away from the Recipe's default does not guarantee value-mapping compatibility with the new chart.
+      compute:
+        cpu:
+          type: string
+          default: 500m
+        memory:
+          type: string
+          default: 512Mi
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name of the Service fronting the processor's
+          monitoring endpoint. A consumer that scrapes or probes the processor
+          dials this name together with `port`.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port that monitoring endpoint answers on. It follows the port an
+          operator set in the Release, so a consumer reads it rather than
+          assuming a default.
+      protocol:
+        type: string
+        description: How the published address is spoken to — `http`, so a consumer reaches the monitoring endpoint with an HTTP client.
+      # Where Prometheus finds Fluent Bit's own metrics. Fluent Bit serves them
+      # in the Prometheus format at /api/v2/metrics/prometheus on the
+      # monitoring endpoint, which every realization runs, and asks no
+      # credential for them; that listener otherwise answers health, uptime
+      # and build and plugin listings, and this catalog switches on neither
+      # its chunk-trace routes nor its hot reload. A Recipe publishes exactly
+      # one of two shapes and leaves the other empty:
+      #   - metrics_endpoint, one address, where one Fluent Bit process stands
+      #     behind the published address: the synthesized and Compose Recipes,
+      #     which spell it out in full from their own host and port, because a
+      #     provides entry cannot read another;
+      #   - metrics_service, metrics_service_port and metrics_path on the
+      #     chart-backed Recipe, which runs one collector pod per node behind
+      #     one Service: one address would reach a different node's collector
+      #     on each scrape, so a scraper instead discovers every endpoint
+      #     behind that Service.
+      # None of the keys carries a namespace: a scraper reads where the target
+      # runs from its own connection. On a cluster running the Prometheus
+      # Operator, core/prometheus-exporter attached to the synthesized
+      # realization, with its port set to http and its path to
+      # /api/v2/metrics/prometheus, selects that realization's Service; the
+      # chart's Service carries the chart's own name label, which the
+      # Feature's ServiceMonitor does not select.
+      metrics_endpoint:
+        type: string
+        description: >
+          The full address Prometheus scrapes this component's metrics at —
+          scheme, host, port and path,
+          `http://<host>:<port>/api/v2/metrics/prometheus` on the monitoring
+          endpoint. Empty on the chart-backed realization, which publishes
+          `metrics_service` instead.
+      metrics_service:
+        type: string
+        description: >
+          Name of the Service every node's collector sits behind, for a scraper
+          that discovers each endpoint of that Service rather than scraping one
+          address. Set by the chart-backed realization, beside
+          `metrics_service_port` and `metrics_path`; empty on the others.
+      metrics_service_port:
+        type: string
+        description: >
+          Name of the port of `metrics_service` that carries the metrics,
+          `http`, the monitoring endpoint's port. Set and empty together with
+          `metrics_service`.
+      metrics_path:
+        type: string
+        description: >
+          Path the metrics are served at, `/api/v2/metrics/prometheus`,
+          published beside `metrics_service`. Empty where the component
+          publishes `metrics_endpoint`, which carries its own path.

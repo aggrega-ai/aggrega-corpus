@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Aggregate
+metadata:
+  name: monitoring-demo
+  version: "1.0.0"
+  description: >
+    Six HTTP services across a nested platform topology. Developer intent
+    declares only the services — none carries a monitoring `features:` block.
+    Monitoring is attached entirely by an operator annotation in the Release,
+    expanded per component by the Manifest's features.annotations binding.
+spec:
+  components:
+    gateway: { type: example/compute/service }
+    api: { type: example/compute/service }
+    worker: { type: example/compute/service }
+    ledger: { type: example/compute/service }
+    etl: { type: example/compute/service }
+    reconcile: { type: example/compute/service }

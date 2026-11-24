@@ -1,0 +1,300 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: postgres-cloudnative-pg
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    PostgreSQL realized as a Cluster custom resource the CloudNativePG control
+    plane reconciles, rather than a directly synthesized StatefulSet — the
+    controller-driven realization of the same PostgreSQL component, selectable in
+    the Manifest alongside the synthesis recipe and the reference recipe. The
+    recipe emits one Cluster conformant to the postgresql.cnpg.io/v1 API; the
+    controller turns it into a running server, the Services that reach it and the
+    Secret holding the database owner's password, and creates the initial database
+    and its owning role from the developer's own values. provides.host is the
+    read-write Service, so a consumer wires to it exactly as it would to the
+    synthesized realization. The Cluster, and the ConfigMap carrying any bootstrap
+    scripts, are written into the namespace the Release, or else the Aggregate, names through the
+    aggrega.ai/namespace annotation, where one is set. Credential custody is the
+    operator's choice: infra.credentials generated leaves the owner's password
+    with the controller, and supplied points it at an
+    existing Secret named in infra.credentials_secret. The CloudNativePG control
+    plane is a runtime prerequisite: the build halts unless the operator affirms
+    it is installed (infra.control_plane_present), so no custom resource is
+    emitted into a cluster that cannot reconcile it. Reach for this realization
+    where the control plane is already in place; reach for the synthesis recipe
+    where it is not, and for the reference recipe where the server already exists
+    outside the deployment.
+    A core/backup attachment bound to helm/backup-cloudnative-pg is realized
+    through the Barman Cloud plugin.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/datastore/postgres:1.0.0
+
+  # The controller fixes the server's listen port: it writes the port setting into
+  # every instance's own configuration, so the custom resource carries no field for
+  # it and no server setting can move it. The published contract and the assertion
+  # below both read this one value, so what a consumer is handed and what the
+  # assertion accepts cannot drift apart.
+  #
+  # The Barman Cloud plugin's own name, which the Cluster's plugin entry carries
+  # when a core/backup attachment is backed up through it (see the Cluster
+  # below). helm/backup-cloudnative-pg reads this local from its assertions —
+  # they see the locals of the component the attachment is on — and refuses an
+  # attachment on any realization that does not declare it, since only this one
+  # writes the entry its schedule needs.
+  locals:
+    server_port: "5432"
+    barman_cloud_plugin: "barman-cloud.cloudnative-pg.io"
+
+  # The controller creates three Services for an instance, named by appending a
+  # suffix to the custom resource's own name: `-rw` routes to the primary and
+  # accepts writes, `-ro` routes to the replicas alone, and `-r` routes to any
+  # instance. provides.host is the read-write one. It is the only one that answers
+  # on a single-instance cluster — `-ro` selects replicas, of which there are none
+  # until high availability is enabled — and it is the address the controller
+  # itself writes into the connection material it generates for the database. The
+  # host is the bare in-cluster name, carrying no namespace, matching the synthesis
+  # realization's contract so consumers are realization-agnostic; a consumer in
+  # another namespace qualifies it on its own side (caller-side routing).
+  #
+  # The read-only endpoint stays reachable under the same naming rule, but it is
+  # not published: the provides contract is the Component's and is shared by every
+  # realization of it, and a key only one realization can fill is one a consumer
+  # cannot depend on.
+  #
+  # The metrics keys say where a scraper finds the database's metrics. The
+  # controller runs an exporter in every instance it manages, whatever the
+  # Cluster says, at /metrics on a container port named metrics, and labels
+  # each instance pod with cnpg.io/cluster set to the Cluster's name and
+  # cnpg.io/podRole set to instance. The selector takes both labels, as the
+  # controller's own monitor does, because the pods of a connection pooler
+  # created for this Cluster carry the first label too, with a metrics port of
+  # their own. The labels and the port name are the controller's, read from its
+  # v1.29.3 and v1.30.1 releases, and evolve with it like every other detail
+  # here. No Service carries the port, so the pods are discovered directly.
+  provides:
+    host: "{{ .context.instance_id }}-rw"
+    port: "{{ .locals.server_port }}"
+    user: "{{ .values.user }}"
+    database: "{{ .values.database }}"
+    protocol: "postgres"
+    metrics_pod_selector: "cnpg.io/cluster={{ .context.instance_id }},cnpg.io/podRole=instance"
+    metrics_pod_port: "metrics"
+    metrics_path: "/metrics"
+
+  # Five declared conditions, each halting rather than emitting something that
+  # renders cleanly and does not work.
+  assertions:
+    # The CloudNativePG control plane must exist in the target cluster before a
+    # Cluster custom resource can reconcile. The compiler cannot inspect cluster
+    # state, so the prerequisite is declared: an operator affirms it in the Release,
+    # and an unaffirmed build halts here rather than emitting an orphan custom
+    # resource.
+    cloudnative_pg_prerequisite: >-
+      {{- if not .infra.control_plane_present -}}
+      {{- fail "the CloudNativePG control plane must be installed in the target cluster before this realization emits its Cluster custom resource; once the control plane is present, affirm the prerequisite by setting infra.control_plane_present to true in the Release" -}}
+      {{- end -}}
+    # The listen port is the controller's, not the operator's. A port set here would
+    # be accepted, validated and then reach no emitted byte, and the consumer would
+    # be handed a port the server does not answer on.
+    cloudnative_pg_fixed_port: >-
+      {{- if ne (printf "%v" .infra.port) .locals.server_port -}}
+      {{- fail "this realization runs the server on port 5432 and cannot move it: the controller writes the port setting into every instance's own configuration, so the custom resource carries no field for it; leave infra.port at 5432 here, or select the synthesis recipe in the Manifest, which does honor another port" -}}
+      {{- end -}}
+    # The custom resource takes server configuration as named settings rather than
+    # as a configuration file, so a raw block has nowhere to go.
+    cloudnative_pg_custom_config: >-
+      {{- if and (hasKey (default dict .values) "custom_config") .values.custom_config -}}
+      {{- fail "the Cluster custom resource takes server configuration as named settings rather than as a configuration file, so values.custom_config would reach no emitted byte on this realization; set the individual settings under infra.overrides.parameters, which this realization writes into the custom resource, or select the synthesis recipe in the Manifest, which does honor the raw block" -}}
+      {{- end -}}
+    # Supplied credentials need a Secret to read them from. An empty name would
+    # render a custom resource the controller waits on forever.
+    cloudnative_pg_supplied_credentials_secret: >-
+      {{- if and (eq .infra.credentials "supplied") (not .infra.credentials_secret) -}}
+      {{- fail "infra.credentials is supplied, so name the existing Secret the controller reads the database owner's credentials from in infra.credentials_secret; leave infra.credentials at generated to have the controller create and own that Secret instead" -}}
+      {{- end -}}
+    # On this realization the controller owns the database's credentials, so an
+    # attached credential is a request the recipe cannot fulfil. Dropping it quietly
+    # would leave the application holding one password and the database another —
+    # a build that succeeds and a deployment that cannot authenticate.
+    cloudnative_pg_credential_slots: >-
+      {{- if or (hasKey (default dict .features) "password") (hasKey (default dict .features) "app_user_password") -}}
+      {{- fail "a credential is attached to the password or app_user_password slot, but on this realization the controller owns the database's credentials: it either generates the owner's password or reads it from the Secret named in infra.credentials_secret, so an attached credential would reach no emitted byte and the application would authenticate with a password the database does not have; remove the attachment and set infra.credentials, or select the synthesis recipe in the Manifest, which does wire the slot" -}}
+      {{- end -}}
+
+  # This Recipe reads from infra.overrides:
+  #   parameters - map[string]string (server settings written to the custom
+  #                resource's own configuration surface; the route this realization
+  #                offers in place of the raw values.custom_config block, which
+  #                halts above)
+  #
+  # infra.ha is honored here and by no other realization of this component: the
+  # instance count the custom resource carries is exactly one primary plus the
+  # requested read replicas, which is what makes the controller's read-only
+  # endpoint answer at all. With high availability off, one instance is rendered.
+  #
+  # Backup is a core/backup attachment, realized on this database by
+  # helm/backup-cloudnative-pg, the FeatureRecipe the Manifest binds to it, as
+  # described beside the Cluster below. helm/backup-velero, helm/backup-k8up,
+  # helm/backup-kubestash and helm/backup-kasten each select the workloads a
+  # component renders, and this realization renders a custom resource whose
+  # pods the controller creates, so each refuses the attachment by name.
+  # values.custom_config and infra.port are honored by the synthesis realization
+  # alone, which is why they halt above rather than passing quietly.
+  # values.app_user names a role the synthesis
+  # realization creates only when a credential is attached to app_user_password,
+  # and that attachment halts here, so the name is never quietly dropped.
+  #
+  # The controller does not enable superuser access by default, and this recipe
+  # does not ask it to: the role named by values.user owns the application database
+  # and is the role a consumer signs in as, which is the account the published
+  # contract names.
+  #
+  # The storage class is written only when the Release names one. The controller
+  # applies any class the custom resource carries to the claims it creates, and
+  # Kubernetes reads an empty class as a request for a volume with no class at
+  # all, while an absent one leaves each claim to the cluster's default storage
+  # class.
+  #
+  # The Cluster, and the ConfigMap it reads bootstrap scripts from, are written
+  # into the namespace the Release, or else the Aggregate, names for this component through the
+  # aggrega.ai/namespace annotation, on its boundary or its own entry, and the
+  # controller creates the instance pods, their Services and the owner's Secret
+  # there, so they land where a consumer reads that the database runs — the
+  # namespace it qualifies host with, and the one a scraper discovers the
+  # instance pods in. The provider does not place an artifact on its own. Where
+  # no namespace is named the field is omitted, and both land wherever the
+  # applying tool puts them.
+  #
+  # Backup. A core/backup attachment the Manifest binds to
+  # helm/backup-cloudnative-pg publishes the name of the Barman Cloud plugin
+  # ObjectStore it writes, as provides.object_store. For such an attachment the
+  # Cluster names the plugin in its plugins list, as its write-ahead-log
+  # archiver, with that ObjectStore as the one it writes to: the controller then
+  # archives the log continuously and the attachment's ScheduledBackup takes its
+  # base backups through the plugin. The operator's own object-store backup,
+  # deprecated since CloudNativePG 1.26 in favour of the plugin, is never
+  # written. An attachment another backup product realizes publishes no
+  # object_store and leaves the Cluster as it is, and so does a Cluster carrying
+  # no attachment; two attachments publishing one halt, since a Cluster archives
+  # its log through one plugin entry. The plugin itself is installed by
+  # core/storage/barman-cloud-plugin.
+  artifacts:
+    # The developer's bootstrap scripts, carried as a ConfigMap the custom resource
+    # references by key. The entry renders empty — and is therefore skipped,
+    # emitting no file — when no scripts are set, so an Aggregate that sets none
+    # emits no ConfigMap at all. The controller runs each referenced key as SQL in
+    # the application database once the cluster is created, in the order the
+    # references are listed; the synthesis realization runs the same keys as files
+    # on the server's own first-initialization path, where shell content is also
+    # accepted. Content that is not SQL therefore belongs on the synthesis
+    # realization.
+    initdb-configmap.yaml: |
+      {{- if .values.init_scripts -}}
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: {{ .context.instance_id }}-initdb
+        {{- $ns := "" }}
+        {{- if .context.annotations }}
+          {{- $raw := optional (optional (default dict .context.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict .context.annotations) "aggregate" dict) "aggrega.ai/namespace" "") }}
+          {{- if $raw }}{{- $ns = $raw }}{{- end }}
+        {{- end }}
+        {{- with $ns }}
+        namespace: "{{ . }}"
+        {{- end }}
+      data:
+      {{- range $name, $content := .values.init_scripts }}
+        {{ $name }}: |
+      {{ $content | indent 4 }}
+      {{- end }}
+      {{- end }}
+    cluster.yaml: |
+      apiVersion: postgresql.cnpg.io/v1
+      kind: Cluster
+      metadata:
+        name: {{ .context.instance_id }}
+        {{- $ns := "" }}
+        {{- if .context.annotations }}
+          {{- $raw := optional (optional (default dict .context.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict .context.annotations) "aggregate" dict) "aggrega.ai/namespace" "") }}
+          {{- if $raw }}{{- $ns = $raw }}{{- end }}
+        {{- end }}
+        {{- with $ns }}
+        namespace: "{{ . }}"
+        {{- end }}
+      spec:
+        {{- if .infra.ha.enabled }}
+        instances: {{ add1 .infra.ha.read_replicas }}
+        {{- else }}
+        instances: 1
+        {{- end }}
+        imageName: "ghcr.io/cloudnative-pg/postgresql:{{ .infra.engine_version }}"
+        storage:
+          size: "{{ .infra.storage.size }}"
+          {{- with .infra.storage.type }}
+          storageClass: "{{ . }}"
+          {{- end }}
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+        {{- if and .infra.overrides .infra.overrides.parameters }}
+        postgresql:
+          parameters:
+            {{- range $name, $setting := .infra.overrides.parameters }}
+            {{ $name }}: "{{ $setting }}"
+            {{- end }}
+        {{- end }}
+        {{- $archive := list }}
+        {{- range $attachment, $feature := (default dict .features) }}
+          {{- if eq (toString (optional $feature "type" "")) "core/backup" }}
+            {{- with optional (optional $feature "provides" dict) "object_store" "" }}
+              {{- $archive = append $archive (dict "attachment" $attachment "store" .) }}
+            {{- end }}
+          {{- end }}
+        {{- end }}
+        {{- if gt (len $archive) 1 }}
+          {{- $names := list }}
+          {{- range $archive }}{{ $names = append $names (printf "%q" .attachment) }}{{ end }}
+          {{- fail (printf "%q carries %d core/backup attachments backed up through the Barman Cloud plugin (%s), and a CloudNativePG Cluster archives its write-ahead log through one plugin entry; attach core/backup to %q once" .context.instance_id (len $archive) (join ", " $names) .context.instance_id) }}
+        {{- end }}
+        {{- range $archive }}
+        plugins:
+          - name: {{ toJson $.locals.barman_cloud_plugin }}
+            isWALArchiver: true
+            parameters:
+              barmanObjectName: {{ toJson .store }}
+        {{- end }}
+        bootstrap:
+          initdb:
+            database: "{{ .values.database }}"
+            owner: "{{ .values.user }}"
+            {{- with .values.encoding }}
+            encoding: "{{ . }}"
+            {{- end }}
+            {{- with .values.locale }}
+            locale: "{{ . }}"
+            {{- end }}
+            {{- if eq .infra.credentials "supplied" }}
+            secret:
+              name: "{{ .infra.credentials_secret }}"
+            {{- end }}
+            {{- if .values.init_scripts }}
+            postInitApplicationSQLRefs:
+              configMapRefs:
+              {{- range $name, $content := .values.init_scripts }}
+                - name: {{ $.context.instance_id }}-initdb
+                  key: {{ $name }}
+              {{- end }}
+            {{- end }}

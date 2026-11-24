@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Manifest
+metadata:
+  name: cross-boundary-compose-manifest
+  version: "1.0.0"
+  description: >
+    Ops mapping for the compose variant. Recipe and FeatureRecipe selection is
+    by explicit Manifest mapping: each component type binds to its Recipe and
+    each feature type to its FeatureRecipe.
+spec:
+  mappings:
+    components:
+      type:
+        core/devtool/adminer: compose/adminer-recipe:1.0.0
+        core/datastore/postgres: compose/postgres:1.0.0
+    features:
+      type:
+        core/compose-bridge:1.0.0: compose/compose-bridge-fr:1.0.0

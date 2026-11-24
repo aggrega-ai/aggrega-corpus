@@ -1,0 +1,141 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/gateway/envoy-ai-gateway-operator
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    The Envoy AI Gateway control plane: a controller that turns the project's
+    AI routes, model backends and policies into Envoy configuration, which
+    Envoy Gateway takes from it by calling the controller's extension server,
+    and a mutating webhook that adds the AI external processor to each
+    data-plane pod Envoy Gateway creates. It publishes the address of its
+    extension server for Envoy Gateway to call, and as `metrics_endpoint` the
+    one its own metrics are served at. Its Helm Recipe installs the
+    project's own chart and, beside it, the six AI Gateway custom-resource
+    definitions.
+
+    The controller runs under the cluster role the project's chart grants, and
+    that grant spans the whole cluster: the controller may read, create,
+    change and delete every Secret, Pod, Service, Deployment and DaemonSet in
+    every namespace, and every resource of the Gateway API, Envoy Gateway, AI
+    Gateway and inference-pool API groups.
+
+    The webhook's serving certificate is a cert-manager Certificate, signed by
+    a self-signed Issuer the Recipe renders, so cert-manager must already run
+    in the cluster, unless infra.webhook_tls_secret names a Secret holding the
+    certificate, in which case cert-manager is not needed. The controller
+    expects the Envoy Gateway it extends in the `envoy-gateway-system`
+    namespace. A QuotaPolicy applied by hand is not
+    enforced: its rate-limit service is installed by nothing here; a token
+    budget on this path is core/period-budget on Envoy Gateway.
+
+    MCP session identifiers are encrypted under a key derived from the seed in
+    the Secret infra.mcp_session_seed_secret names; with none named it is the
+    chart's published default seed, a public value, so name one before an MCP
+    route is served through this controller.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: gateway
+    component.aggrega.ai/upstream-licensing: osi-approved
+    # Extension server: the controller serves Envoy Gateway's extension
+    # protocol — Envoy Gateway calls it over gRPC, at the address this
+    # component publishes, to have the Envoy configuration it translates for
+    # its data plane adjusted for the AI routes — and the value names whose
+    # protocol that is. It is what an Envoy Gateway's extension socket selects,
+    # so that socket takes this controller and refuses any other gateway. The
+    # value names what the product serves, not a configured state: the
+    # controller serves its extension server whether or not an Envoy Gateway
+    # is wired to it.
+    gateway.aggrega.ai/extension-server: envoy-gateway
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  schema:
+    infra:
+      # Operator container image running the Envoy AI Gateway control plane.
+      image:
+        type: string
+        default: "docker.io/envoyproxy/ai-gateway-controller:v1.1.0"
+        description: Envoy AI Gateway controller image the control-plane Deployment runs.
+      # The seed the controller derives the key encrypting MCP session
+      # identifiers from — which Secret holds it differs per cluster, so it is
+      # operator sizing, and it carries no default because no Secret name could
+      # be right for every cluster. The Secret's layout is this key's contract:
+      # one `seed` entry, as an existing-Secret key elsewhere in the catalog
+      # names the entries its Secret carries.
+      mcp_session_seed_secret:
+        type: string
+        description: >
+          Name of an existing Secret the controller reads its MCP
+          session-encryption seed from. The Secret lives in the controller's
+          own namespace and carries a `seed` entry holding a long random
+          string. Set, the cluster passes the seed from that Secret to the
+          controller's argument, through an environment variable, when it
+          starts the container, so no rendered file carries it, and the
+          controller does not start while the Secret or the entry is missing.
+          Unset, the controller runs with the project chart's published
+          default seed, which anyone reading the chart knows, so an MCP route
+          served through this controller has its session identifiers encrypted
+          under a key derived from a public value; set this before serving an
+          MCP route. The Secret is referenced and never created here.
+      # The webhook's serving certificate, for an operator who holds one rather
+      # than running cert-manager. Which Secret holds it differs per cluster,
+      # so it is operator sizing, and it carries no default because no Secret
+      # name could be right for every cluster. The Secret's layout is this
+      # key's contract: the three entries the controller reads its certificate
+      # from, under the names the chart and the controller give them.
+      webhook_tls_secret:
+        type: string
+        description: >
+          Name of an existing Secret holding the certificate the controller's
+          webhook serves. The Secret lives in the controller's own namespace
+          and carries three entries: `tls.crt`, a certificate valid for
+          `<host>.<namespace>.svc`, the name the cluster's API server calls the
+          webhook at, where `<host>` is the Service name this component
+          publishes and `<namespace>` the controller's namespace; `tls.key`,
+          its private key; and `ca.crt`, the CA certificate it is signed by.
+          Set, the controller's pod mounts that Secret and the controller, when
+          it starts, writes `ca.crt` into the webhook configuration as the CA
+          bundle the API server verifies the webhook against, and cert-manager
+          is not needed. It writes that bundle only when it starts, so after
+          the Secret's CA changes, restart the controller for the API server to
+          trust the webhook's new certificate.
+          Unset, the certificate is a cert-manager Certificate the Recipe
+          renders, and cert-manager must already run in the cluster. The
+          Secret is referenced and never created here.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name of the controller's Service, the name alone
+          without a namespace; a consumer in another namespace qualifies it
+          with the namespace the controller is placed in. Envoy Gateway calls
+          the controller's extension server here.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port that Service serves the extension server on, which Envoy
+          Gateway calls over gRPC.
+      # The address a Prometheus server scrapes the controller's own metrics
+      # at. The controller serves them in the Prometheus format at /metrics on
+      # 8080, the default metrics listener of the Kubernetes controller library
+      # it is built on, always on and asking no credential, and the project's
+      # chart puts that port on the same Service as the extension server, so
+      # the address is that Service's name on another port. The Recipe
+      # publishes it spelled out in full, because a provides entry cannot read
+      # another.
+      metrics_endpoint:
+        type: string
+        description: >
+          The full address Prometheus scrapes this component's metrics at —
+          scheme, host, port and path, `http://<host>:8080/metrics` on the
+          controller's Service, whose metrics port is not the published `port`.
+          Empty where the component serves none reachable.

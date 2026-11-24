@@ -1,0 +1,270 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: cognee
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    A semantic-memory store on Kubernetes via the helm provider's Workload
+    synthesis, running the official upstream image directly (no external Helm
+    chart). The graph, the embeddings and the bookkeeping tables all live in
+    files under one persistent volume, so the workload renders as a StatefulSet
+    with that volume mounted at the state root, alongside the governing headless
+    Service the stateful form requires and a ClusterIP Service publishing the
+    API port. This realization is where the component's engine value is earned:
+    the container's configuration names the graph engine the entities and
+    relations are written into, the store the embeddings are written into, the
+    models the ingested material is read and encoded with, and the ontology the
+    extracted names are resolved against — so the rendered artifact shows how
+    memory is built rather than leaving it to the running process to reveal. A
+    store that only indexed vectors would carry none of those settings. A
+    credential attached on a model connection reaches the server as an env
+    secretKeyRef — LLM_API_KEY for the extraction model, EMBEDDING_API_KEY for
+    the embedding model — so its value never appears in the rendered manifest;
+    the component's model_api_key is read only for a socket left unwired, under
+    the same names. With nothing attached, the server holds no model credential.
+    provides.host is the bare, self-contained in-cluster service name of the
+    synthesized ClusterIP Service — it carries no namespace, so the recipe is
+    independent of where it is deployed. A consumer in another namespace
+    qualifies the host with the target namespace on its own side (caller-side
+    routing). The configuration contract is authored against cognee 1.5.3.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/datastore/cognee:1.0.0
+  # This Recipe reads no infra.overrides keys.
+  #
+  # The entry below is the single authored home for a value the workload
+  # template reads in several places: state_root is the mount point of the
+  # persistent volume and the parent of every directory the server writes into.
+  locals:
+    state_root: /var/lib/cognee
+  # provides is evaluated before the workload and cannot read it, so the port has
+  # one authored home in .infra.port that every reader dereferences — provides.port
+  # and provides.endpoint here, and below the server's own listen port, the
+  # container port and both Services. protocol is "http": the published port
+  # serves the API over HTTP, and a consumer composing a URL needs the scheme
+  # rather than the product name.
+  #
+  # host and endpoint spell the Service name out twice on purpose. It is the name
+  # the helm provider gives the Service of the `default` service key,
+  # "<rendered_name>-default", and it is read from .context.rendered_name, which
+  # a locals entry cannot read and a provides entry cannot take from another, so
+  # there is no home either could dereference instead — the repetition is forced,
+  # not a choice, and the two must be edited together.
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ .infra.port }}"
+    endpoint: "http://{{ .context.rendered_name }}-default:{{ .infra.port }}"
+    protocol: "http"
+  # A Release may write a key of an infra group as an empty string —
+  # `compute.cpu: ""`, or `storage.size: ""` — and a key written that way
+  # replaces the Component's default rather than falling back to it. Rendered,
+  # that would emit a workload with no CPU or memory limit, or a volume that
+  # requests no size: a Release materially different from the one the
+  # Component's declared defaults describe, with nothing in the output saying so.
+  # The build halts here instead, naming the key and the group it belongs to, so
+  # the fix is one line in the Release. A key the Release leaves out takes the
+  # Component's default. The storage class is not checked: left unset, the
+  # volume is provisioned from the cluster's default storage class.
+  assertions:
+    compute_group_complete: >-
+      {{- if not (optional (default dict .infra.compute) "cpu" "") -}}
+      {{- fail "this Release sets part of infra.compute on the semantic-memory store but leaves compute.cpu empty, so the rendered workload would carry no CPU request or limit: set both compute.cpu and compute.memory together, or remove the compute block entirely to take the component's defaults" -}}
+      {{- end -}}
+      {{- if not (optional (default dict .infra.compute) "memory" "") -}}
+      {{- fail "this Release sets part of infra.compute on the semantic-memory store but leaves compute.memory empty, so the rendered workload would carry no memory request or limit: set both compute.cpu and compute.memory together, or remove the compute block entirely to take the component's defaults" -}}
+      {{- end -}}
+    storage_group_complete: >-
+      {{- if not (optional (default dict .infra.storage) "size" "") -}}
+      {{- fail "this Release leaves storage.size empty on the semantic-memory store, so the rendered volume would request no size: set storage.size to the size the volume needs, or leave it out of the Release to take the component's default" -}}
+      {{- end -}}
+  workload: |
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # form: stateful selects a StatefulSet on the helm provider; the
+    # persistentTemplate volume and the headless Service below are companions of
+    # this form. The graph and the embeddings are the point of this store rather
+    # than a cache of something else, so the volume is not optional to it.
+    form: stateful
+    replicas: 1
+    containers:
+      main:
+        image: "cognee/cognee:{{ .infra.engine_version }}"
+        # The server reads its whole configuration from the environment. The
+        # block below is what makes this a semantic-memory realization rather
+        # than a generic one, and it is grouped that way on purpose.
+        #
+        # The three storage settings name where memory is kept: the graph engine
+        # the extracted entities and relations are written into, the store the
+        # embeddings of the same material are written into, and the tables that
+        # record what has been ingested. All three are file-based engines the
+        # image ships, writing under the state root below, which is why one
+        # volume holds the whole of this component's memory and no external
+        # store is wired. A realization that instead points the graph at a
+        # separate graph server is a different realization of the same
+        # component, selected per deployment through the Manifest.
+        #
+        # The listen port and bind address are set from infra so the server's
+        # own port, the container port and both published Service ports cannot
+        # drift apart.
+        variables:
+          HTTP_PORT: "{{ .infra.port }}"
+          BIND_ADDRESS: "0.0.0.0"
+          DATA_ROOT_DIRECTORY: "{{ .locals.state_root }}/data"
+          SYSTEM_ROOT_DIRECTORY: "{{ .locals.state_root }}/system"
+          GRAPH_DATABASE_PROVIDER: "kuzu"
+          VECTOR_DB_PROVIDER: "lancedb"
+          DB_PROVIDER: "sqlite"
+          DB_NAME: "cognee_db"
+          # The provider families the server reads and encodes ingested material
+          # with. A wired socket below replaces the address and the model name
+          # for its side; the family stays whatever the Aggregate declared,
+          # because it selects which client the server constructs.
+          LLM_PROVIDER: "{{ .values.extraction_provider }}"
+          EMBEDDING_PROVIDER: "{{ .values.embedding_provider }}"
+    {{- with .values.embedding_dimensions }}
+          EMBEDDING_DIMENSIONS: "{{ . }}"
+    {{- end }}
+    {{- if .values.access_control_enabled }}
+          ENABLE_BACKEND_ACCESS_CONTROL: "true"
+    {{- end }}
+    {{- with .values.ontology_file_path }}
+          # Grounding against a deployment-supplied ontology. The resolver is
+          # named alongside the path so the rendered artifact says which document
+          # format is read, rather than leaving a reader to infer it from the
+          # filename. Emitted only when a path is set; with none, extraction
+          # proceeds ungrounded and neither variable appears.
+          ONTOLOGY_RESOLVER: "rdflib"
+          ONTOLOGY_FILE_PATH: "{{ . }}"
+    {{- end }}
+    {{- with .values.extraction_rate_limit_per_minute }}
+          # The interval is the minute the knob is denominated in, not a second
+          # tunable: the component exposes a per-minute ceiling, so the count
+          # comes from the Aggregate and the window is fixed at 60 seconds here.
+          LLM_RATE_LIMIT_ENABLED: "true"
+          LLM_RATE_LIMIT_REQUESTS: "{{ . }}"
+          LLM_RATE_LIMIT_INTERVAL: "60"
+    {{- end }}
+        # Each outbound edge is matched on its socket name: the extraction_model
+        # edge contributes the address and model name the server reads ingested
+        # material with, and the embedding_model edge the address and model name
+        # it encodes with. Both sockets are optional, so wiring neither emits none
+        # of these variables and the server reaches the declared provider families
+        # at their own addresses. Each address is a
+        # deterministic pointer string the running server resolves per request.
+    {{- range $alias, $edge := .context.uses }}
+    {{- if eq $edge.socket "extraction_model" }}
+          LLM_ENDPOINT: "{{ $edge.provides.endpoint }}"
+          LLM_MODEL: "{{ $edge.provides.model }}"
+    {{- end }}
+    {{- if eq $edge.socket "embedding_model" }}
+          EMBEDDING_ENDPOINT: "{{ $edge.provides.endpoint }}"
+          EMBEDDING_MODEL: "{{ $edge.provides.model }}"
+    {{- end }}
+    {{- end }}
+        # Each model side's key is chosen here, once: a WIRED socket's key is the
+        # credential on its own connection and never the component's
+        # model_api_key, which serves only a socket left UNWIRED. Extraction's
+        # key is delivered as LLM_API_KEY and embedding's as EMBEDDING_API_KEY,
+        # each as an env secretKeyRef, so no value renders into the manifest.
+        # The embedding key is named explicitly because the server, given none,
+        # may present LLM_API_KEY to the embedding provider too. Nothing
+        # attached emits no credential env.
+    {{- $extractionWired := false }}
+    {{- $extractionConnection := "" }}
+    {{- $embeddingWired := false }}
+    {{- $embeddingConnection := "" }}
+    {{- range $alias, $edge := .context.uses }}
+    {{- if eq $edge.socket "extraction_model" }}
+    {{- $extractionWired = true }}
+    {{- if hasKey (default dict $edge.features) "credential" }}
+    {{- $extractionConnection = $alias }}
+    {{- end }}
+    {{- end }}
+    {{- if eq $edge.socket "embedding_model" }}
+    {{- $embeddingWired = true }}
+    {{- if hasKey (default dict $edge.features) "credential" }}
+    {{- $embeddingConnection = $alias }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- $componentKey := hasKey (default dict .features) "model_api_key" }}
+    {{- $extractionFromSlot := and (not $extractionWired) $componentKey }}
+    {{- $embeddingFromSlot := and (not $embeddingWired) $componentKey }}
+    {{- if or $extractionConnection $extractionFromSlot $embeddingConnection $embeddingFromSlot }}
+        attachments:
+    {{- if $extractionConnection }}
+          LLM_API_KEY:
+            connection: "{{ $extractionConnection }}"
+            from: credential
+            as: env
+    {{- else if $extractionFromSlot }}
+          LLM_API_KEY:
+            from: model_api_key
+            as: env
+    {{- end }}
+    {{- if $embeddingConnection }}
+          EMBEDDING_API_KEY:
+            connection: "{{ $embeddingConnection }}"
+            from: credential
+            as: env
+    {{- else if $embeddingFromSlot }}
+          EMBEDDING_API_KEY:
+            from: model_api_key
+            as: env
+    {{- end }}
+    {{- end }}
+        ports:
+          http: {{ .infra.port }}
+        # The server serves /health on its API port, answering 200 when it is
+        # ready and 503 when it is not; the image's own health check asks the
+        # same endpoint. Both probes are sent there. The liveness timing is the
+        # image's own check's: a first check after 40 s, then every 30 s with a
+        # 10 s timeout, restarting after three misses in a row.
+        health:
+          ready:
+            http: /health
+            periodSeconds: 10
+            timeoutSeconds: 10
+          live:
+            http: /health
+            initialDelaySeconds: 40
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+        # The resource quantities are quoted so the rendered value stays a string
+        # whatever the Release supplies. Rendered bare, a whole-core quantity
+        # such as 1 or 2 re-parses as a YAML integer and fails workload validation,
+        # which wants a string here; a milli quantity such as 500m happens not to.
+        # Quoting removes the difference, so every legal quantity a Release may
+        # write renders and validates alike.
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+        volumeMounts:
+          - name: state
+            path: "{{ .locals.state_root }}"
+    volumes:
+      state:
+        persistentTemplate:
+          size: "{{ .infra.storage.size }}"
+          class: "{{ .infra.storage.type }}"
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          http: {{ .infra.port }}
+      headless:
+        type: Headless
+        ports:
+          http: {{ .infra.port }}

@@ -1,0 +1,119 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/datastore/etcd
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    etcd, a distributed, strongly-consistent key-value store. This component
+    runs a single-node etcd for development and lightweight coordination,
+    holding its data on a persistent volume. It serves the v3 client API over
+    HTTP with no authentication, suited to in-cluster consumers that need a
+    simple consistent key-value store or configuration backend. Provider-
+    agnostic: the same component is implemented by a Helm Recipe (synthesized
+    manifests on Kubernetes) and a Compose Recipe (local development). Exports
+    its host and client port to consumers via the uses topology. etcd serves its
+    own metrics in the Prometheus format at /metrics on its client port, on by
+    default, and every Recipe publishes that address as `metrics_endpoint`.
+  labels:
+    component.aggrega.ai/type: stateful-server
+    component.aggrega.ai/category: datastore
+    component.aggrega.ai/upstream-licensing: osi-approved
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # Self-inject allowlist: the component may inject its own provides keys into
+  # the env delivery mechanism.
+  inject: [env]
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      name:
+        type: string
+        default: node1
+        description: etcd member name (ETCD_NAME). Names the single node in the initial cluster.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      client_port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 2379
+        description: Client API port consumers connect to. Most operators should omit this and let the Recipe assign the default (2379).
+      peer_port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 2380
+        description: Peer port used for intra-cluster communication. Most operators should omit this and let the Recipe assign the default (2380).
+      engine_version:
+        type: string
+        default: "v3.5.32"
+        description: etcd version (the etcd image tag).
+      compute:
+        cpu:
+          type: string
+          default: 100m
+        memory:
+          type: string
+          default: 256Mi
+      storage:
+        type: object
+        properties:
+          size:
+            type: string
+            default: 8Gi
+          type:
+            type: string
+            description: >
+              Storage class the store's persistent volume is provisioned from on
+              Kubernetes. Leave it unset to take the cluster's default storage
+              class; set it to name another class the cluster offers. The Compose
+              Recipe names no class.
+      auto_compaction_retention:
+        type: string
+        default: "1"
+        description: Auto-compaction retention for the key-value history (ETCD_AUTO_COMPACTION_RETENTION). Defaults to 1 hour of history; without periodic compaction the backend grows unbounded and eventually trips the storage quota, after which etcd accepts only reads. Realized on the synthesized Helm and Compose targets.
+      quota_backend_bytes:
+        type: string
+        description: Backend storage quota in bytes (ETCD_QUOTA_BACKEND_BYTES). Omit to use the etcd default. When the backend database exceeds this size etcd raises a no-space alarm and accepts only reads until the history is compacted and the store defragmented. Realized on the synthesized Helm and Compose targets.
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name of the Service fronting the client API. A
+          consumer that watches or writes keys dials this name together with
+          `port`.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port that Service accepts client API requests on. It carries the
+          client port an operator set, never the peer port, which is for
+          members talking to each other.
+      protocol:
+        type: string
+        description: How the published address is spoken to — `http`, the scheme a client composes its endpoint list on.
+      # The address a Prometheus server scrapes etcd's own metrics at. etcd
+      # serves them in the Prometheus format at /metrics on every client
+      # listener, always on, and no Recipe configures authentication, so they
+      # ask no credential. That is infra.client_port, the published port. Every
+      # Recipe publishes the address spelled out in full from its own host and
+      # client port, because a provides entry cannot read another.
+      metrics_endpoint:
+        type: string
+        description: >
+          The full address Prometheus scrapes this component's metrics at —
+          scheme, host, port and path, `http://<host>:<port>/metrics` on the
+          client port. Empty where the component serves none reachable.

@@ -1,0 +1,305 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: livekit-server
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    A LiveKit media server on Kubernetes via the helm provider's Workload
+    synthesis, running the upstream livekit-server image (no external Helm
+    chart). It renders a stateless Deployment plus a ClusterIP Service and
+    declares no volume, because the server keeps room and participant state in
+    memory rather than on disk.
+
+    It is synthesized because LiveKit's own Helm chart fails the maintained
+    test: the chart its published repository serves packages a server older
+    than the one this Component pins.
+
+    Media travels over one multiplexed UDP port by default. Setting both range
+    bounds selects a contiguous UDP port range instead, which is emitted as no
+    container or service port and carries client traffic only where the pod
+    uses the node's own network. Binding the state_store edge lets several
+    replicas coordinate through the shared store, over TLS to one publishing
+    valkey-tls or redis-tls, checked against the connection's server_ca, mounted, or the
+    image's trust store. The token-signing secret
+    arrives from the api_secret credential slot by reference, so the plaintext
+    never appears in the rendered manifest.
+
+    It publishes an in-cluster address only: external-IP discovery is off, and
+    reaching clients outside the cluster is the ingress tier's concern.
+
+    With `values.metrics_enabled` true the server's metrics are switched on,
+    on port 6789, which joins the container and the ClusterIP Service and
+    checks no caller, and their address is published as
+    provides.metrics_endpoint; false, that key is empty.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/messaging/livekit-server:1.0.0
+  # Why this is a synthesis rather than a chart realization. LiveKit publishes
+  # a chart for its server, but it fails the catalog's maintained test: its
+  # newest version predates the release this Component pins. Measured
+  # 2026-10-21: the repository index at https://helm.livekit.io/index.yaml,
+  # generated 2025-06-05, serves livekit-server 1.9.0 (appVersion v1.9.0) as
+  # its newest chart, while the Component's engine_version defaults to v1.13.6
+  # and LiveKit's server releases
+  # (https://api.github.com/repos/livekit/livekit/releases) run to v1.13.10.
+  #
+  # This Recipe reads no infra.overrides keys.
+  #
+  # provides.host is the bare Service name "<rendered_name>-default" — the helm
+  # provider names the synthesized ClusterIP Service "<rendered_name>-<service-key>"
+  # (here "<rendered_name>-default"), with no namespace segment, so the Recipe is
+  # independent of where it is deployed. A same-namespace consumer reaches it
+  # under this name directly; a consumer in another namespace qualifies the host
+  # with the target namespace on its own side (caller-side routing).
+  #
+  # provides publishes the api_key identifier but never the secret: provides is
+  # plaintext string routing, so the secret half travels only on the credential
+  # socket.
+  #
+  # metrics_endpoint is the address the server serves its own metrics at while
+  # values.metrics_enabled is true: /metrics on port 6789 of the same Service.
+  # It is empty while the value is false, when the metrics are off. It is
+  # spelled out in full on purpose: a provides entry cannot read another.
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ .infra.port }}"
+    protocol: "ws"
+    api_key: "{{ .values.api_key }}"
+    metrics_endpoint: "{{ if .values.metrics_enabled }}http://{{ .context.rendered_name }}-default:6789/metrics{{ end }}"
+  # The server is configured from a YAML body delivered on the environment,
+  # which sets the signalling port, the WebRTC TCP port and the WebRTC UDP media
+  # path. That media path takes one of two forms and the body carries exactly
+  # one of them, because the server reads the range in preference to the
+  # multiplexed port whenever both are configured. The multiplexed single UDP
+  # port is the default, and it is emitted as a container port declared with its
+  # transport, so the emitted container and service ports carry UDP rather than
+  # defaulting to TCP. Setting both range bounds selects the contiguous UDP port
+  # range instead: the range is expressible in the server's configuration and
+  # not in a declared container port, so the multiplexed port is dropped from
+  # the body, no UDP container port and no UDP service port are emitted, and the
+  # range carries client traffic only where the pod uses the node's own network.
+  #
+  # When the state_store uses-edge is bound, the resolved host and port compose
+  # the server's store address so several replicas coordinate through it, and a
+  # bound edge leaving either missing from the inject pipe halts the build;
+  # unbound, no store address is emitted. A store publishing valkey-tls or redis-tls is
+  # reached over TLS through the body's redis.tls, the server checking the
+  # store's certificate and the name dialed against the authority in the
+  # connection's server_ca, its ca_cert_file, where one is attached, and
+  # against the image's default trust store where not. Read from the Redis
+  # settings of the LiveKit protocol library both LiveKit binaries build
+  # against, at the commit their releases pin.
+  #
+  # The token-signing secret arrives from the api_secret credential slot as an
+  # env secretKeyRef and is composed with the public api_key identifier at
+  # container start, so the plaintext secret never appears in the rendered
+  # manifest.
+  #
+  # External-IP discovery is off: this realization publishes an in-cluster
+  # ClusterIP endpoint, and advertising a node address that the Service does not
+  # route to would hand clients an unreachable candidate — reaching clients
+  # outside the cluster is the ingress tier's concern.
+  #
+  # With values.metrics_enabled true the body names a port for the server's
+  # metrics, 6789, the port its own sample configuration uses, under the
+  # `prometheus` key, which the server prefers to a top-level prometheus_port
+  # it reports as deprecated. The server then serves its metrics on a listener
+  # of their own on that port, on every interface, and nothing else there; no
+  # username or password is set, so it checks no caller. The port is declared
+  # on the container and the Service, as a stream port. With the value false
+  # none of the three is rendered and the metrics stay off. The http readiness
+  # probe keeps the API port, `api` still sorting first.
+  workload: |
+    {{- /*
+      The connection variables this Recipe reads off the inject pipe, under the
+      socket whose edge delivers them, each beside the provides key the edge's
+      inject block names it from. The pipe is read as a map, and every read of
+      these variables below goes through it, so a variable nothing delivered is
+      told apart from one delivered empty: an edge on one of these sockets
+      leaving any of its variables missing halts the build, naming the edge, the
+      variables and the inject block to write, rather than rendering a
+      connection setting with an empty value. A socket in $required is read
+      whether or not anything is wired to it, so leaving it empty halts too.
+    */ -}}
+    {{- $env := optional (default dict .context.inject) "env" dict -}}
+    {{- $reads := dict "state_store" (dict "LIVEKIT_STATE_STORE_HOST" "host" "LIVEKIT_STATE_STORE_PORT" "port") -}}
+    {{- $required := list -}}
+    {{- $gaps := list }}{{ $wired := list -}}
+    {{- range $alias, $edge := .context.uses }}{{ with get $reads $edge.socket -}}
+    {{- $wired = append $wired $edge.socket }}{{ $missing := list }}{{ $shape := list -}}
+    {{- range $var, $from := . }}{{ if not (hasKey $env $var) }}{{ $missing = append $missing $var }}{{ end }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- if $missing }}{{ $gaps = append $gaps (printf "the edge %q on its %s socket delivers no %s, so give that edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $alias $edge.socket (join " or " $missing) (join ", " $shape)) }}{{ end -}}
+    {{- end }}{{ end -}}
+    {{- range $socket := $required }}{{ if not (has $socket $wired) -}}
+    {{- $vars := list }}{{ $shape := list }}{{ range $var, $from := get $reads $socket }}{{ $vars = append $vars $var }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- $gaps = append $gaps (printf "nothing is wired to its %s socket to deliver %s, so wire one and give its edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $socket (join " and " $vars) (join ", " $shape)) -}}
+    {{- end }}{{ end -}}
+    {{- if $gaps }}{{ fail (printf "core/messaging/livekit-server %q composes its connection settings from variables its edges deliver on its inject pipe, but %s" .context.instance_id (join "; and " $gaps)) }}{{ end -}}
+    {{- /*
+      The state store over TLS. A store publishing valkey-tls or redis-tls accepts TLS
+      connections alone, so the server reaches it over TLS; any other value
+      ending in -tls names a store served over TLS the server is not taught to
+      reach, and halts rather than connecting in plaintext. A server_ca on the
+      connection is the authority the server checks the store's certificate
+      against; it is mounted, so its attachment must name a Secret, and it is
+      refused on a store served without TLS, where no handshake takes place to
+      check a certificate in. DELIBERATE NEAR-DUPLICATE of the same block in the
+      SIP bridge's Recipe: no catalog kind holds a template fragment for
+      several Recipes to share; change both together.
+    */ -}}
+    {{- $storeTLS := false }}{{ $storeCA := "" -}}
+    {{- range $alias, $edge := .context.uses }}{{ if eq $edge.socket "state_store" -}}
+    {{- $proto := toString (optional (default dict $edge.provides) "protocol" "") -}}
+    {{- $edgeTLS := has $proto (list "valkey-tls" "redis-tls") -}}
+    {{- if $edgeTLS }}{{ $storeTLS = true }}{{ else if hasSuffix "-tls" $proto -}}
+    {{- fail (printf "the state_store connection %s of %q reaches %q, which publishes protocol %s, a store served over TLS that the LiveKit server does not reach: it speaks the Redis protocol, over TLS to a store publishing valkey-tls or redis-tls; wire a Redis-protocol store to the state_store socket" $alias $.context.instance_id $edge.target $proto) -}}
+    {{- end -}}
+    {{- if hasKey (default dict $edge.features) "server_ca" -}}
+    {{- $caProvides := optional (optional (default dict $edge.features) "server_ca" dict) "provides" dict -}}
+    {{- if not (and (kindIs "map" $caProvides) (optional $caProvides "name" "")) -}}
+    {{- fail (printf "the server_ca on the state_store connection %s of %q publishes no Secret name, so no Secret could be mounted into the server's container: attach a server_ca publishing one, such as core/referenced-secret" $alias $.context.instance_id) -}}
+    {{- end -}}
+    {{- if not $edgeTLS -}}
+    {{- fail (printf "the state_store connection %s of %q holds a server_ca, but the store it reaches, %q, publishes protocol %s, served without TLS, so no TLS handshake takes place to check a certificate in: turn client_tls on for that store, or remove the server_ca" $alias $.context.instance_id $edge.target (default "none" $proto)) -}}
+    {{- end -}}
+    {{- $storeCA = $alias -}}
+    {{- end -}}
+    {{- end }}{{ end -}}
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    {{- /* The media path: a contiguous UDP range when both bounds carry a
+           value, the multiplexed single port otherwise. Decided once here
+           because the configuration body and the two port sets must agree on
+           it — the server reads the range in preference to the multiplexed
+           port, so a body carrying both would leave the declared UDP port
+           unbound. Both bounds are tested for a value rather than for
+           presence: a declared infra key with no default reaches the template
+           as an empty value, so presence alone does not mean an operator set
+           it, and one bound alone does not select the range. */}}
+    {{- $mediaRange := and .infra.rtc_port_range_start .infra.rtc_port_range_end }}
+    # The server holds no durable disk — room and participant state is in memory,
+    # and a multi-replica deployment coordinates through the state_store edge — so
+    # the default stateless form (a Deployment on the helm provider) is correct:
+    # no form: stateful, no persistentTemplate volume, no PVC.
+    replicas: 1
+    containers:
+      main:
+        image: "livekit/livekit-server:{{ .infra.engine_version }}"
+        # The api key pair the server signs and validates access tokens with.
+        # The public identifier is authored; the secret half is referenced
+        # through $(LIVEKIT_API_SECRET), which the runtime expands from the
+        # Secret when the container starts, so the plaintext never lands in the
+        # manifest. It is passed as an argument, and the runtime expands a
+        # reference in an argument from the container's whole environment, so
+        # it resolves wherever the credential's entry is listed.
+        args:
+          - "--keys"
+          - "{{ .values.api_key }}: $(LIVEKIT_API_SECRET)"
+        variables:
+          # The server reads its whole configuration from this YAML body. Ports
+          # appear here as well as on the container ports below: the container
+          # ports declare what the pod exposes, this body tells the process what
+          # to listen on, and both are driven by the same infra keys and the same
+          # media-path decision, so the two cannot disagree about which ports the
+          # process opens. The range is the one media path with no container-port
+          # counterpart, and the ports block below says so at its own site.
+          LIVEKIT_CONFIG: |
+            port: {{ .infra.port }}
+            log_level: {{ .infra.log_level }}
+            rtc:
+              tcp_port: {{ .infra.rtc_tcp_port }}
+    {{- if $mediaRange }}
+              port_range_start: {{ .infra.rtc_port_range_start }}
+              port_range_end: {{ .infra.rtc_port_range_end }}
+    {{- else }}
+              udp_port: {{ .infra.rtc_udp_port }}
+    {{- end }}
+              use_external_ip: false
+    {{- if has "state_store" $wired }}
+            redis:
+              address: "{{ $env.LIVEKIT_STATE_STORE_HOST }}:{{ $env.LIVEKIT_STATE_STORE_PORT }}"
+    {{- if $storeTLS }}
+              tls:
+                enabled: true
+    {{- if $storeCA }}
+                ca_cert_file: /etc/livekit/state-store-server-ca/ca.crt
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- if .values.metrics_enabled }}
+            prometheus:
+              port: 6789
+    {{- end }}
+        attachments:
+          LIVEKIT_API_SECRET:
+            from: api_secret
+            as: env
+    {{- with $storeCA }}
+          # The state_store connection's server_ca Secret mounts whole,
+          # read-only, one file per data key, so the server reads ca.crt from
+          # this directory.
+          state-store-server-ca:
+            connection: "{{ . }}"
+            from: server_ca
+            as: file
+            path: /etc/livekit/state-store-server-ca
+    {{- end }}
+        ports:
+          # The multiplexed UDP port carries WebRTC media and is declared with
+          # its transport; a media port opened as a stream port accepts no
+          # traffic from its clients. The others carry ordinary TCP and take
+          # the target default, the metrics port among them while
+          # values.metrics_enabled is true. A media range is a span of ports
+          # rather than one number, which a declared port does not express, so
+          # selecting it leaves no UDP port to declare here.
+          api: {{ .infra.port }}
+          rtc-tcp: {{ .infra.rtc_tcp_port }}
+    {{- if not $mediaRange }}
+          rtc-udp:
+            port: {{ .infra.rtc_udp_port }}
+            protocol: UDP
+    {{- end }}
+    {{- if .values.metrics_enabled }}
+          metrics: 6789
+    {{- end }}
+        # The server answers its health check at / on the API port, and fails
+        # it while its own node statistics are more than four seconds old.
+        # The http probe form is sent to the container port whose name sorts
+        # first, which here is `api`, so readiness asks that check. Liveness
+        # only opens a TCP connection to the same port: a stale-statistics
+        # answer is a reason to stop sending traffic, not to restart the server.
+        health:
+          ready:
+            http: /
+          live:
+            tcp: {{ .infra.port }}
+            initialDelaySeconds: 10
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+    services:
+      default:
+        type: ClusterIP
+        # A service port takes the transport of the container port its name
+        # resolves to, so rtc-udp carries UDP without restating it here. It is
+        # published only alongside the container port it resolves to.
+        ports:
+          api: {{ .infra.port }}
+          rtc-tcp: {{ .infra.rtc_tcp_port }}
+    {{- if not $mediaRange }}
+          rtc-udp: {{ .infra.rtc_udp_port }}
+    {{- end }}
+    {{- if .values.metrics_enabled }}
+          metrics: 6789
+    {{- end }}

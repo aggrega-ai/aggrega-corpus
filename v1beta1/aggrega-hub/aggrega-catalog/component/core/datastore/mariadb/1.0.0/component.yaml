@@ -1,0 +1,214 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/datastore/mariadb
+  version: 1.0.0
+  description: >
+    A MariaDB relational database. Provider-agnostic: the same component
+    is implemented by Helm Recipes (Workload synthesis to native Kubernetes resources),
+    Terraform Recipes (AWS RDS), CloudFormation Recipes,
+    Compose Recipes (local development), and a controller-driven Helm Recipe that
+    emits a MariaDB custom resource for the mariadb-operator control plane to
+    reconcile. Reach for the synthesis Recipe on a cluster that runs no MariaDB
+    control plane — it needs no controller installed and no chart repository, so
+    it builds with nothing fetched — and for the controller-driven Recipe where
+    the control plane is already in place and the cluster should own upgrades,
+    rolling restarts, credential rotation and, through infra.ha, replication
+    and failover.
+
+    On AWS RDS through Terraform, reach for
+    terraform/mariadb-rds-terraform-aws-modules, which vendors the
+    terraform-aws-modules project's published RDS module, where the pull may
+    fetch it from its git repository; reach for terraform/mariadb-rds, which
+    authors its own body, or terraform/mariadb-rds-module, which vendors a
+    module kept beside it, where nothing may be fetched, and for
+    terraform/mariadb-rds where read replicas are needed.
+
+    Backup is the core/backup attachment, written in the Release. The managed
+    Recipes configure the service's own automated backups from it, bound to
+    terraform/backup-native or cloudformation/backup-native, and keep them for
+    7 days with none attached. The controller-driven Recipe is backed up through
+    helm/backup-mariadb-operator, the synthesized one by the backup product the
+    Manifest binds; the Compose Recipe has none, so an attachment halts there.
+  labels:
+    component.aggrega.ai/type: stateful-server
+    component.aggrega.ai/category: datastore
+    component.aggrega.ai/upstream-licensing: osi-approved
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # Self-inject allowlist: the component may inject its own provides
+  # keys into env or file delivery mechanisms.
+  inject: [env, file]
+
+  # Credential slots. inject: [] = blackbox (Recipe controls delivery).
+  # inject: [env, file] = transparent (developer may dictate delivery).
+  # required: false is the default (omitted = optional).
+  featuresSchema:
+    root_password:
+      required: true
+      sensitive: true
+      inject: []
+      description: Root database password. Recipe controls delivery (Black-Box). On helm/mariadb-cluster with infra.credentials generated the controller generates it, so the slot is bound with core/generated-secret, mapped to helm/generated-secret. On the RDS Recipes RDS generates the password of the master user, admin, and keeps it in AWS Secrets Manager, so the slot takes core/generated-secret there, and any other credential halts the build.
+    user_password:
+      sensitive: true
+      inject: [env, file]
+      description: Application user password. Unattached, helm/mariadb sets it to the development literal `apppass`, which this catalog publishes, so every Release built with that Recipe that leaves the slot unattached shares that password; on helm/mariadb-cluster with infra.credentials generated the controller generates it. The RDS Recipes create only the master user, admin, and halt the build when this slot is filled.
+
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      database:
+        type: string
+        required: true
+        description: Logical database name created on startup.
+      user:
+        type: string
+        description: Application-level database user (non-root). Omit for root-only access. RDS creates only its master user, admin, which the managed Recipes publish as provides.user, so each of them halts the build when this is set.
+      # charset and collation carry defaults, so a managed Recipe that cannot set
+      # them cannot tell the default from a value written explicitly; their
+      # descriptions name which Recipes do not read them instead.
+      charset:
+        type: string
+        default: utf8mb4
+        description: Default character set. terraform/mariadb-rds-terraform-aws-modules sets it in the parameter group it creates; the other managed Recipes do not read it, and the instance takes its parameter group's.
+      collation:
+        type: string
+        default: utf8mb4_general_ci
+        description: Default collation. terraform/mariadb-rds-terraform-aws-modules sets it in the parameter group it creates; the other managed Recipes do not read it, and the instance takes its parameter group's.
+      init_scripts:
+        type: object
+        valuesType: string
+        description: SQL scripts executed on first database initialization. Each key is a filename, each value is the SQL content. Scripts run in alphabetical key order.
+      custom_config:
+        type: string
+        description: Raw server configuration block (my.cnf format). Injected verbatim into the server configuration file.
+
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer never sees this.
+      port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 3306
+        description: Server listen port. Most operators should omit this and let the Recipe assign the default (3306).
+      engine_version:
+        type: string
+        default: "11.4"
+        description: Server binary version.
+      # The managed RDS Recipes size the instance by its instance class, and a
+      # Recipe cannot tell these defaults from a value a Release wrote, so they
+      # are not read there rather than refused, and each description says so.
+      compute:
+        cpu:
+          type: string
+          default: 250m
+          description: CPU the database server is given. The managed RDS Recipes do not read it; they size the instance by infra.overrides.instance_class (DBInstanceClass on CloudFormation).
+        memory:
+          type: string
+          default: 512Mi
+          description: Memory the database server is given. The managed RDS Recipes do not read it; they size the instance by infra.overrides.instance_class (DBInstanceClass on CloudFormation).
+      storage:
+        type: object
+        properties:
+          size:
+            type: string
+            default: 10Gi
+          type:
+            type: string
+            description: >
+              On Kubernetes, the storage class the database volume is
+              provisioned from: leave it unset to take the cluster's default
+              storage class, or name another class the cluster offers. On a
+              managed database, the provider's volume type instead, such as
+              `gp3` or `io1` on AWS RDS: left unset, the RDS Recipes provision
+              `gp3`. The Compose Recipe names no class.
+      ha:
+        enabled:
+          type: boolean
+          default: false
+          description: Keep a standby the database fails over to. The RDS Recipes map it onto the instance's Multi-AZ setting; helm/mariadb-cluster fails over automatically to one of its read replicas, so it halts the build when read_replicas is 0; helm/mariadb runs one server and halts the build when it is true.
+        read_replicas:
+          type: integer
+          min: 0
+          default: 0
+          description: Number of read replicas to deploy. terraform/mariadb-rds provisions them beside the primary, and helm/mariadb-cluster runs them as replicas replicating from the primary, publishing the primary's own Service as provides.host; the other managed Recipes and helm/mariadb provision one instance and halt the build on a count above zero.
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+      control_plane_present:
+        type: boolean
+        default: false
+        description: >
+          Operator affirmation that the mariadb-operator control plane is installed
+          in the target cluster. A controller-driven realization halts the build
+          unless this is set true, so a MariaDB custom resource is never emitted as
+          an orphan into a cluster that cannot reconcile it. Every other
+          realization ignores this flag.
+      credentials:
+        type: string
+        enum: [generated, supplied]
+        default: generated
+        description: >
+          Who owns the database's credentials on a controller-driven realization.
+          `generated` — the controller creates the credential Secrets and owns both
+          the root password and the application user's, which is what it does when
+          nothing is supplied; the developer's `database` and `user` values are
+          still honored, and no password reaches the rendered artifact. `supplied` —
+          the controller reads both passwords from an existing Secret named in
+          `credentials_secret` and generates neither. Every other realization
+          halts the build on `supplied`: the synthesized ones take the root
+          password from the `root_password` credential slot and the
+          application user's from `user_password`, and on the managed ones RDS
+          owns the password.
+      credentials_secret:
+        type: string
+        default: ""
+        description: >
+          Name of the existing Secret a controller-driven realization reads the
+          database credentials from when `credentials` is `supplied`. The Secret
+          lives in the same namespace as the database and carries two entries:
+          `root-password` for the root account and `password` for the application
+          user. Leave it empty when `credentials` is `generated`; a controller-driven
+          build halts if `supplied` is selected without it. Every other
+          realization reads no Secret by this name and halts the build when it
+          is set.
+
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      host:
+        type: string
+        required: true
+        description: >
+          Address a client opens its database connection to. On the in-cluster
+          realizations it is the Service's DNS name; on a managed one it is a
+          pointer string the provisioning tool resolves to the instance's
+          address once the infrastructure has been applied, or the DNS name
+          the Release sets in infra.overrides.host, so a consumer on another
+          target receives an address it can resolve.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port the server accepts connections on. It follows the port an
+          operator set, so a consumer reads it rather than assuming 3306.
+      user:
+        type: string
+        description: >
+          Name of the login role a consumer authenticates as. The matching
+          password arrives through the credential attached to the component,
+          never through this contract.
+      database:
+        type: string
+        description: >
+          Name of the logical database created at startup. A consumer names it
+          in its connection string to land in the right database rather than
+          the server's default.
+      protocol:
+        type: string
+        description: Wire protocol the published address speaks — `mariadb`, which is what a consumer selects a driver for.

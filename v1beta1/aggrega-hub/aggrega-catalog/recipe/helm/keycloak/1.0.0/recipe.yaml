@@ -1,0 +1,276 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: keycloak
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    Keycloak, a database-backed identity and access-management server, on
+    Kubernetes via the helm provider's Workload synthesis (a stateless
+    Deployment plus a ClusterIP Service on the HTTP port). Keycloak holds no
+    local state — the PostgreSQL backend is the system of record — so it renders
+    stateless, and it provisions and migrates its own schema on startup.
+
+    Reach for this realization where the build must complete with nothing
+    fetched, or where no chart repository is reachable from it; reach for
+    `keycloak-chart`, which renders the codecentric Keycloak.X chart, where the
+    server will be scaled out — that realization carries the ordered pods, the
+    headless Service and the replicated cache stack a single synthesized
+    Deployment does not.
+
+    With `infra.external_base_url` set, the server's hostname is that full URL,
+    so the issuer and every address the server advertises follow it; unset, the
+    server takes its address from each incoming request. With no credential
+    attached — on the backend connection for the database password, on the
+    admin_password slot for the bootstrap admin password — each takes an
+    inline development default; with one attached, each is supplied via the
+    credential subsystem.
+
+    With `values.metrics_enabled` true, the server's metrics are switched on and
+    the management port joins the Service, so its metrics and health endpoints,
+    which check no caller, answer at the Service name; the address is published
+    as provides.metrics_endpoint. False, that key is empty and the port stays
+    off the Service.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/security/keycloak:1.0.0
+  # This Recipe reads no infra.overrides keys.
+  #
+  # provides.host is the bare Service name "<rendered_name>-default" — the helm
+  # provider names the synthesized ClusterIP Service "<rendered_name>-<service-key>"
+  # (here "<rendered_name>-default"), with no namespace segment, so the Recipe is
+  # independent of where it is deployed. A same-namespace consumer reaches it
+  # under this name directly; a consumer in another namespace qualifies the host
+  # with the target namespace on its own side (caller-side routing).
+  #
+  # metrics_endpoint is the address the server serves its own metrics at while
+  # values.metrics_enabled is true: /metrics on the management port, on the same
+  # Service, since this realization serves the server at the root path. It is
+  # empty while the value is false. It is spelled out in full on purpose: a
+  # provides entry cannot read another.
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ .infra.http_port }}"
+    protocol: "http"
+    metrics_endpoint: "{{ if .values.metrics_enabled }}http://{{ .context.rendered_name }}-default:{{ .infra.management_port }}/metrics{{ end }}"
+  # The server reads a file in its import directory as a realm only when the
+  # file is named "<realm>-realm.json", so an entry named any other way would be
+  # mounted and never imported. Halt on it here, where the fix is renaming one
+  # key in the Aggregate.
+  assertions:
+    realm_import_file_names: >-
+      {{- range $name, $_ := optional .values "realm_imports" dict -}}
+      {{- if not (hasSuffix "-realm.json" $name) -}}
+      {{- fail (printf "values.realm_imports entry %q is not named <realm>-realm.json, so the server would never import it; name each entry after the realm it defines, for example demo-realm.json for the realm demo" $name) -}}
+      {{- end -}}
+      {{- end -}}
+  # The realms the server imports on startup, one file per values.realm_imports
+  # entry, mounted whole at the server's import directory. Presence-guarded on
+  # the value: unset, the entry renders empty and no ConfigMap is emitted.
+  artifacts:
+    realm-import-configmap.yaml: |
+      {{- if .values.realm_imports -}}
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: {{ .context.rendered_name }}-realm-import
+      data:
+      {{- range $name, $content := .values.realm_imports }}
+        {{ $name }}: |
+      {{ $content | trimSuffix "\n" | indent 4 }}
+      {{- end }}
+      {{- end }}
+  # The backend identity resolved from the `backend` uses-edge (host, port,
+  # user, database) arrives on .context.inject.env and composes Keycloak's
+  # database connection. The connection is rendered password-free where
+  # possible: with no credential on the backend connection the Recipe uses an
+  # inline development default, and with one attached the password is supplied
+  # via the credential subsystem. The bootstrap admin account is seeded on
+  # first startup from a username value and a separate optional admin
+  # credential slot, with an inline development default when unattached.
+  #
+  # The server's health endpoints are switched on and served on the management
+  # port the Component's `management_port` sets, declared on the container and
+  # published by no Service while values.metrics_enabled is false, and the
+  # Deployment probes them: a startup probe holds the liveness and readiness
+  # probes back while the server boots, and the readiness probe keeps traffic
+  # away until the server answers requests. With values.metrics_enabled true,
+  # KC_METRICS_ENABLED switches the server's metrics on, served on that port at
+  # /metrics, and the port joins the Service, so the health endpoints answer at
+  # the Service name too — the only other thing the server serves there.
+  #
+  # With `values.realm_imports` set, each entry becomes a file in a ConfigMap
+  # mounted at the server's import directory and the server starts with its
+  # realm import switched on; unset, neither the ConfigMap nor the mount is
+  # emitted.
+  workload: |
+    {{- /* The alias of the `backend` connection carrying a credential, or empty. */ -}}
+    {{- $backendCredential := "" -}}
+    {{- range $alias, $edge := .context.uses -}}
+    {{- if and (eq $edge.socket "backend") (hasKey (default dict $edge.features) "credential") -}}
+    {{- $backendCredential = $alias -}}
+    {{- end -}}
+    {{- end -}}
+    {{- /*
+      The connection variables this Recipe reads off the inject pipe, under the
+      socket whose edge delivers them, each beside the provides key the edge's
+      inject block names it from. The pipe is read as a map, and every read of
+      these variables below goes through it, so a variable nothing delivered is
+      told apart from one delivered empty: an edge on one of these sockets
+      leaving any of its variables missing halts the build, naming the edge, the
+      variables and the inject block to write, rather than rendering a
+      connection setting with an empty value. A socket in $required is read
+      whether or not anything is wired to it, so leaving it empty halts too.
+    */ -}}
+    {{- $env := optional (default dict .context.inject) "env" dict -}}
+    {{- $reads := dict "backend" (dict "KC_DB_URL_HOST" "host" "KC_DB_URL_PORT" "port" "KC_DB_URL_DATABASE" "database" "KC_DB_USERNAME" "user") -}}
+    {{- $required := list "backend" -}}
+    {{- $gaps := list }}{{ $wired := list -}}
+    {{- range $alias, $edge := .context.uses }}{{ with get $reads $edge.socket -}}
+    {{- $wired = append $wired $edge.socket }}{{ $missing := list }}{{ $shape := list -}}
+    {{- range $var, $from := . }}{{ if not (hasKey $env $var) }}{{ $missing = append $missing $var }}{{ end }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- if $missing }}{{ $gaps = append $gaps (printf "the edge %q on its %s socket delivers no %s, so give that edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $alias $edge.socket (join " or " $missing) (join ", " $shape)) }}{{ end -}}
+    {{- end }}{{ end -}}
+    {{- range $socket := $required }}{{ if not (has $socket $wired) -}}
+    {{- $vars := list }}{{ $shape := list }}{{ range $var, $from := get $reads $socket }}{{ $vars = append $vars $var }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- $gaps = append $gaps (printf "nothing is wired to its %s socket to deliver %s, so wire one and give its edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $socket (join " and " $vars) (join ", " $shape)) -}}
+    {{- end }}{{ end -}}
+    {{- if $gaps }}{{ fail (printf "core/security/keycloak %q composes its connection settings from variables its edges deliver on its inject pipe, but %s" .context.instance_id (join "; and " $gaps)) }}{{ end -}}
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # Keycloak holds no durable state — the PostgreSQL backend is the system of
+    # record — so the default stateless form (a Deployment on the helm provider)
+    # is correct: no form: stateful, no persistentTemplate volume, no PVC.
+    replicas: 1
+    containers:
+      main:
+        image: "quay.io/keycloak/keycloak:{{ .infra.engine_version }}"
+        # `start` runs the production-shaped server; Keycloak provisions and
+        # migrates its own schema on startup, so no separate migration step is
+        # needed. The backend identity resolved from the `backend` uses-edge
+        # arrives on the inject pipe (.context.inject.env) and composes the KC_DB*
+        # connection. KC_DB_PASSWORD is delivered via the optional credential on
+        # the `backend` connection (env secret when attached) or an inline
+        # development default when unattached. KC_HTTP_ENABLED and KC_HOSTNAME_STRICT=false
+        # make the server self-contained with no real hostname while
+        # infra.external_base_url is unset. Set, KC_HOSTNAME carries it as a full
+        # URL — scheme, host, port and path — so the issuer, the discovery
+        # document and every link the server writes use that address rather than
+        # the request's, and the server ignores KC_HOSTNAME_STRICT whenever a
+        # hostname is configured. KC_HEALTH_ENABLED
+        # switches the health endpoints on, and KC_HTTP_MANAGEMENT_PORT serves
+        # them on the Component's management_port; with values.metrics_enabled
+        # true, KC_METRICS_ENABLED adds the metrics there. It is a build-time
+        # option, and it takes effect because `start` runs without --optimized,
+        # so the server checks for and runs a build when it starts. The bootstrap
+        # admin account is seeded on first startup from the admin_user value and
+        # the optional `admin_password` credential slot (env secret when attached,
+        # inline development default when unattached). With values.realm_imports
+        # set, the server starts with --import-realm and imports every realm file
+        # mounted at /opt/keycloak/data/import, skipping a realm that already
+        # exists.
+    {{- if .values.realm_imports }}
+        args: [start, --import-realm]
+    {{- else }}
+        args: [start]
+    {{- end }}
+        variables:
+          KC_DB: postgres
+          KC_DB_URL_HOST: "{{ $env.KC_DB_URL_HOST }}"
+          KC_DB_URL_PORT: "{{ $env.KC_DB_URL_PORT }}"
+          KC_DB_URL_DATABASE: "{{ $env.KC_DB_URL_DATABASE }}"
+          KC_DB_USERNAME: "{{ $env.KC_DB_USERNAME }}"
+          KC_HTTP_ENABLED: "true"
+          KC_HOSTNAME_STRICT: "false"
+    {{- with .infra.external_base_url }}
+          KC_HOSTNAME: "{{ . }}"
+    {{- end }}
+          KC_HEALTH_ENABLED: "true"
+          KC_HTTP_MANAGEMENT_PORT: "{{ .infra.management_port }}"
+    {{- if .values.metrics_enabled }}
+          KC_METRICS_ENABLED: "true"
+    {{- end }}
+          KC_BOOTSTRAP_ADMIN_USERNAME: "{{ .values.admin_user }}"
+    {{- if not $backendCredential }}
+          KC_DB_PASSWORD: apppass
+    {{- end }}
+    {{- if not (hasKey (default dict .features) "admin_password") }}
+          KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    {{- end }}
+    {{- if or $backendCredential (hasKey (default dict .features) "admin_password") }}
+        attachments:
+    {{- end }}
+    {{- with $backendCredential }}
+          KC_DB_PASSWORD:
+            connection: "{{ . }}"
+            from: credential
+            as: env
+    {{- end }}
+    {{- if hasKey (default dict .features) "admin_password" }}
+          KC_BOOTSTRAP_ADMIN_PASSWORD:
+            from: admin_password
+            as: env
+    {{- end }}
+        # Keycloak serves its health endpoints on its management port, not on
+        # the HTTP port, and an http probe is sent to the container port whose
+        # name sorts first. `management` sorts before `tcp`, so the probes below
+        # reach the management port while the Service keeps forwarding to the
+        # HTTP port it names. The management port is declared on the container,
+        # where it stays reachable in-cluster; the Service publishes it only
+        # while values.metrics_enabled is true.
+        ports:
+          management: {{ .infra.management_port }}
+          tcp: {{ .infra.http_port }}
+        # The startup probe holds the liveness and readiness probes back while
+        # the server boots, which can take a minute or more, so a slow start is
+        # not mistaken for a hung server and restarted. Its budget — up to 15 s
+        # plus 60 checks 5 s apart — and the readiness and liveness timings are
+        # the ones the Keycloak.X chart gives its own probes of this server; the
+        # paths are the ones Keycloak documents for each probe.
+        health:
+          startup:
+            http: /health/started
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 60
+          ready:
+            http: /health/ready
+            initialDelaySeconds: 10
+            timeoutSeconds: 1
+          live:
+            http: /health/live
+            timeoutSeconds: 5
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+    {{- if .values.realm_imports }}
+        volumeMounts:
+          - name: realm-import
+            path: /opt/keycloak/data/import
+            readonly: true
+    {{- end }}
+    {{- if .values.realm_imports }}
+    volumes:
+      realm-import:
+        configmap:
+          source: "{{ .context.rendered_name }}-realm-import"
+    {{- end }}
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          tcp: {{ .infra.http_port }}
+    {{- if .values.metrics_enabled }}
+          management: {{ .infra.management_port }}
+    {{- end }}

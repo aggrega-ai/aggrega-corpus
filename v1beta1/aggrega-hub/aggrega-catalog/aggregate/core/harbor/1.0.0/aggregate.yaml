@@ -1,0 +1,150 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Aggregate
+metadata:
+  name: core/harbor
+  version: 1.0.0
+  description: >
+    A Harbor container registry packaged as a reusable module. It composes one
+    component, `core/devtool/harbor`, which describes the registry as a whole —
+    its control plane, blob store, console, worker tier, scanner, relational
+    backend, cache and the reverse proxy fronting them — so the module declares
+    no edges of its own and needs nothing declared beside it. One in-cluster
+    address serves container clients and the console, exported as both
+    `registry` and `ui`.
+
+    A Release sizes the component at `<module-instance>.registry`; its schema
+    defaults cover every `infra` value, so a Release need set none of them.
+    Four credentials are module parameters an importing Aggregate passes down.
+    Three are keys with no default — `csrf_key` (exactly 32 characters),
+    `jobservice_secret` and `registry_http_secret` — so an importer passes each
+    down and its Release fulfills it, or the build halts naming the parameter;
+    `admin_password` has a development default, for evaluation only. The module
+    attaches `core/referenced-secret` on the component's credential slot for
+    each, so the Manifest of every Release whose Aggregate imports the module
+    maps `core/referenced-secret`, or the build halts.
+
+    The token-signing key, `token_key`, the control plane's shared secret,
+    `core_secret`, and the key stored credentials are encrypted with,
+    `secret_key`, have no default and no module parameter: a Release attaches
+    each on `<module-instance>.registry`, naming a Secret it holds, and its
+    Manifest binds them to `k8s-existing-secret`, or the build halts naming the
+    slot. The registry's remaining passwords take development values stated in
+    its Recipe and published in this catalog: a Release serving real traffic
+    replaces them.
+spec:
+  parameters:
+    # Each parameter below fills one of the registry's credential slots: the
+    # administrator account's password, the key the control plane signs its
+    # cross-site-request-forgery tokens with, the shared secret the worker tier
+    # and the control plane authenticate to each other with, and the secret the
+    # blob store signs its upload state with. They are module parameters because
+    # an Aggregate importing this module hands it parameters and nothing else,
+    # so a parameter is the one way an importer reaches a credential slot on the
+    # component inside it.
+    #
+    # The three keys have deliberately no default: a pinned one would be a key
+    # every reader of this catalog holds, letting anyone forge the requests the
+    # control plane trusts, the calls its services make to each other, or the
+    # upload state its blob store signs. An
+    # importing Aggregate declares a parameter of its own for each and passes it
+    # down through its `aggregates` entry for the Release to fulfill; under
+    # k8s-existing-secret that value is the name of a Secret the operator
+    # creates, so no key passes through any file the build reads.
+    #
+    # The administrator's password keeps a pinned default, which is what lets
+    # the module render with that password left alone. It is a development
+    # credential: every reader of this catalog holds it, so it is for
+    # evaluation and local development, and a Release carrying real traffic
+    # supplies its own the same way. The default is also a valid Kubernetes
+    # object name, so it serves under either realization of the Feature.
+    admin_password:
+      type: string
+      default: "harbor-admin-password-for-evaluation-only"
+      description: Password of the registry's built-in administrator account, the account the web console and the API are first administered through. What the value is depends on the core/referenced-secret realization the Manifest binds - the password itself with k8s-secret-from-parameter, which emits a Secret carrying it; the name of a Secret already in the namespace, holding the password under the data key HARBOR_ADMIN_PASSWORD, with k8s-existing-secret. The default is a development credential, for evaluation only; pass your own down from the importing Aggregate for any Release carrying real traffic.
+    # The key must be exactly 32 characters, and the control plane refuses any
+    # other length at start-up.
+    csrf_key:
+      type: string
+      required: true
+      minLength: 1
+      description: Key the control plane signs its cross-site request forgery tokens with. It must be exactly 32 characters; a shorter or longer key is refused by the control plane at start-up. What the value is depends on the core/referenced-secret realization the Manifest binds - the 32-character key itself with k8s-secret-from-parameter, which emits a Secret carrying it; the name of a Secret already in the namespace, holding the 32-character key under the data key CSRF_KEY, with k8s-existing-secret. There is no default, so the importing Aggregate passes one down and its Release fulfills it.
+    # The registry's Helm chart documents this secret and the next as 16
+    # characters.
+    jobservice_secret:
+      type: string
+      required: true
+      minLength: 1
+      description: Shared secret the worker tier and the control plane authenticate to each other with. What the value is depends on the core/referenced-secret realization the Manifest binds - the secret itself with k8s-secret-from-parameter, which emits a Secret carrying it; the name of a Secret already in the namespace, holding the secret under the data key JOBSERVICE_SECRET, with k8s-existing-secret. Keep the secret 16 characters, the length the registry's Helm chart documents for it. There is no default, so the importing Aggregate passes one down and its Release fulfills it.
+    registry_http_secret:
+      type: string
+      required: true
+      minLength: 1
+      description: Secret the blob store signs its upload state with, which every replica of the blob store shares. What the value is depends on the core/referenced-secret realization the Manifest binds - the secret itself with k8s-secret-from-parameter, which emits a Secret carrying it; the name of a Secret already in the namespace, holding the secret under the data key REGISTRY_HTTP_SECRET, with k8s-existing-secret. Keep the secret 16 characters, the length the registry's Helm chart documents for it. There is no default, so the importing Aggregate passes one down and its Release fulfills it.
+  components:
+    # The one component describes the registry as a whole: the API and
+    # token-service control plane, the OCI blob store and its controller, the
+    # web console, the asynchronous worker tier, the vulnerability scanner, the
+    # relational backend, the key-value cache, and the reverse proxy that fronts
+    # them. Those services are parts of one unit rather than separate
+    # components, so the module declares no edges of its own and needs nothing
+    # declared beside it.
+    #
+    # The component is addressed as `registry`, so an operator sizing it from a
+    # Release names the module-scoped id `<module-instance>.registry` and sets
+    # `infra` there: the port the published address accepts traffic on, the
+    # image tag every one of the registry's services runs at, the control
+    # plane's compute, and the size and storage class of the volume holding
+    # image layers and manifests. The component's own schema defaults cover
+    # every one of them, so a Release that sets none of them still renders.
+    #
+    # The token-signing key, the control plane's shared secret and the key
+    # stored credentials are encrypted with have no default and no module
+    # parameter: the Release attaches each on `<module-instance>.registry`,
+    # naming a Secret, and its Manifest binds the three to `k8s-existing-secret`,
+    # by type or by their bare attachment names (a key scoped to the module does
+    # not match and would fall back to the type's binding). The registry's
+    # remaining passwords take development values stated in the Recipe, shared
+    # and published in this catalog: a Release serving real traffic replaces
+    # them.
+    registry:
+      type: core/devtool/harbor
+      # Each key is the data key the registry's Helm chart reads that credential
+      # under, so an existing Secret laid out for the chart serves unchanged, and
+      # one Secret may carry all four. The module attaches core/referenced-secret
+      # on the component's credential slot for each, so the registry's workloads
+      # carry a reference to a Secret rather than the value itself.
+      features:
+        admin_password:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.admin_password }}"
+            key: HARBOR_ADMIN_PASSWORD
+        csrf_key:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.csrf_key }}"
+            key: CSRF_KEY
+        jobservice_secret:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.jobservice_secret }}"
+            key: JOBSERVICE_SECRET
+        registry_http_secret:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.registry_http_secret }}"
+            key: REGISTRY_HTTP_SECRET
+  # A single in-cluster address fronts the whole registry. The reverse proxy
+  # behind it routes the console path to the web console and the registry and
+  # API paths to the control plane, so a container client logs in, pushes and
+  # pulls against the same host a browser reaches the console on. The module
+  # exports that one address under both of its public names — `registry`, the
+  # endpoint image clients and the API talk to, and `ui`, the web endpoint — so
+  # a consumer wires to whichever name describes its intent and reaches the
+  # address that serves both.
+  exportedComponents:
+    registry: registry
+    ui: registry

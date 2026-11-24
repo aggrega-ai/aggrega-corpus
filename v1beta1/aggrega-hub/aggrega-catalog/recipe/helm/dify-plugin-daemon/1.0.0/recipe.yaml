@@ -1,0 +1,340 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: dify-plugin-daemon
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    The Dify plugin runtime on Kubernetes via the helm provider's Workload
+    synthesis. Installed plugin packages and the Python environments prepared
+    for them live on the runtime's own volume, so the workload renders as a
+    StatefulSet with a persistent claim, alongside the governing headless
+    Service the stateful form requires and a ClusterIP Service publishing the
+    dispatch port. One replica is rendered: a second would hold a different
+    plugin set and answer differently depending on which one a call reached.
+
+    It keeps its plugin catalogue in a database of its own on the backend's
+    server, named by plugin_database, and calls the API server back on its
+    internal API. The backend password and the two keys it shares with the API
+    server and the worker each come from a credential when one is attached and
+    otherwise from a pinned development literal, for evaluation and local
+    development; the two it presents, to the backend and to the API server, are
+    held on those connections, and the two keys are attached on all three or on
+    none. A cache publishing valkey-tls or redis-tls is reached over TLS, its certificate
+    checked against the cache connection's server_ca, mounted, or the system
+    roots; another TLS protocol on the cache halts the build.
+
+    The runtime's own metrics, in the Prometheus format at /metrics/ on the
+    dispatch port, asking no key, are published as provides.metrics_endpoint.
+    provides.host is the bare in-cluster Service name, with no namespace; a
+    consumer in another namespace qualifies it on its own side.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/ai-agent/dify-plugin-daemon:1.0.0
+  # This Recipe reads no infra.overrides keys.
+  #
+  # provides.host is the bare Service name "<rendered_name>-default" — the helm
+  # provider names the synthesized ClusterIP Service "<rendered_name>-default"
+  # with no namespace segment, so the recipe is independent of where it is
+  # deployed. A same-namespace consumer reaches it under this name directly; a
+  # cross-namespace consumer qualifies it with the target namespace on its own
+  # side (caller-side routing).
+  #
+  # metrics_endpoint is the address the runtime serves its own metrics at, in
+  # the Prometheus format: /metrics/, trailing slash included, on SERVER_PORT,
+  # which is infra.port. The runtime turns it on unless PROMETHEUS_ENABLED says
+  # otherwise, and this Recipe leaves that variable unset; the server key below
+  # guards the dispatch routes, not this one. It is spelled out in full on
+  # purpose: a provides entry cannot read another.
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ .infra.port }}"
+    protocol: "http"
+    metrics_endpoint: "http://{{ .context.rendered_name }}-default:{{ .infra.port }}/metrics/"
+  # One replica is rendered because the installed-plugin set lives on the
+  # runtime's own claim, so a second replica would hold a different set.
+  #
+  # The backend, cache and API-server identities resolved from the component's
+  # uses-edges arrive on .context.inject.env. The backend identity passes
+  # through under the names the runtime itself reads, except for the database
+  # name: the runtime keeps its plugin catalogue in a database of its own, so
+  # DB_DATABASE carries the developer's plugin_database value rather than the
+  # platform database the backend edge published. The API-server edge is
+  # translated into DIFY_INNER_API_URL, the internal endpoint the runtime calls
+  # to resolve workspace and credential context.
+  #
+  # The backend password comes from a credential when the backend connection
+  # carries one and from an inline development default otherwise. The same
+  # holds for the runtime's own server key, a slot of its own, and for the key
+  # it presents on the internal API, held on its api connection: each falls
+  # back to a pinned development literal matching the one the API-server and
+  # worker Recipes emit, so the three agree with no external secret. Those two
+  # keys are read by the runtime, the API server and the worker alike, so a
+  # credential for either is attached on all three or on none of them.
+  workload: |
+    {{- /*
+      The alias of each connection carrying a credential, or empty: the
+      backend's password and the key presented on the API server's internal
+      API.
+    */ -}}
+    {{- $backendCredential := "" -}}
+    {{- $apiCredential := "" -}}
+    {{- range $alias, $edge := .context.uses -}}
+    {{- if hasKey (default dict $edge.features) "credential" -}}
+    {{- if eq $edge.socket "backend" -}}{{- $backendCredential = $alias -}}{{- end -}}
+    {{- if eq $edge.socket "api" -}}{{- $apiCredential = $alias -}}{{- end -}}
+    {{- end -}}
+    {{- end -}}
+    {{- /*
+      The runtime's image, written once: the wait step and the runtime itself
+      both run it.
+    */ -}}
+    {{- $image := printf "langgenius/dify-plugin-daemon:%s" .infra.engine_version -}}
+    {{- /*
+      The connection variables this Recipe reads off the inject pipe, under the
+      socket whose edge delivers them, each beside the provides key the edge's
+      inject block names it from. The pipe is read as a map, and every read of
+      these variables below goes through it, so a variable nothing delivered is
+      told apart from one delivered empty: an edge on one of these sockets
+      leaving any of its variables missing halts the build, naming the edge, the
+      variables and the inject block to write, rather than rendering a
+      connection setting with an empty value. A socket in $required is read
+      whether or not anything is wired to it, so leaving it empty halts too.
+      Each read is written through the two replacements that escape a
+      backslash and a double quote, since the text is the published value of
+      another component and lands inside a double-quoted value.
+    */ -}}
+    {{- $env := optional (default dict .context.inject) "env" dict -}}
+    {{- $reads := dict "backend" (dict "DB_HOST" "host" "DB_PORT" "port" "DB_USERNAME" "user") "cache" (dict "REDIS_HOST" "host" "REDIS_PORT" "port") "api" (dict "API_HOST" "host" "API_PORT" "port") -}}
+    {{- $required := list "backend" "cache" "api" -}}
+    {{- $gaps := list }}{{ $wired := list -}}
+    {{- range $alias, $edge := .context.uses }}{{ with get $reads $edge.socket -}}
+    {{- $wired = append $wired $edge.socket }}{{ $missing := list }}{{ $shape := list -}}
+    {{- range $var, $from := . }}{{ if not (hasKey $env $var) }}{{ $missing = append $missing $var }}{{ end }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- if $missing }}{{ $gaps = append $gaps (printf "the edge %q on its %s socket delivers no %s, so give that edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $alias $edge.socket (join " or " $missing) (join ", " $shape)) }}{{ end -}}
+    {{- end }}{{ end -}}
+    {{- range $socket := $required }}{{ if not (has $socket $wired) -}}
+    {{- $vars := list }}{{ $shape := list }}{{ range $var, $from := get $reads $socket }}{{ $vars = append $vars $var }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- $gaps = append $gaps (printf "nothing is wired to its %s socket to deliver %s, so wire one and give its edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $socket (join " and " $vars) (join ", " $shape)) -}}
+    {{- end }}{{ end -}}
+    {{- if $gaps }}{{ fail (printf "core/ai-agent/dify-plugin-daemon %q composes its connection settings from variables its edges deliver on its inject pipe, but %s" .context.instance_id (join "; and " $gaps)) }}{{ end -}}
+    {{- /*
+      The cache connection over TLS. A cache publishing valkey-tls or redis-tls is reached
+      over TLS; any other value ending in -tls names a cache served over TLS
+      that the runtime is not taught to reach, and halts rather than connecting
+      in plaintext. A server_ca on the connection must name a Secret, since it
+      is mounted, and is refused on a cache served without TLS.
+    */ -}}
+    {{- $cacheTLS := false }}{{ $cacheCA := "" -}}
+    {{- range $alias, $edge := .context.uses }}{{ if eq $edge.socket "cache" -}}
+    {{- $proto := toString (optional (default dict $edge.provides) "protocol" "") -}}
+    {{- $edgeTLS := has $proto (list "valkey-tls" "redis-tls") -}}
+    {{- if $edgeTLS }}{{ $cacheTLS = true }}{{ else if hasSuffix "-tls" $proto -}}
+    {{- fail (printf "the cache connection %s of %q reaches %q, which publishes protocol %s, a cache served over TLS that the Dify plugin runtime does not reach: it speaks the Redis protocol, over TLS to a cache publishing valkey-tls or redis-tls; wire a Redis-protocol cache to the cache socket" $alias $.context.instance_id $edge.target $proto) -}}
+    {{- end -}}
+    {{- if hasKey (default dict $edge.features) "server_ca" -}}
+    {{- $caProvides := optional (optional (default dict $edge.features) "server_ca" dict) "provides" dict -}}
+    {{- if not (and (kindIs "map" $caProvides) (optional $caProvides "name" "")) -}}
+    {{- fail (printf "the server_ca on the cache connection %s of %q publishes no Secret name, so no Secret could be mounted into the runtime's container: attach a server_ca publishing one, such as core/referenced-secret" $alias $.context.instance_id) -}}
+    {{- end -}}
+    {{- if not $edgeTLS -}}
+    {{- fail (printf "the cache connection %s of %q holds a server_ca, but the cache it reaches, %q, publishes protocol %s, served without TLS, so no TLS handshake takes place to check a certificate in: turn client_tls on for that cache, or remove the server_ca" $alias $.context.instance_id $edge.target (default "none" $proto)) -}}
+    {{- end -}}
+    {{- $cacheCA = $alias -}}
+    {{- end -}}
+    {{- end }}{{ end -}}
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # form: stateful selects a StatefulSet on the helm provider; the
+    # persistentTemplate volume and the headless Service below are companions of
+    # this form. The claim holds the installed plugin packages and their
+    # prepared runtime environments.
+    form: stateful
+    replicas: 1
+    # The runtime connects to its database as it starts, and a runtime started
+    # before the database accepts connections panics and is restarted by the
+    # cluster. So this step runs first, in the runtime's own image, and waits
+    # until the database's address accepts a TCP connection: bash opens the
+    # connection through /dev/tcp, each attempt bounded to 5 s and repeated
+    # every 2 s, and once the limit below has passed it gives up, exits
+    # non-zero and names the address, and the cluster runs it again. It reads
+    # the database's host and port and nothing else, so no credential reaches
+    # it. They reach it as the variables DB_HOST and DB_PORT, and the check that
+    # opens the connection is a single-quoted script reading those variables
+    # itself, so the address is never written into any script text a shell
+    # parses, and a value holding a space stays one word. DELIBERATE
+    # NEAR-DUPLICATE: recipe/compose/langgraph copies this wait
+    # for Compose, so a change to it is made to both, and to any later copy.
+    # Its requests equal its limits, as the runtime's do, so the pod keeps its
+    # Guaranteed quality-of-service class; they are the runtime's own
+    # quantities, so the wait never raises what the pod reserves.
+    initContainers:
+      - name: wait-for-database
+        image: "{{ $image }}"
+        command: ["/bin/bash", "-c"]
+        args:
+          - 'limit=300; end=$SECONDS; ((end += limit)); until timeout 5 bash -c ''exec 3<>"/dev/tcp/$DB_HOST/$DB_PORT"'' 2>/dev/null; do if ((SECONDS >= end)); then echo "the database at $DB_HOST:$DB_PORT accepted no TCP connection within $limit s" >&2; exit 1; fi; sleep 2; done; echo "the database at $DB_HOST:$DB_PORT accepts TCP connections"'
+        variables:
+          DB_HOST: "{{ optional $env "DB_HOST" "" | replace "\\" "\\\\" | replace "\"" "\\\"" }}"
+          DB_PORT: "{{ optional $env "DB_PORT" "" | replace "\\" "\\\\" | replace "\"" "\\\"" }}"
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+    containers:
+      main:
+        image: "{{ $image }}"
+        variables:
+          SERVER_PORT: "{{ .infra.port }}"
+          # The backend identity arrives on the inject pipe under the names the
+          # runtime itself reads. DB_DATABASE is the exception: the runtime
+          # keeps its catalogue in its own database on the same server, so the
+          # developer's value wins over the name the edge published.
+          DB_TYPE: postgresql
+          DB_HOST: "{{ optional $env "DB_HOST" "" | replace "\\" "\\\\" | replace "\"" "\\\"" }}"
+          DB_PORT: "{{ optional $env "DB_PORT" "" | replace "\\" "\\\\" | replace "\"" "\\\"" }}"
+          DB_USERNAME: "{{ optional $env "DB_USERNAME" "" | replace "\\" "\\\\" | replace "\"" "\\\"" }}"
+          DB_DATABASE: "{{ .values.plugin_database }}"
+          DB_SSL_MODE: disable
+          REDIS_HOST: "{{ optional $env "REDIS_HOST" "" | replace "\\" "\\\\" | replace "\"" "\\\"" }}"
+          REDIS_PORT: "{{ optional $env "REDIS_PORT" "" | replace "\\" "\\\\" | replace "\"" "\\\"" }}"
+    {{- range $alias, $edge := .context.uses }}
+    {{- if eq $edge.socket "cache" }}
+          REDIS_DB: "{{ $edge.values.db_index }}"
+    {{- end }}
+    {{- end }}
+          # Over TLS the runtime verifies the cache's certificate and the name
+          # dialed. Attached, the connection's server_ca is the authority it
+          # checks against, which CERT_REQUIRED needs named; unattached, the
+          # certificate requirement is left unset, which the runtime reads as
+          # verification against the image's system roots.
+    {{- if $cacheTLS }}
+          REDIS_USE_SSL: "true"
+    {{- if $cacheCA }}
+          REDIS_SSL_CERT_REQS: CERT_REQUIRED
+          REDIS_SSL_CA_CERTS: /etc/dify-plugin-daemon/cache-server-ca/ca.crt
+    {{- end }}
+    {{- end }}
+          # The API-server edge is translated into the internal endpoint the
+          # runtime calls back on.
+          DIFY_INNER_API_URL: "http://{{ optional $env "API_HOST" "" | replace "\\" "\\\\" | replace "\"" "\\\"" }}:{{ optional $env "API_PORT" "" | replace "\\" "\\\\" | replace "\"" "\\\"" }}"
+          # The two keys this runtime and the API server present to each other.
+          # SERVER_KEY is the key a caller must present to this runtime, behind
+          # its own credential slot; DIFY_INNER_API_KEY is the key this runtime
+          # presents back to the API server, held on its api connection.
+          # Unattached, the Recipe emits the pinned development literal below —
+          # the same literal the API-server and worker Recipes emit — so the
+          # stack runs self-contained with no external secret. Attached, the
+          # literal is not emitted and the credential subsystem delivers the
+          # value on the same variable through the attachments block further
+          # down. This runtime, the API server and the worker all read these two
+          # keys, so a credential is attached on all three or on none of them:
+          # attaching it to some of them leaves the rest carrying a different
+          # value, which renders cleanly and is refused when the call between
+          # them is made.
+    {{- if not (hasKey (default dict .features) "plugin_daemon_key") }}
+          SERVER_KEY: dify-plugin-daemon-server-key
+    {{- end }}
+    {{- if not $apiCredential }}
+          DIFY_INNER_API_KEY: dify-plugin-inner-api-key
+    {{- end }}
+          FORCE_VERIFYING_SIGNATURE: "{{ .values.verify_signature }}"
+          MAX_PLUGIN_PACKAGE_SIZE: "{{ .values.max_package_size }}"
+          PLUGIN_MAX_EXECUTION_TIMEOUT: "{{ .values.max_execution_timeout }}"
+          # Remote installing is the runtime's plugin-debugging listener, which
+          # a plugin running on a developer's own machine connects in to. This
+          # Recipe opens no port for it and switches it off: left on, the
+          # runtime refuses to start unless it is given an address to listen
+          # on.
+          PLUGIN_REMOTE_INSTALLING_ENABLED: "false"
+          # Plugin packages and their prepared environments live on the claim
+          # mounted below, so every storage path is rooted there.
+          PLUGIN_STORAGE_TYPE: local
+          PLUGIN_STORAGE_LOCAL_ROOT: /app/storage
+          PLUGIN_WORKING_PATH: /app/storage/cwd
+          PLUGIN_INSTALLED_PATH: plugin
+          PLUGIN_PACKAGE_CACHE_PATH: plugin_packages
+          PLUGIN_MEDIA_CACHE_PATH: assets
+    {{- if not $backendCredential }}
+          DB_PASSWORD: apppass
+    {{- end }}
+    {{- if or $backendCredential (hasKey (default dict .features) "plugin_daemon_key") $apiCredential $cacheCA }}
+        attachments:
+    {{- with $backendCredential }}
+          DB_PASSWORD:
+            connection: "{{ . }}"
+            from: credential
+            as: env
+    {{- end }}
+    {{- if hasKey (default dict .features) "plugin_daemon_key" }}
+          SERVER_KEY:
+            from: plugin_daemon_key
+            as: env
+    {{- end }}
+    {{- with $apiCredential }}
+          DIFY_INNER_API_KEY:
+            connection: "{{ . }}"
+            from: credential
+            as: env
+    {{- end }}
+    {{- with $cacheCA }}
+          # The cache connection's server_ca Secret, whole and read-only.
+          cache-server-ca:
+            connection: "{{ . }}"
+            from: server_ca
+            as: file
+            path: /etc/dify-plugin-daemon/cache-server-ca
+    {{- end }}
+    {{- end }}
+        ports:
+          http: {{ .infra.port }}
+        # The runtime answers GET /health/check on the port it serves. No
+        # start-up time is documented, and the image migrates the plugin
+        # catalogue's database before the runtime starts, so the liveness probe
+        # waits 30 s and allows six misses 10 s apart.
+        health:
+          ready:
+            http: /health/check
+            periodSeconds: 10
+            timeoutSeconds: 5
+          live:
+            http: /health/check
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+        # The resource quantities are quoted so the rendered value stays a
+        # string whatever the Release supplies.
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+        volumeMounts:
+          - name: storage
+            path: /app/storage
+    volumes:
+      storage:
+        persistentTemplate:
+          size: "{{ .infra.storage.size }}"
+          class: "{{ .infra.storage.type }}"
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          http: {{ .infra.port }}
+      headless:
+        type: Headless
+        ports:
+          http: {{ .infra.port }}

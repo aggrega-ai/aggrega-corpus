@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Feature
+metadata:
+  name: core/compose-bridge
+  version: 1.0.0
+  description: >
+    Lets components sitting on different networks of one local compose file
+    reach one another. On the local target a component joins the network of
+    its compose file, or the one its boundary names with the
+    aggrega.ai/namespace annotation: boundaries sharing one compose file
+    without that annotation share one network, and the annotation is what
+    separates them. An edge crossing between two networks has no route;
+    attached at boundary scope, this renders one small proxy into the
+    boundary's own compose file, joined to the networks of the crossing edges'
+    ends, and rewrites each consumer's address so it reaches its target through
+    that proxy. Only an edge whose two ends are assembled into that same file
+    is relayed; a connection between two files is left as written.
+
+    Every input is the operator's, so the operator attaches it in the Release,
+    on the boundary holding the seam, under that boundary's features. Both the
+    listening ports and the rewritten addresses are derived from the edges
+    that actually cross, so no address is hand-authored: what a Release may
+    set, in infra, is the base port a collision falls back to, and which
+    published field is taken as the upstream address. It is a
+    network-architecture concern rather than a per-component one, which is why
+    it attaches to a boundary and gates on no component type.
+  annotations:
+    routing.aggrega.ai/tier: "network"
+  maintainers:
+    - name: "Massimiliano Ferrero"
+      email: "m.ferrero@cognitio.it"
+spec:
+  # No appliesTo gate. compose-bridge is a network-architecture concern that
+  # operates at the boundary level (the FR's executionScope: boundary already
+  # encodes "this runs once per boundary, not per component"). Per-component-
+  # type filtering is meaningless for a boundary-scoped FR; cross-network
+  # routing applies to anything that connects across compose network seams,
+  # not to a specific component-type partition.
+  interoperability:
+    conflictsWith: []
+  schema:
+    # The listen port and the rewritten consumer variables are DERIVED from the
+    # boundary's cross-network uses edges (the target's own port; the variables
+    # the consumer injects from the upstream address field and from `port`) —
+    # not authored. Both knobs below are optional, and the defaults declared
+    # here are the only ones: the FeatureRecipe reads each knob as this schema
+    # resolves it.
+    values:
+      $ref: "BaseComponents#/schemas/BaseFeatureParameter"
+    infra:
+      # Both knobs belong to the network the Release lands in, so the operator
+      # writes them on the boundary attachment in the Release.
+      portBase:
+        type: integer
+        default: 10000
+        description: "Collision-fallback base port. When two bridged edges resolve to the same listen port, the colliding edge is reassigned to the next free port at or above portBase."
+      providesField:
+        type: string
+        default: host
+        description: "The target component's provides field used as the proxy upstream host. A consumer variable injected `from:` this field is rewritten to reach the gateway, and where the same connection also injects a variable `from: port`, that variable is rewritten to the gateway's listen port."

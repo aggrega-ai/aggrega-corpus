@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Manifest
+metadata:
+  name: model-api-key-sharing-manifest
+  version: "1.0.0"
+  description: >
+    The helm Ops mapping for the per-consumer release: the agent binds to the
+    crewai helm Recipe, the gateway to the openai-compatible helm Recipe, and
+    the credential to k8s-secret-from-parameter, which materializes a Kubernetes
+    Secret from each connection's credential and publishes its locator for that
+    agent to reference.
+spec:
+  mappings:
+    components:
+      type:
+        core/ai-agent/crewai: helm/crewai:1.0.0
+        core/ai-model/openai-compatible: helm/openai-compatible:1.0.0
+    features:
+      type:
+        core/referenced-secret:1.0.0: helm/k8s-secret-from-parameter:1.0.0

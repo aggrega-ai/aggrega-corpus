@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Release
+metadata:
+  name: managed-dns
+  environment: production
+  version: "1.0.0"
+spec:
+  aggregate: aggregate
+  manifest: manifest-managed
+  boundaries:
+    stack:
+      directory: stack
+      components:
+        # Listed with no sizing of its own: naming a component in a boundary
+        # is what places it there, and this application keeps the operational
+        # defaults its Component declares. Its sizing is identical in every
+        # Release of this example, so nothing about the application varies.
+        app: {}
+        db:
+          # RDS keeps the instance's automated backups for 7 days unless a
+          # core/backup attachment says otherwise; this one keeps each for 14.
+          features:
+            backup:
+              type: core/backup
+              infra:
+                retention_days: 14
+          infra:
+            engine_version: "16"
+            storage:
+              size: 100Gi
+              type: gp3
+            ha:
+              enabled: true
+              read_replicas: 0
+            # The DNS name the operator points at the instance once it exists.
+            # The Recipe publishes it as the database's host in place of the
+            # Terraform reference, so the application, which renders to
+            # Kubernetes, is handed a name it can resolve. Nothing here creates
+            # the record: the compiler pipes the name through without resolving
+            # it, and pointing it at the instance is the operator's.
+            overrides:
+              host: db.internal.example.net

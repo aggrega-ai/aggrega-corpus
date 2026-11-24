@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Release
+metadata:
+  name: greeter-dev
+  environment: development
+  version: "1.0.0"
+spec:
+  aggregate: aggregate
+  manifest: manifest
+  boundaries:
+    app:
+      directory: app
+      components:
+        greeter-default:
+          infra:
+            port: 8080
+        greeter-special:
+          infra:
+            port: 8081

@@ -1,0 +1,118 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/ai-pipeline/argo-workflows
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    Argo Workflows, a workflow engine for Kubernetes. A run is submitted as a
+    Workflow custom resource naming the steps to take and how they depend on one
+    another; the workflow controller watches those resources and reconciles each
+    one, starting a pod per step, retrying a step that fails, fanning a step out
+    over a list of inputs, and recording each step's outputs so a later step can
+    read them. The cluster's own API holds the run, so the engine keeps no
+    separate run database. An API server is deployed alongside the controller and
+    serves the submission and query API and the web console; consumers reach it
+    through the provides contract. Argo Workflows is realized on Kubernetes
+    through a Helm Recipe that sources the project's own chart; it has no
+    standalone local-container form, so no Compose Recipe is provided.
+
+    With `values.metrics_enabled` true the Recipe serves the workflow
+    controller's metrics, at /metrics, over plain HTTP on a ClusterIP Service
+    of their own, and publishes that address as `metrics_endpoint`; false,
+    that key is empty. The port checks no caller.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: ai-pipeline
+    pipeline.aggrega.ai/mode: reconciled
+    component.aggrega.ai/hosting: self-hosted
+    component.aggrega.ai/upstream-licensing: osi-approved
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      install_crds:
+        type: boolean
+        default: true
+        description: Installs the Workflow custom resource definitions with the release. Turn it off when the definitions are managed out of band; the controller reconciles nothing until they exist in the cluster.
+      workflow_namespaces:
+        type: array
+        items: { type: string }
+        default: ["default"]
+        description: Namespaces this controller runs workflows in. The role and role binding a workflow pod needs are created in each one, so a Workflow submitted to a namespace outside this list is not reconciled.
+      # The workflow controller's own metrics, in the Prometheus format. The
+      # controller serves them whatever this value says, at /metrics on port
+      # 9090 of its pod, over TLS with a certificate it generates itself, which
+      # checks no caller, and no Service carries them. With this value true the
+      # Recipe has the controller serve them over plain HTTP instead, on the same
+      # port, the metrics and nothing else, and the chart adds a ClusterIP
+      # Service of the controller's own carrying that port as 8080. That Service
+      # stays ClusterIP whatever type the API server's takes. False leaves the
+      # metrics as the controller serves them by default and their address
+      # unpublished.
+      metrics_enabled:
+        type: boolean
+        default: false
+        description: Serves the workflow controller's own metrics, in the Prometheus format, over plain HTTP on a ClusterIP Service of their own, and publishes their address as `metrics_endpoint`; while false that key is empty. The port checks no caller, so anything that reaches it can read them.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      port:
+        type: integer
+        min: 1
+        max: 65535
+        default: 2746
+        description: Port the API server's Service listens on. Most operators should omit this and let the Recipe assign the default (2746).
+      source_version:
+        type: string
+        description: Source artifact version (Helm chart). Overrides the Recipe's default source version. Changing from default does not guarantee value mapping compatibility.
+      compute:
+        cpu:
+          type: string
+          default: 100m
+        memory:
+          type: string
+          default: 128Mi
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via the provides contract.
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name of the Service fronting the workflow API server.
+          A consumer that submits or queries a run dials this name together
+          with `port`.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port that Service accepts API requests on. It follows the port
+          an operator set in the Release, so a consumer reads it rather than
+          assuming a default.
+      protocol:
+        type: string
+        description: >
+          How the published address is spoken to — `http`, so a consumer knows
+          to submit runs over the HTTP API rather than a stream or an RPC
+          channel.
+      # The address a Prometheus server scrapes the workflow controller's
+      # metrics at, while values.metrics_enabled is true: /metrics on port 8080
+      # of the controller's own metrics Service, not of the API server's Service
+      # host names. The Recipe publishes it spelled out in full.
+      metrics_endpoint:
+        type: string
+        description: >
+          The full address Prometheus scrapes the workflow controller's metrics
+          at — scheme, host, port and path, `http://<host>:8080/metrics`, the
+          host being the controller's own metrics Service rather than the API
+          server's. Empty while values.metrics_enabled is false.

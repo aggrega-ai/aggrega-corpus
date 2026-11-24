@@ -1,0 +1,207 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/ai-agent/agenta-cron
+  version: 1.0.0
+  # metadata.license is deliberately absent, for the reason stated on
+  # core/ai-agent/agenta-api: the platform is published open-core, no single
+  # SPDX identifier covers it, and the class is carried on the
+  # component.aggrega.ai/upstream-licensing label below while the licence of the
+  # pinned artifact is named on this component's Recipe.
+  description: >
+    The scheduler of an agent workspace — the process that decides when a
+    time-triggered thing is due and puts it on the queue. A background agent set
+    to run every morning, and the platform's own periodic housekeeping, both
+    become work because this tier woke up and enqueued them.
+
+    It is a resident process carrying its own schedule table rather than a
+    platform-level scheduled object, which is how the platform's own published
+    manifests run it: one container that stays up and fires on its own clock.
+    It reads the schedules from the relational backend wired through `backend`,
+    using the two database names given on that edge, enqueues onto the queue
+    wired through `queue`, and uses the cache wired through `cache` for the same
+    read-caching the rest of the platform does. It performs none of the work
+    itself — the queue-consuming worker tier does — so this tier stays small
+    however much is scheduled.
+
+    Wire here because a schedule with nothing evaluating it never
+    fires. That failure is silent from every other tier: the agent exists, its
+    schedule is stored, and nothing happens at the appointed time.
+
+    Exactly one instance of this component belongs in an Aggregate. It is not
+    horizontally scalable — two schedulers reading one schedule table each
+    enqueue the same due item — so scale is a question for the worker tier
+    rather than this one.
+
+    It serves no port and nothing connects to it, so it publishes no provides
+    contract.
+
+    Realized on Kubernetes via its Helm Recipe, which synthesizes the tier as a
+    stateless single-replica Deployment with no Service, running the platform
+    image under its scheduler entry point.
+  labels:
+    component.aggrega.ai/type: worker
+    component.aggrega.ai/category: ai-agent
+    component.aggrega.ai/hosting: self-hosted
+    component.aggrega.ai/upstream-licensing: open-core
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  inject: [env]
+
+  usesSchema:
+    backend:
+      selector: "component.aggrega.ai/category=datastore"
+      inject: [env]
+      required: true
+      valueSchema:
+        core_database:
+          type: string
+          default: agenta_core
+          description: Database on the wired backend holding the platform's own model, including the schedules this tier reads. It names the same database the control-plane API reads.
+        tracing_database:
+          type: string
+          default: agenta_tracing
+          description: Database on the same backend holding traces and spans. It names the same database the control-plane API reads.
+        # A statement about this connection's target, authored on the
+        # connection: the relational backend it reaches takes no credential. It
+        # changes nothing this component renders.
+        unauthenticated:
+          type: boolean
+          default: false
+          description: Declares that the relational backend this connection reaches takes no credential, so a connection carrying none is intended rather than an omission. It changes nothing this component renders.
+      # To replace the Recipe's development default, attach core/random-password
+      # on the connection: the cluster generates it, and the backend takes the
+      # same credential by core/referenced-secret.
+      featuresSchema:
+        credential:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [env]
+          description: "Password the scheduler authenticates to the relational backend this connection reaches with, delivered as an env secret reference and substituted into the connection URL at run time. The same credential is attached to the control-plane API's backend connection, because both reach the same server. Unattached, the Recipe emits the development literal `apppass`, the default the standard-library relational Recipes leave in place; this catalog publishes it, so every Release that leaves the slot unattached shares that password."
+    # A cache publishing protocol valkey-tls or redis-tls is reached over TLS: the URL
+    # takes the rediss scheme, and the platform's Redis client checks the
+    # cache's certificate and the name dialed against the authority in
+    # server_ca where one is attached, and against the image's default trust
+    # store where not. A cache publishing another value served over TLS halts
+    # the build, naming the connection.
+    cache:
+      selector: "component.aggrega.ai/category=datastore"
+      inject: [env]
+      required: true
+      valueSchema:
+        db_index:
+          type: integer
+          min: 0
+          max: 15
+          default: 0
+          description: Logical-database index this connection uses on the wired cache. It matches the control-plane API's index on the same cache.
+      # The authority the platform's Redis client checks the cache's
+      # certificate against, for a cache whose certificate an authority the
+      # image does not already trust signs. Secret-kind-pinned because a
+      # referenceable Secret is what the Recipe mounts, and so marked sensitive
+      # as every secret-kind slot is, though the authority's certificate is not
+      # itself secret; delivered as a file.
+      featuresSchema:
+        server_ca:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [file]
+          description: "Optional authority the platform's Redis client checks the cache's certificate against while the cache publishes protocol valkey-tls or redis-tls, where the image does not already trust the authority that signs it. Its Secret holds ca.crt. The Recipe mounts the whole Secret read-only and names the file in the connection's URL. The build halts on a server_ca publishing no Secret name, and on one wired to a cache served without TLS. Fill it with core/referenced-secret."
+    # A queue publishing protocol valkey-tls or redis-tls is reached over TLS: the URL
+    # takes the rediss scheme, and the platform's Redis client checks the
+    # queue's certificate and the name dialed against the authority in
+    # server_ca where one is attached, and against the image's default trust
+    # store where not. A queue publishing another value served over TLS halts
+    # the build, naming the connection.
+    queue:
+      selector: "component.aggrega.ai/category=datastore"
+      inject: [env]
+      required: true
+      valueSchema:
+        db_index:
+          type: integer
+          min: 0
+          max: 15
+          default: 0
+          description: Logical-database index this connection uses on the wired queue. It matches the index the worker tiers read, because this tier is what puts work there.
+      # The authority the platform's Redis client checks the queue's
+      # certificate against, for a queue whose certificate an authority the
+      # image does not already trust signs. Secret-kind-pinned because a
+      # referenceable Secret is what the Recipe mounts, and so marked sensitive
+      # as every secret-kind slot is, though the authority's certificate is not
+      # itself secret; delivered as a file.
+      featuresSchema:
+        server_ca:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [file]
+          description: "Optional authority the platform's Redis client checks the queue's certificate against while the queue publishes protocol valkey-tls or redis-tls, where the image does not already trust the authority that signs it. Its Secret holds ca.crt. The Recipe mounts the whole Secret read-only and names the file in the connection's URL. The build halts on a server_ca publishing no Secret name, and on one wired to a queue served without TLS. Fill it with core/referenced-secret."
+
+  featuresSchema:
+    # Required, with no default. A key the cluster generates is attached through
+    # core/random-password, and slots sharing it take it by core/referenced-secret.
+    auth_key:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      required: true
+      description: "Required key the platform signs its own internal tokens with. It carries the same value as the control-plane API's slot. There is no default: the build halts when nothing fills this slot."
+    # Required, with no default. A key the cluster generates is attached through
+    # core/random-password, and slots sharing it take it by core/referenced-secret.
+    crypt_key:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      required: true
+      description: "Required key stored credentials are encrypted under. It carries the same value as the control-plane API's slot. There is no default: the build halts when nothing fills this slot."
+
+  schema:
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this. This tier exposes no values pillar: what it does is
+      # decided by the schedules stored in the backend, which are authored in
+      # the platform rather than in an Aggregate.
+      engine_version:
+        type: string
+        default: "v0.114.1"
+        description: Platform API container image tag. This tier runs the same image as the control-plane API under a different entry point, so a Release moves both together.
+      log_level:
+        type: string
+        enum: [DEBUG, INFO, WARNING, ERROR, CRITICAL]
+        default: INFO
+        description: Log verbosity the scheduler emits.
+      compute:
+        cpu:
+          type: string
+          default: 100m
+        memory:
+          type: string
+          default: 256Mi
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+
+  # A connection to a target its catalog labels a managed service
+  # (component.aggrega.ai/hosting: managed) carries a credential, or says on the
+  # connection that its target takes none. The rule reads the target's labels,
+  # the connection's unauthenticated value and its credential slot, all known
+  # before a Recipe binds, so it holds whichever Recipe renders this component;
+  # a self-hosted target draws nothing. The list names every socket of this
+  # component that declares unauthenticated.
+  assertions:
+    managed_target_needs_a_credential: >-
+      {{- range $socket := list "backend" -}}
+      {{- range $alias, $connection := (optional $.uses $socket dict) -}}
+      {{- $managed := eq (optional $connection.labels "component.aggrega.ai/hosting" "") "managed" -}}
+      {{- $optedOut := optional $connection.values "unauthenticated" false -}}
+      {{- if and $managed (not (hasKey $connection.features "credential")) (not $optedOut) -}}
+      {{- fail (printf "the %s connection %s of %q reaches %q, whose component.aggrega.ai/hosting label is managed, with no credential: attach one under credential on that connection, or set unauthenticated: true in its values" $socket $alias $.metadata.instance_id $connection.target) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- end -}}

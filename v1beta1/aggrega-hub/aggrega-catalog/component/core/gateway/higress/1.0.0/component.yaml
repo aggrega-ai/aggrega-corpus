@@ -1,0 +1,454 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/gateway/higress
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    Higress, an open-source gateway built on Envoy and configured through
+    Kubernetes resources: its routes are ingresses, the services it reaches
+    are its own registry's entries, and its controls are WebAssembly plugins
+    on the routes they act on. It terminates client HTTP on its proxy port,
+    publishing its host, port and protocol.
+
+    It serves models: each model wired to its models socket is reached under
+    an alias at /<alias>/v1 through Higress's AI proxy, sent to the endpoint
+    and model name the model publishes, presenting the connection's
+    credential from its Secret; over https it checks that the model's
+    certificate chains to the system's trust anchors and names its host.
+    Connections naming one alias in serves share its requests. It publishes
+    the route of values.model as its endpoint and that alias as its model, so
+    an agent's model socket takes it in place of a model; with nothing wired
+    both are empty.
+
+    On those routes it masks requests, keeps a token budget in its cache
+    socket's store, records each model request in its access log and sets
+    each route's retry, refusing by name what Higress cannot keep; it declares
+    no callers. Reply validation, the fallback chain, the semantic cache, the
+    prompt-injection shield and latency-based target selection halt the build
+    naming what Higress lacks.
+
+    It pulls its plugin modules from Higress's plugin registry at run time,
+    which the cluster must reach and the build cannot check.
+
+    It is realized on Kubernetes by `higress-chart` alone, and publishes the
+    pod label, port name and path a scraper discovers its gateway's metrics
+    by.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: gateway
+    component.aggrega.ai/hosting: self-hosted
+    component.aggrega.ai/upstream-licensing: osi-approved
+    # Model API: the endpoint this gateway publishes answers the OpenAI API —
+    # the routes Higress's AI proxy serves under /<alias>/v1 for the models
+    # wired to its models socket, each alias in the path — so a consumer drives
+    # it with an OpenAI client whichever model answers behind it. It is what
+    # lets a model socket selecting this key admit the gateway beside the
+    # models themselves; the gateway publishes the endpoint and the model name
+    # such a socket's consumers read. The value names what the product serves,
+    # not a configured state: with nothing wired to the models socket the
+    # gateway serves no model, and both of those are empty. Read off the AI
+    # proxy's own reference at Higress 2.2.5, the release `higress-chart` runs.
+    model.aggrega.ai/api: openai
+    # The gateway capability dimension: on a route serving a model, Higress's
+    # AI proxy reads each request's body — the model it names, whether it
+    # streams — and its plugins read the tokens each reply reports, so a
+    # runtime control that has to parse a model payload can attach here. The
+    # value names what the product does on such a route, not a configured
+    # state: with nothing wired to the models socket no route parses a model
+    # payload, and each Feature selecting this value says, through its
+    # realization, what this gateway honours of it.
+    gateway.aggrega.ai/intelligence: semantic
+    # Data-path capability labels: what this gateway is able to do, never what
+    # a given Release has switched on.
+    #
+    # Content masking: Higress's ai-data-masking plugin replaces each match of
+    # a regular expression written in its configuration with a replacement
+    # value, in the text of a chat request's messages before the request is
+    # forwarded, and recognizes no entity types — the fidelity this value
+    # names, read off the plugin's own reference and source at Higress 2.2.5.
+    # It masks nothing until patterns are supplied, which is what attaching
+    # core/data-masking does; `higress-chart` writes them onto the routes of
+    # the models wired to the models socket. The plugin holds a request's
+    # whole body within the gateway's per-connection buffer, 32 KiB at the
+    # chart's default, so while it masks a route a request whose body exceeds
+    # that is refused with HTTP 413, as the spec comment below says.
+    dataplane.aggrega.ai/content-masking: pattern-list
+    # Period budget: Higress's ai-token-ratelimit plugin refuses model requests
+    # once the tokens it has counted over a window exceed a limit set in its
+    # configuration — the prompt and completion tokens each reply reports,
+    # together — which is the fidelity this value names. It prices nothing, so
+    # it counts no cost. It refuses nothing until core/period-budget is
+    # attached; `higress-chart` then writes the budget onto the routes of the
+    # models wired to the models socket, counted in the Redis-protocol store on
+    # the cache socket. While that store cannot be reached, model requests are
+    # served and not counted: the plugin has no setting that refuses them then.
+    dataplane.aggrega.ai/period-budget: tokens
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # The catalog does not realize Higress's compose distribution: its project
+  # means it mainly for local testing, and it runs several cooperating
+  # services configured through a store of its own beside the cluster
+  # resources the chart reads.
+  #
+  # How each AI gateway control the labels admit is or is not realized by
+  # `higress-chart`, each written as a Higress plugin on the routes of the
+  # models wired to the models socket:
+  # - core/data-masking: Higress's ai-data-masking plugin, masking the text of
+  #   a chat request's messages; while the attachment keeps its protections,
+  #   a request carrying anything that plugin does not read is refused before
+  #   it is forwarded, but for a body a client deliberately writes so that the
+  #   gateway's validation cannot decode it, as data-masking-higress describes.
+  #   Whatever it relaxes, a body holding U+FFFD, the character a byte that is
+  #   not valid UTF-8 is read as, is refused with HTTP 403, since the masking
+  #   plugin forwards a body that is not valid UTF-8 unmasked.
+  #   data-masking-higress refuses entity types, restore, refuse and masking
+  #   replies. While it is attached, whatever it relaxes, a request whose body
+  #   exceeds 32 KiB is refused with HTTP 413 before it is
+  #   forwarded: the masking plugin, first on the route, holds the whole body
+  #   before the AI proxy can raise the gateway's per-connection buffer, which
+  #   `higress-chart` leaves at the chart's default of 32 KiB. Read from
+  #   Higress's source at 2.2.5 and its Envoy, and observed on a running
+  #   gateway.
+  # - core/period-budget: Higress's ai-token-ratelimit plugin, counted in the
+  #   store on the cache socket; period-budget-higress refuses US dollars,
+  #   prompt or completion tokens alone, scope caller and any window but a
+  #   second, a minute, an hour or a day.
+  # - core/audit-logging: a line in the gateway's access log for each request,
+  #   carrying the model that answered and the tokens its reply reports, which
+  #   Higress's ai-statistics plugin writes; audit-logging-higress refuses a
+  #   cost, a verified caller and a retention.
+  # - core/retry-policy: not a plugin but the route's own retry, written as
+  #   Ingress annotations onto every model route; max_attempts of 1 writes it
+  #   off. retry-policy-higress holds the refusals.
+  # - core/response-validation, core/fallback-chain, core/semantic-caching
+  #   and core/prompt-injection-shield: not realized; the Higress
+  #   FeatureRecipe of each, response-validation-higress and its kin, halts
+  #   every attachment, naming what Higress lacks — a reply check that keeps
+  #   the OpenAI reply and cannot be skipped by a client, a walk along a
+  #   chain of models, a cache keeping callers apart, a guard that refuses
+  #   when it cannot be reached.
+  # - core/target-selection: not realized; target-selection-higress halts every
+  #   attachment, naming that the gateway can measure latency but cannot make
+  #   the choice route, and that it chooses no target by cost.
+  # - core/caller-allowlist: not realized; caller-allowlist-higress halts every
+  #   attachment, naming that the gateway's container declares no port a policy
+  #   could admit its model traffic on.
+  # - core/prompt-deny-patterns: the gateway carries no
+  #   dataplane.aggrega.ai/prompt-guard value, so an attachment halts at the
+  #   Feature's selector.
+  # The gateway declares no callers, so it verifies none, and each
+  # realization refuses by name a value needing a verified caller.
+  usesSchema:
+    # The models the gateway serves through its AI proxy, each wired as a
+    # connection: any ai-model Component, managed or self-hosted, one or
+    # several. A connection serves the alias its values name in serves, or,
+    # where it names none, the alias that is its own name; the gateway's
+    # aliases are those names, each served at /<alias>/v1 — a chat request at
+    # /<alias>/v1/chat/completions, and every other OpenAI operation under the
+    # same prefix. A request is sent to the endpoint the model publishes, with
+    # the operation's path appended, asking for the model name it publishes
+    # whatever name the request carries — pointers the compiler pipes into the
+    # configuration and never resolves; a request naming no model at all is
+    # sent asking for that name too. The gateway writes a wired model's route for the
+    # OpenAI API alone, so a connection whose target's model.aggrega.ai/api is
+    # not openai halts the build, naming it.
+    #
+    # Connections naming one alias are its candidates. With no control that
+    # chooses between them attached, the gateway spreads the alias's requests
+    # across them in equal shares, each request going to one of them; with
+    # one candidate it sends every request there. A connection naming no
+    # serves is an alias of its own. The connections of one alias reach their
+    # models all over https or all over http: the gateway checks an https
+    # model's host name through a setting on the alias's route that has it
+    # speak TLS to every candidate, so an alias mixing the two halts the
+    # build, naming its https and its http connections.
+    #
+    # The credential the gateway presents to a wired model is the one its
+    # connection carries in the credential slot, sent as a bearer token in
+    # the Authorization header. The configuration names the Secret holding it
+    # and never the value: the Higress controller reads the key from that
+    # Secret, in the gateway's namespace, and hands it to the gateway. A
+    # connection carrying none adds no credential, and the gateway passes on
+    # the key the request itself presents. Higress's AI proxy also copies the
+    # Authorization header a client sends into an X-HI-ORIGINAL-AUTH header
+    # on every request; `higress-chart` removes that copy on every model
+    # route, so a key a client presents never reaches a model beside the
+    # connection's own credential, and reaches a connection carrying none
+    # only as the pass-through above. Over https the gateway checks that the
+    # model's certificate chains to the system's trust anchors and names the
+    # model's host — the host of the endpoint the model publishes, which
+    # `higress-chart` qualifies with the model's namespace where it carries
+    # no dot — whatever host the client sent, and otherwise sends the model
+    # nothing. A connection to a target labelled
+    # component.aggrega.ai/hosting: managed with no credential halts the
+    # build unless its values set unauthenticated: true. A self-hosted server
+    # that checks a key holds it in a slot of its own, and its connection
+    # carries a credential holding the same key.
+    #
+    # Optional: with nothing wired, the gateway serves no model and its
+    # rendered output is the same as a gateway without this socket.
+    models:
+      selector: "component.aggrega.ai/category=ai-model"
+      valueSchema:
+        unauthenticated:
+          type: boolean
+          default: false
+          description: Declares that the model this connection reaches takes no credential, so a connection carrying none is intended rather than an omission. It changes nothing this component renders.
+        serves:
+          type: string
+          pattern: "^[A-Za-z0-9_-]+$"
+          description: The alias this connection's model serves. Connections naming one alias are served together under it, its requests shared among their models, and must all reach their models over https or all over http. Omitted, the alias is the connection's own name, so with no serves set every route is exactly as it would be without the value. It takes letters, digits, hyphens and underscores, as a connection's name does, and is the path segment the alias is served under.
+      # No inject list: no container of this component receives the
+      # credential. The Recipe names its Secret in the AI proxy's
+      # configuration, and the Higress controller reads the key from it.
+      featuresSchema:
+        credential:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          description: "Optional credential the gateway presents to the model this connection reaches, as a bearer token. When attached, the AI proxy's configuration names the Secret the credential publishes and the data key holding the key there, and the Higress controller reads the key from that Secret, in the gateway's namespace, so the key appears in no rendered file. The credential must publish both, and a Secret name holding a dot halts the build, because Higress reads the name up to its first dot; a realization naming its own Secret after the connection and this slot writes such a dot, so realize it with one naming an existing Secret whose name holds none. Unattached, the gateway adds no credential."
+    # The Redis-protocol store Higress's ai-token-ratelimit plugin keeps a
+    # period budget's count in. The selector admits the key-value stores; the
+    # Recipe halts on one whose published protocol is neither redis nor
+    # valkey, the two that speak the protocol the plugin talks. A store served
+    # over TLS alone, such as one publishing valkey-tls, halts too: the
+    # plugin's Redis settings offer no TLS connection. The selected
+    # component's provides host and port arrive on the connection and become
+    # an entry of the gateway's registry, through which the plugin reaches the
+    # store: a host carrying no dot is qualified with the namespace the
+    # Release places the store in, or `default` where it declares none,
+    # because a published host carries no namespace.
+    #
+    # Optional: wired alone it changes nothing rendered, because the store is
+    # written into the gateway only while core/period-budget is attached, and
+    # that attachment halts the build unless this socket holds a connection.
+    # The plugin keeps its count in one store, so a second connection halts
+    # the build.
+    #
+    # The password the plugin presents to the store is the connection's own,
+    # in its credential slot, for a store that requires one:
+    # core/datastore/redis does once a credential is attached to its own
+    # password slot, and a credential holding the same password is attached
+    # here, both reading one parameter. With none, the plugin presents no
+    # password.
+    cache:
+      selector: "datastore.aggrega.ai/engine=kv"
+      valueSchema:
+        unauthenticated:
+          type: boolean
+          default: false
+          description: Declares that the store this connection reaches takes no credential, so a connection carrying none is intended rather than an omission. It changes nothing this component renders.
+      # No inject list: no container of this component receives the credential
+      # through it. The Recipe names its Secret in the budget's configuration,
+      # and the Higress controller reads the password from that Secret.
+      featuresSchema:
+        credential:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          description: "Optional password the gateway's token budget presents to the Redis-protocol store this connection reaches. When attached, the budget's configuration names the Secret the credential publishes and the data key holding the password there, and the Higress controller reads the password from that Secret, in the gateway's namespace, so it appears in no rendered file. The credential must publish both, and a Secret name holding a dot halts the build, because Higress reads the name up to its first dot; realize it with one naming an existing Secret whose name holds none. Unattached, the plugin connects with no password, which is what the shipped store components expect by default."
+
+  schema:
+    # The models the gateway serves arrive on the models socket, so the one
+    # developer value is the alias it publishes as its model.
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      #
+      # The alias this gateway publishes as its model. A component wired to the
+      # gateway's address over a model socket — an agent, a tool, a memory store
+      # — reads one endpoint and one model name off the edge, the same keys a
+      # model publishes; the endpoint is this alias's route and the model name
+      # is the alias. A Recipe writes the gateway's published values from what
+      # the gateway itself was given, which holds none of its connections, so
+      # the published alias is named here rather than taken from the socket:
+      # with a connection on the models socket this value is required, and with
+      # none it is omitted.
+      model:
+        type: string
+        description: The alias this gateway publishes as its model, and whose route its published endpoint addresses — a serves value a models connection names, or the name of a connection naming none. It must be an alias the models socket serves, and the build halts naming this value otherwise; it is required while the models socket holds a connection, and omitted while it holds none.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      #
+      # The proxy port: the port the gateway's Envoy listens on for client
+      # HTTP traffic and the port of the Service in front of it, so the
+      # published address and the listener move together. The chart's own
+      # default is 80, which the gateway binds without running as root,
+      # because `higress-chart` allows its pod the unprivileged-port range
+      # from 0.
+      http_port:
+        type: integer
+        min: 1
+        max: 65535
+        default: 80
+        description: Proxy data-plane port consumers connect to.
+      source_version:
+        type: string
+        description: Version of the Higress chart the chart-backed realization pulls. The realization holds the chart versions its configuration is proven at, and the build halts naming them on any other.
+      # The gateway's own resources, as both its requests and its limits. The
+      # defaults are the chart's own sizing for the gateway. The controller
+      # keeps the chart's own requests, which the Recipe states.
+      compute:
+        cpu:
+          type: string
+          default: 2000m
+        memory:
+          type: string
+          default: 2048Mi
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name of the Service fronting the gateway's proxy, the
+          name alone without a namespace. A consumer sends its client traffic
+          here rather than to the service behind the gateway.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port that Service accepts proxied traffic on, infra.http_port.
+      protocol:
+        type: string
+        description: How the published address is spoken to — `http`, so a consumer composes an address on that scheme.
+      # endpoint and model together are the contract every model component
+      # publishes, which is what lets a model socket take this gateway in place
+      # of a model with its consumer's Recipe unchanged. Neither is required:
+      # with nothing wired to the models socket the gateway serves no model and
+      # publishes both empty.
+      endpoint:
+        type: string
+        description: >
+          Full base URL of the OpenAI-compatible API the gateway serves for the
+          alias values.model names, with the host, the port and that alias's
+          route already composed. A caller hands it to a client library as its
+          base URL. Every other alias is served at the same host and port under
+          its own name in the path. Empty while nothing is wired to the models
+          socket.
+      model:
+        type: string
+        description: >
+          The alias a consumer wired to the gateway sends as its model name:
+          values.model. The route behind the endpoint asks each model for the
+          name that model publishes, whatever name a request carries. Empty
+          while nothing is wired to the models socket.
+      # Where Prometheus finds the data plane's metrics. Every gateway pod runs
+      # Higress's agent beside its Envoy, and the agent's status port, a
+      # container port named istio-prom, 15020, serves the agent's metrics
+      # merged with Envoy's at /stats/prometheus, in plain HTTP with no caller
+      # check, as Higress's own pod monitor scrapes them. To a caller outside
+      # the pod that port answers those metrics and the agent's readiness;
+      # its routes that stop or drain the gateway, its profiling routes and its
+      # name-table dump refuse any caller but the pod's own loopback address,
+      # and its forwarded application probes answer only probes the pod
+      # declares, which the gateway's pod declares none of. No Service carries
+      # the port, and each gateway pod serves only its own counters, so a
+      # scraper discovers the pods directly. The controller serves metrics of
+      # its own; they are not published, since a target publishes one set of
+      # facts, its data plane's.
+      # None of the keys carries a namespace: a scraper reads where the target
+      # runs from its own connection.
+      metrics_pod_selector:
+        type: string
+        description: >
+          Kubernetes label selector matching the gateway's pods, for a scraper
+          that discovers those pods directly rather than scraping one address.
+          Published beside `metrics_pod_port` and `metrics_path`.
+      metrics_pod_port:
+        type: string
+        description: >
+          Name of the container port on those pods that carries the metrics,
+          `istio-prom`.
+      metrics_path:
+        type: string
+        description: >
+          Path the metrics are served at on that port, `/stats/prometheus`.
+
+  # The rules of the models and cache sockets, with the credential rule every
+  # socket declaring unauthenticated carries. Each reads what the Aggregate
+  # and the Release wrote — the values, and each connection's target labels,
+  # values and attachments — all known before a Recipe binds, so each holds
+  # whichever Recipe renders this component and halts before anything
+  # renders. The refusals of the Features the gateway's labels admit live in
+  # their realizations rather than here: an assertion here reads an
+  # attachment's values and not its infra, where much of what those
+  # realizations refuse is set.
+  #
+  # DELIBERATE NEAR-DUPLICATES: published_model_is_a_wired_alias,
+  # wired_model_speaks_the_openai_api and managed_target_needs_a_credential
+  # repeat the rules core/gateway/apisix declares for its models socket, and
+  # one_counter_store the rule core/gateway/envoy-gateway declares for its
+  # cache socket. Each assertion sits inside the entity it guards, and no
+  # catalog kind holds an assertion for several components to share; here an
+  # alias is the serves value a connection names, or its own name, where on
+  # APISIX it is always the connection's name.
+  assertions:
+    # The budget's configuration names one store.
+    one_counter_store: >-
+      {{- $stores := sortAlpha (keys (optional .uses "cache" dict)) -}}
+      {{- if gt (len $stores) 1 -}}
+      {{- fail (printf "%q has %s on its cache socket, but Higress's token budget keeps its count in one store; keep one of them" .metadata.instance_id (join " and " $stores)) -}}
+      {{- end -}}
+    # The model the gateway publishes must be one it serves. values.model names
+    # an alias the models socket serves, and is required while the socket holds
+    # a connection, because the published values are written from what the
+    # gateway was given and a connection is not among it. With nothing wired, a
+    # value naming an alias names a route the gateway does not serve.
+    published_model_is_a_wired_alias: >-
+      {{- $served := dict -}}
+      {{- range $name, $connection := (optional .uses "models" dict) -}}
+      {{- $_ := set $served (optional (optional $connection "values" dict) "serves" $name) true -}}
+      {{- end -}}
+      {{- $aliases := sortAlpha (keys $served) -}}
+      {{- with optional .values "model" "" -}}
+      {{- if not (has . $aliases) -}}
+      {{- if $aliases -}}
+      {{- fail (printf "values.model is %q, but the models socket serves no alias of that name, so a component wired to this gateway would be sent to a route it does not serve; set values.model to one of the aliases the models socket serves, each a serves value or the name of a connection naming none: %s" . (join ", " $aliases)) -}}
+      {{- else -}}
+      {{- fail (printf "values.model is %q, but nothing is wired to the models socket, so the gateway serves no model to publish under that alias; wire a model to the models socket under that alias, or remove values.model" .) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- else -}}
+      {{- if $aliases -}}
+      {{- fail (printf "values.model is not set, but the models socket serves %s, so the gateway cannot tell which of them a component wired to it asks for, and the alias a connection is served under is not among what its published values are written from; set values.model to one of them" (join ", " $aliases)) -}}
+      {{- end -}}
+      {{- end -}}
+    # A wired model's route is written from the endpoint and the model name the
+    # model publishes, for the AI proxy to reach over the OpenAI API, which is
+    # what model.aggrega.ai/api: openai asserts answers at that endpoint. A
+    # model whose API is another needs the proxy's own settings for that
+    # provider, which nothing the model publishes names, so it halts rather
+    # than being written as a guess.
+    wired_model_speaks_the_openai_api: >-
+      {{- range $name, $connection := (optional .uses "models" dict) -}}
+      {{- $api := optional $connection.labels "model.aggrega.ai/api" "" -}}
+      {{- if ne $api "openai" -}}
+      {{- fail (printf "the models connection %s of %q reaches %q, whose model.aggrega.ai/api is %q, but the gateway writes a wired model's route from the endpoint and model name it publishes for the OpenAI API alone, so it cannot write a route for it; wire a model whose model.aggrega.ai/api is openai instead" $name $.metadata.instance_id $connection.target $api) -}}
+      {{- end -}}
+      {{- end -}}
+    # A connection to a target its catalog labels a managed service
+    # (component.aggrega.ai/hosting: managed) carries a credential, or says on
+    # the connection that its target takes none. The rule reads the target's
+    # labels, the connection's unauthenticated value and its credential slot,
+    # all known before a Recipe binds, so it holds whichever Recipe renders this
+    # component; a self-hosted target draws nothing. The list names every
+    # socket of this component that declares unauthenticated.
+    managed_target_needs_a_credential: >-
+      {{- range $socket := list "models" "cache" -}}
+      {{- range $name, $connection := (optional $.uses $socket dict) -}}
+      {{- $managed := eq (optional $connection.labels "component.aggrega.ai/hosting" "") "managed" -}}
+      {{- $optedOut := optional (optional $connection "values" dict) "unauthenticated" false -}}
+      {{- if and $managed (not (hasKey $connection.features "credential")) (not $optedOut) -}}
+      {{- fail (printf "the %s connection %s of %q reaches %q, whose component.aggrega.ai/hosting label is managed, with no credential: attach one under credential on that connection, or set unauthenticated: true in its values" $socket $name $.metadata.instance_id $connection.target) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- end -}}

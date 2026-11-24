@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/ai-model/openai-embedding
+  version: 1.0.0
+  description: >
+    OpenAI's managed embeddings API, reached as an external reference: no
+    compute runs in-cluster and the compiler never calls the provider. It
+    publishes the same endpoint-and-model contract the generative models
+    publish, so an application that embeds text reads exactly the keys it
+    would read to generate it, and the output width is a declared value where
+    an Aggregate wants vectors narrower than the model's own default. The
+    endpoint defaults to the managed API's base URL, version path included,
+    and sits on `infra`, so a bare declaration is enough and an operator may
+    still repoint it at a gateway or proxy. The API key is the consumer's to
+    attach: the environment-variable name it arrives under belongs to the
+    application rather than to the model.
+  labels:
+    component.aggrega.ai/type: resource
+    component.aggrega.ai/category: ai-model
+    model.aggrega.ai/capability: embedding
+    # Model API: OpenAI's own embeddings API answers at the endpoint published
+    # here, the API an OpenAI client speaks as it is.
+    model.aggrega.ai/api: openai
+    component.aggrega.ai/hosting: managed
+    component.aggrega.ai/upstream-licensing: proprietary
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  schema:
+    values:
+      $ref: "BaseComponents#/schemas/BaseModelParameter"
+      properties:
+        dimensions: { type: integer, exclusiveMinimum: 0 }
+    infra:
+      # OpenAI's managed API has a fixed address, so the endpoint defaults to it
+      # and an operator need not supply one. The default is the base URL OpenAI
+      # documents for its API, version path included, which is what an OpenAI
+      # client takes as its base URL: the client appends only the route, such
+      # as /embeddings, so an address without the version path would be posted
+      # to at the wrong path. It is sourced from infra (not hardcoded in the
+      # Recipe) so an operator may repoint it at a gateway or proxy.
+      endpoint: { type: string, default: "https://api.openai.com/v1" }
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      # endpoint and model are the family contract a consumer reads.
+      endpoint:
+        type: string
+        required: true
+        description: >
+          Base URL a consumer sends embedding requests to, version path
+          included, so a client appends only the route. It follows the
+          endpoint set in the Release, so an operator may point it elsewhere
+          without the application changing.
+      model:
+        type: string
+        required: true
+        description: >
+          Name of the embedding model a request asks for, carried through from
+          the model the Aggregate declared. A consumer sends it as the model
+          field of each request.

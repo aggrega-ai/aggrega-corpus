@@ -1,0 +1,143 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: rabbitmq
+  version: 1.0.0
+  # License of the RabbitMQ server this Recipe deploys.
+  license: MPL-2.0
+  description: >
+    RabbitMQ on Kubernetes via the helm provider's Workload synthesis, running
+    the official rabbitmq image directly with no external chart (StatefulSet +
+    ClusterIP Service + Headless Service). Nothing has to be installed in the
+    cluster first and no chart repository has to be reachable, so this is the
+    realization to reach for where no RabbitMQ control plane runs and where the
+    build has to complete without network access; reach for the controller-driven
+    recipe where the control plane is already in place. RabbitMQ persists queues
+    and messages durably, so the broker renders as a stateful workload with a
+    per-replica persistent volume mounted at the RabbitMQ data directory.
+    RabbitMQ always
+    authenticates: the application user comes from the developer value and its
+    password from the optional `password` credential slot when attached (an env
+    secretKeyRef), falling back to a deterministic inline development default
+    otherwise so the render stays reproducible. The image is management-enabled,
+    so the broker exposes both the AMQP port and the management dashboard.
+    provides.host is the bare, self-contained in-cluster service name of the
+    synthesized ClusterIP Service — it carries no namespace, so the recipe is
+    independent of where it is deployed. A consumer in another namespace
+    qualifies the host with the target namespace on its own side (caller-side
+    routing).
+
+    The broker's metrics are on in the image, on port 15692. With
+    `values.metrics_enabled` true that port, which checks no caller, joins the
+    ClusterIP Service and its address is published as provides.metrics_endpoint;
+    false, that key is empty and the port stays off the Service.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/messaging/rabbitmq:1.0.0
+  # This Recipe reads no infra.overrides keys.
+  #
+  # provides.host is the bare Service name "<rendered_name>-default" — the helm
+  # provider names the synthesized ClusterIP Service "<rendered_name>-<service-key>"
+  # (here "<rendered_name>-default"), with no namespace segment. A same-namespace
+  # consumer reaches it under this name directly; a cross-namespace consumer
+  # qualifies it with the target namespace caller-side.
+  #
+  # metrics_endpoint is the address the broker serves its own metrics at while
+  # values.metrics_enabled is true: /metrics on port 15692 of the same Service.
+  # The image switches the broker's prometheus plugin on, so the metrics are
+  # served whatever the value says; false leaves the port off the Service and
+  # the key empty. It is spelled out in full on purpose: a provides entry cannot
+  # read another. The workload below runs one node, so the one address reaches
+  # all of it, and the service-discovery facts — the Service, its port name and
+  # the path — are published empty.
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ .infra.port }}"
+    protocol: "amqp"
+    metrics_endpoint: "{{ if .values.metrics_enabled }}http://{{ .context.rendered_name }}-default:15692/metrics{{ end }}"
+    metrics_service: ""
+    metrics_service_port: ""
+    metrics_path: ""
+  workload: |
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # form: stateful selects a StatefulSet on the helm provider; the
+    # persistentTemplate volume below is a companion of this form, and the
+    # Headless service supplies the StatefulSet's stable network identity.
+    form: stateful
+    replicas: 1
+    containers:
+      main:
+        image: "rabbitmq:{{ .infra.engine_version }}"
+        # The application user is always provisioned from the developer value.
+        # RabbitMQ always authenticates: when a referenceable credential fills
+        # the optional `password` slot, RABBITMQ_DEFAULT_PASS renders as an env
+        # secretKeyRef via containers.attachments; with none attached the Recipe
+        # falls back to a deterministic inline development default so the render
+        # stays reproducible.
+        variables:
+          RABBITMQ_DEFAULT_USER: "{{ .values.user }}"
+    {{- if not (hasKey (default dict .features) "password") }}
+          RABBITMQ_DEFAULT_PASS: devpass
+    {{- end }}
+    {{- if hasKey (default dict .features) "password" }}
+        attachments:
+          RABBITMQ_DEFAULT_PASS:
+            from: password
+            as: env
+    {{- end }}
+        # With values.metrics_enabled true the metrics port is declared too, so
+        # the ClusterIP Service below can carry it.
+        ports:
+          amqp: {{ .infra.port }}
+          manager: {{ .infra.management_port }}
+    {{- if .values.metrics_enabled }}
+          metrics: 15692
+    {{- end }}
+        # RabbitMQ documents, as the best practice for Kubernetes, a TCP check on
+        # the AMQP port as the readiness probe and no liveness probe at all: its
+        # command-line health checks join the cluster's own distribution on every
+        # run, and a check that assumes a fully booted node can hold a restart
+        # back. The readiness probe opens a TCP connection to the AMQP port the
+        # Service targets; no liveness probe is declared.
+        health:
+          ready:
+            tcp: {{ .infra.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+        volumeMounts:
+          - name: data
+            path: /var/lib/rabbitmq
+    volumes:
+      data:
+        persistentTemplate:
+          size: "{{ .infra.storage.size }}"
+          class: "{{ .infra.storage.type }}"
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          amqp: {{ .infra.port }}
+          manager: {{ .infra.management_port }}
+    {{- if .values.metrics_enabled }}
+          metrics: 15692
+    {{- end }}
+      headless:
+        type: Headless
+        ports:
+          amqp: {{ .infra.port }}
+          manager: {{ .infra.management_port }}

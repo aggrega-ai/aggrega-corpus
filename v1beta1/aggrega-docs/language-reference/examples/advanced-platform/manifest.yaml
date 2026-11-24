@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Manifest
+metadata:
+  name: manifest
+  version: "1.0.0"
+  description: >
+    Ops mapping for the Kubernetes target backed by the Bitnami MariaDB Helm
+    chart. MariaDB is sourced from an OCI chart and rendered via the Helm
+    SDK; Adminer is rendered offline by Workload synthesis. Recipe selection
+    at build time is by component type against the loaded catalog layer.
+spec:
+  mappings:
+    components:
+      type:
+        core/datastore/mariadb:1.0.0: helm/mariadb-bitnami:1.0.0
+        core/devtool/adminer:1.0.0: helm/adminer:1.0.0
+    features:
+      type:
+        example/db-binding:1.0.0: helm/db-binding:1.0.0
+        core/secret-value:1.0.0: helm/env-secret:1.0.0
+        core/secret-provided:1.0.0: helm/provided-secret:1.0.0
+        core/shared-config:1.0.0: helm/shared-config:1.0.0

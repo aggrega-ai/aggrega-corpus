@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+workspace:
+  catalog_dirs:
+    # The workspace's own catalog: the two teaching Recipes the guardrail
+    # Releases bind, each a variant of the standard-library Recipe under a name
+    # of its own, so neither shadows it.
+    - ./catalog
+# The hub registry supplies the standard-library catalog: the Component and
+# the Recipe the two passing Releases use.
+default_registry: hub.aggrega.ai

@@ -1,0 +1,292 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: FeatureRecipe
+metadata:
+  name: caller-allowlist
+  version: 1.0.0
+  description: >
+    Component-scope FeatureRecipe for core/caller-allowlist on Kubernetes: writes
+    one NetworkPolicy for each workload the attached component renders, in the
+    namespace that workload is emitted into, admitting ingress on the ports its
+    containers declare from three kinds of peer only — the attached component's
+    own pods, the pods of every component whose uses edge points at it, and the
+    sources the attachment names. Each component's pods are matched by their
+    labels and by the namespace they are emitted into together. Egress is left
+    untouched.
+
+    A workload's pods are selected by its controller's own selector or, where it
+    writes none, by the identity labels the build stamps on its pods, never by
+    a label carrying a version, so a policy keeps matching the pods it describes
+    across upgrades. Selectors, namespaces and ports are read from what the
+    renders emitted, never restated by hand; the attachment renders after every
+    component has rendered, for that reason. The build halts, naming the
+    component, unless the Operator affirms the cluster's network plugin enforces
+    network policy, and wherever a policy could not admit exactly what the
+    Aggregate and the attachment declare: a component or a caller rendering no
+    pods; a workload emitted into no namespace, or selected neither by its
+    controller nor by the build's identity labels; a component declaring no
+    port; a source entry naming both an address range and pods, or neither.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/caller-allowlist:1.0.0
+  # executionScope omitted -> component: renders once per attached component.
+
+  # The callers' renders are read below, so the attachment renders once every
+  # component in the build has rendered rather than right after its own host.
+  readsCallerRenderFacts: true
+
+  # A network policy restricts nothing unless the cluster's network plugin
+  # implements network policy; written into a cluster whose plugin does not, it
+  # is accepted and enforces nothing. The compiler is ahead-of-time and cannot
+  # inspect the cluster, so the prerequisite is declared instead: the Operator
+  # affirms it on this attachment in the Release, and an unaffirmed build halts
+  # here rather than shipping a policy that may protect nothing.
+  assertions:
+    network_policy_prerequisite: >-
+      {{- if not .infra.control_plane_present -}}
+      {{- fail (printf "core/caller-allowlist attachment %q on %q writes a network policy, which restricts connections only where the cluster's network plugin enforces network policy; once the target cluster's plugin does, affirm it by setting infra.control_plane_present to true on this attachment in the Release" .metadata.feature_instance .metadata.instance_id) -}}
+      {{- end -}}
+
+  # One NetworkPolicy per pod template the attached component's render emitted,
+  # in one file.
+  #
+  # Names. Each policy is named from the workload it selects — its own name
+  # and kind, both taken from the attached component's render — and the
+  # attachment name, folded to hyphens because an attachment name may carry an
+  # underscore a Kubernetes name cannot. The workload's name already belongs to
+  # the attached component, and the kind keeps a Deployment and a StatefulSet of
+  # one name apart. The host's rendered name is deliberately not read: a
+  # component placing its resources through artifacts alone reports none, and
+  # reading it there would halt the build.
+  #
+  # Namespace. Each policy is placed in the namespace the workload it selects is
+  # emitted into, the one its own document writes, because a network policy
+  # selects pods in its own namespace only and that is where the workload's pods
+  # run. Each peer names the namespace its pods are emitted into the same way. A
+  # workload whose document writes no namespace lands wherever the tool applying
+  # the output puts it, which the build cannot know, so it halts rather than
+  # guess one.
+  #
+  # Selection. A workload's pods are selected by the selector its controller
+  # writes — a Deployment's, a StatefulSet's, a DaemonSet's, a ReplicaSet's, a
+  # Job's or a CronJob's matchLabels — which the controller itself owns its pods
+  # by and which carries no version. Where the workload writes none, a bare Pod
+  # or a Job relying on the selector the cluster generates, its pods are selected
+  # by the identity labels the build stamps on every workload it synthesizes and
+  # on every bare Pod, a chart's included: the component's identity, the
+  # Aggregate's name, the Release's environment, the provider and the
+  # recommended name label, the keys listed below. A pod template a chart or an
+  # artifact writes inside a controller keeps its author's labels and carries
+  # none of them. They are taken only from a template carrying the component's
+  # identity label, the one stamp no chart writes, so a chart's own name label is
+  # never mistaken for one. A workload carrying neither halts: selecting it by
+  # every label its template carries would include labels that change with a
+  # version — the build's own compiler and provider versions, a chart's version
+  # — and every rollout changing one would leave the old pods unmatched until
+  # they were replaced. A selector's matchExpressions are not reported to a
+  # FeatureRecipe, so a controller selecting by expressions as well is matched
+  # by its matchLabels alone. Where two controllers of one render share a
+  # workload's kind, name and namespace — controllers named by generateName,
+  # which carry no name — which selector owns its pods cannot be told, and the
+  # build halts rather than pick one.
+  #
+  # Peers. One ingress rule. Its sources are, in this order and each written
+  # once: the attached component's own pods; each caller's pods; and each
+  # source the attachment names. Every component's pods are named by a peer per
+  # workload carrying its selection AND the namespace it is emitted into, both
+  # in one peer so that both must match. Its ports are every port the attached
+  # component's containers declare, with the protocol the render wrote, TCP
+  # where it wrote none. A caller connecting twice adds its pods once.
+  #
+  # Every label key and value is written through toJson, so a value that reads
+  # as a number or a boolean stays a string, and every map is written in key
+  # order, so identical input renders identical bytes.
+  artifacts:
+    networkpolicy.yaml: |
+      {{- $att := .attachment_name | replace "_" "-" }}
+      {{- $host := .context.instance_id }}
+      {{- $name := .attachment_name }}
+      {{- /* The identity labels the build stamps on the pods of a workload it synthesizes and on a bare Pod, less the two carrying a version. */}}
+      {{- $identity := list "aggrega.ai/component-id" "aggrega.ai/aggregate-name" "aggrega.ai/environment" "aggrega.ai/provider" "app.kubernetes.io/name" }}
+
+      {{- /* Whose workloads are selected: the attached component's, then each caller's, under one rule. */}}
+      {{- $owners := list (dict "role" "host" "id" $host "socket" "" "facts" (default (dict) .context.render_facts)) }}
+      {{- range .context.used_by }}
+        {{- $owners = append $owners (dict "role" "caller" "id" .component_id "socket" .socket "facts" (default (dict) .render_facts)) }}
+      {{- end }}
+
+      {{- $hostWorkloads := list }}
+      {{- $peers := list }}
+      {{- $seenPeers := dict }}
+      {{- range $owners }}
+        {{- $o := . }}
+        {{- $templates := default (list) $o.facts.pod_template_labels }}
+        {{- if not $templates }}
+          {{- if eq $o.role "host" }}
+            {{- fail (printf "core/caller-allowlist attachment %q on %q: %q renders no workload whose pods a policy can select, so nothing it runs could be protected; this Feature needs a component whose own render emits its pods, not one whose pods a controller creates later or one reached outside the cluster" $name $host $host) }}
+          {{- else }}
+            {{- fail (printf "core/caller-allowlist attachment %q on %q: %q connects to %q through its %q socket, but renders no workload whose pods a policy can name, so it could not be admitted; realize %q with a Recipe whose own render emits its pods, or leave this Feature off %q" $name $host $o.id $host $o.socket $o.id $host) }}
+          {{- end }}
+        {{- end }}
+        {{- range $templates }}
+          {{- $tpl := . }}
+          {{- $kind := get $tpl "kind" }}
+          {{- $wname := get $tpl "name" }}
+          {{- $wns := get $tpl "namespace" }}
+          {{- if not $wns }}
+            {{- if eq $o.role "host" }}
+              {{- fail (printf "core/caller-allowlist attachment %q on %q: the %s %q that %q renders is emitted into no namespace, and a network policy selects pods in its own namespace only, so it cannot be placed beside them; set aggrega.ai/namespace on the boundary holding %q, or on its own entry, in the Release, or have the manifest that carries it write one" $name $host $kind $wname $host $host) }}
+            {{- else }}
+              {{- fail (printf "core/caller-allowlist attachment %q on %q: %q connects to %q through its %q socket, but the %s %q it renders is emitted into no namespace, so the policy cannot name where its pods run; set aggrega.ai/namespace on the boundary holding %q, or on its own entry, in the Release, or have the manifest that carries it write one" $name $host $o.id $host $o.socket $kind $wname $o.id) }}
+            {{- end }}
+          {{- end }}
+
+          {{- /* The selector its controller writes, where the render reports exactly one controller for it. */}}
+          {{- $found := list }}
+          {{- range (default (list) $o.facts.controller_selectors) }}
+            {{- if and (eq (get . "kind") $kind) (eq (get . "name") $wname) (eq (get . "namespace") $wns) }}
+              {{- $found = append $found (get . "match_labels") }}
+            {{- end }}
+          {{- end }}
+          {{- if gt (len $found) 1 }}
+            {{- fail (printf "core/caller-allowlist attachment %q on %q: the %s %q that %q renders matches %d controllers of that kind, name and namespace, so which selector owns its pods cannot be told; give each workload %q renders a name of its own, or leave this Feature off %q" $name $host $kind $wname $o.id (len $found) $o.id $host) }}
+          {{- end }}
+          {{- $sel := dict }}
+          {{- if $found }}
+            {{- with index $found 0 }}
+              {{- range $k, $v := . }}
+                {{- $_ := set $sel $k $v }}
+              {{- end }}
+            {{- end }}
+          {{- end }}
+
+          {{- /* Otherwise the build's identity labels, from a template the build stamped. */}}
+          {{- if not $sel }}
+            {{- $labels := default (dict) (get $tpl "labels") }}
+            {{- if hasKey $labels "aggrega.ai/component-id" }}
+              {{- range $identity }}
+                {{- if hasKey $labels . }}
+                  {{- $_ := set $sel . (get $labels .) }}
+                {{- end }}
+              {{- end }}
+            {{- end }}
+          {{- end }}
+          {{- if not $sel }}
+            {{- if eq $o.role "host" }}
+              {{- fail (printf "core/caller-allowlist attachment %q on %q: the %s %q that %q renders writes no controller selector and carries none of the identity labels the build stamps on its pods, and selecting it by every label its template carries would stop matching its pods whenever a label carrying a version changes; leave this Feature off %q, or realize it with a Recipe whose workloads write a controller selector" $name $host $kind $wname $host $host) }}
+            {{- else }}
+              {{- fail (printf "core/caller-allowlist attachment %q on %q: %q connects to %q through its %q socket, but the %s %q it renders writes no controller selector and carries none of the identity labels the build stamps on its pods, and admitting it by every label its template carries would stop admitting its pods whenever a label carrying a version changes; realize %q with a Recipe whose workloads write a controller selector, or leave this Feature off %q" $name $host $o.id $host $o.socket $kind $wname $o.id $host) }}
+            {{- end }}
+          {{- end }}
+
+          {{- if eq $o.role "host" }}
+            {{- $hostWorkloads = append $hostWorkloads (dict "kind" $kind "name" $wname "namespace" $wns "selector" $sel) }}
+          {{- end }}
+          {{- $peer := dict "namespaceSelector" (dict "matchLabels" (dict "kubernetes.io/metadata.name" $wns)) "podSelector" (dict "matchLabels" $sel) }}
+          {{- $key := toJson $peer }}
+          {{- if not (hasKey $seenPeers $key) }}
+            {{- $_ := set $seenPeers $key true }}
+            {{- $peers = append $peers $peer }}
+          {{- end }}
+        {{- end }}
+      {{- end }}
+
+      {{- /* The ports: every port the attached component's containers declare, once. */}}
+      {{- $ports := list }}
+      {{- $seenPorts := dict }}
+      {{- range .context.render_facts.container_ports }}
+        {{- range .ports }}
+          {{- if hasKey . "container_port" }}
+            {{- $proto := default "TCP" (get . "protocol") }}
+            {{- $key := printf "%d/%s" (int .container_port) $proto }}
+            {{- if not (hasKey $seenPorts $key) }}
+              {{- $_ := set $seenPorts $key true }}
+              {{- $ports = append $ports (dict "port" (int .container_port) "protocol" $proto) }}
+            {{- end }}
+          {{- end }}
+        {{- end }}
+      {{- end }}
+      {{- if not $ports }}
+        {{- fail (printf "core/caller-allowlist attachment %q on %q: %q declares no container port in its render, so there is no port its callers could be admitted on; declare the ports its containers listen on" $name $host $host) }}
+      {{- end }}
+
+      {{- /* The named sources, after the own pods and the callers already in the peers, each written once. */}}
+      {{- range $i, $src := .infra.admitted_sources }}
+        {{- $cidr := get $src "cidr" }}
+        {{- $sns := get $src "namespace" }}
+        {{- $plabels := get $src "pod_labels" }}
+        {{- if and $cidr (or $sns $plabels) }}
+          {{- fail (printf "core/caller-allowlist attachment %q on %q: entry %d of infra.admitted_sources names an address range together with pods; a source is either a cidr or pods named by namespace and labels, so write them as two entries" $name $host (add1 $i)) }}
+        {{- end }}
+        {{- if not (or $cidr $sns $plabels) }}
+          {{- fail (printf "core/caller-allowlist attachment %q on %q: entry %d of infra.admitted_sources names no source; give it a cidr, a namespace, pod_labels, or a namespace with pod_labels, or remove it" $name $host (add1 $i)) }}
+        {{- end }}
+        {{- $peer := dict }}
+        {{- if $cidr }}
+          {{- $_ := set $peer "ipBlock" (dict "cidr" $cidr) }}
+        {{- end }}
+        {{- if $sns }}
+          {{- $_ := set $peer "namespaceSelector" (dict "matchLabels" (dict "kubernetes.io/metadata.name" $sns)) }}
+        {{- end }}
+        {{- if $plabels }}
+          {{- $_ := set $peer "podSelector" (dict "matchLabels" $plabels) }}
+        {{- end }}
+        {{- $key := toJson $peer }}
+        {{- if not (hasKey $seenPeers $key) }}
+          {{- $_ := set $seenPeers $key true }}
+          {{- $peers = append $peers $peer }}
+        {{- end }}
+      {{- end }}
+
+      {{- /* One policy per workload the attached component renders, in that workload's namespace. */}}
+      {{- range $i, $w := $hostWorkloads }}
+      {{- if $i }}
+      ---
+      {{- end }}
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: {{ toJson (printf "%s-%s-%s" (default (printf "%d" $i) $w.name) (lower $w.kind) $att) }}
+        namespace: {{ toJson $w.namespace }}
+      spec:
+        podSelector:
+          matchLabels:
+            {{- range $k, $v := $w.selector }}
+            {{ toJson $k }}: {{ toJson $v }}
+            {{- end }}
+        policyTypes:
+          - Ingress
+        ingress:
+          - from:
+              {{- range $peers }}
+              -
+                {{- with get . "ipBlock" }}
+                ipBlock:
+                  cidr: {{ toJson .cidr }}
+                {{- end }}
+                {{- with get . "namespaceSelector" }}
+                namespaceSelector:
+                  matchLabels:
+                    {{- range $k, $v := .matchLabels }}
+                    {{ toJson $k }}: {{ toJson $v }}
+                    {{- end }}
+                {{- end }}
+                {{- with get . "podSelector" }}
+                podSelector:
+                  matchLabels:
+                    {{- range $k, $v := .matchLabels }}
+                    {{ toJson $k }}: {{ toJson $v }}
+                    {{- end }}
+                {{- end }}
+              {{- end }}
+            ports:
+              {{- range $ports }}
+              - port: {{ .port }}
+                protocol: {{ toJson .protocol }}
+              {{- end }}
+      {{- end }}

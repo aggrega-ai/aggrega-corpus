@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: FeatureRecipe
+metadata:
+  name: k8s-existing-secret
+  version: 1.0.0
+  description: >
+    Points a workload at a Kubernetes Secret that already exists in the
+    namespace it runs in. origin — from values or infra, whichever carries it —
+    is read as that Secret's name and values.key as the data key inside it, and
+    both are published exactly as written, as the locator a consuming workload
+    references with a secretKeyRef or a chart reads through its existing-secret
+    setting, so an operator can name the Secret in the Release. It renders no
+    resource of its own, so the credential material never passes through an
+    authored file or a rendered artifact: whoever deploys creates the Secret, and
+    a workload referencing a Secret that does not exist fails to start rather
+    than starting with a default. Because the name is published as written, it
+    must already be a valid Kubernetes object name.
+
+    Reach for this realization where the Secret already exists in the target
+    namespace — created by hand, by a pipeline, or by a tool outside the
+    Release. Reach for k8s-external-secret where a secret-store operator runs
+    in the cluster and should fetch the credential from its store, and for
+    k8s-secret-from-parameter where neither holds and the material may sit in
+    the rendered output, as it may for evaluation.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/referenced-secret:1.0.0
+
+  # The referenceable-secret contract: core/referenced-secret requires both keys,
+  # and a consumer reads them from .features.<slot>.provides. The name published
+  # here is the existing Secret's own, not the {rendered_name}-{attachment_name}
+  # name the other two helm realizations derive — so binding this realization in
+  # place of either of them changes the reference a consumer renders, which is
+  # what it is for. It is not normalized either: the Secret already carries its
+  # name, and rewriting it would point the consumer at a different object.
+  #
+  # No source, mapping, workload or artifact is declared: this realization emits
+  # nothing, and a FeatureRecipe that emits nothing needs no engine input.
+  #
+  # origin is read from whichever pillar carries it — values where the developer
+  # wrote it, infra where the operator did; the Feature halts the build when both
+  # or neither do. DELIBERATE NEAR-DUPLICATE: each realization of a credential
+  # Feature that reads the locator repeats this one expression, because it sits
+  # inside a template the realization owns, and no catalog kind holds a single
+  # template expression for several entities to share. values is read only
+  # through optional, and that is load-bearing: a template that also read
+  # .values.origin as a path would find the key present and empty, and never
+  # fall through to infra.
+  provides:
+    name: '{{ optional .values "origin" (optional .infra "origin" "") }}'
+    key: "{{ .values.key }}"

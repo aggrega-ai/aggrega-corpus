@@ -1,0 +1,514 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: langfuse-chart
+  version: 1.0.0
+  license: MIT
+  description: >
+    Langfuse as a self-hosted tracing and prompt-registry platform on Kubernetes
+    via the platform maintainers' own Helm chart, served from their HTTPS chart
+    repository. The chart's bundled PostgreSQL, Valkey, object-store and
+    ClickHouse parts are switched off: the backend, the cache and the object
+    store arrive as topology edges, and the analytics store as operator-set
+    pointer strings. It renders separate Deployments for the console and the
+    asynchronous worker, a ClusterIP Service fronting the console, a
+    ServiceAccount and the Secret holding the chart's own keys.
+
+    Separate Deployments let an operator scale or restart the console or the
+    worker without the other, and the chart carries the platform's
+    schema-migration switches. Reach for this realization where a chart
+    repository is reachable at build time and the console and the worker will be
+    scaled independently; reach for `langfuse`, the workload-synthesis
+    realization, where the build must complete with nothing fetched.
+
+    The platform image is pinned on the chart's shared image block, so the
+    console and the worker run one version, and the chart version in
+    source.version. infra.external_base_url reaches the console as the chart's
+    `langfuse.nextauth.url`. The configuration contract is authored against the
+    chart's own application version. A cache publishing valkey-tls or redis-tls is reached
+    through the chart's own Redis TLS setting, checked against the cache
+    connection's server_ca, mounted, or the runtime's trust store; another TLS
+    protocol on the cache halts the build. The object store's secret key has
+    no default: an event_store connection with no credential halts the build
+    unless its values set unauthenticated: true.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/observability/langfuse:1.0.0
+
+  # Splitting the console and the worker into two Deployments is what this
+  # realization carries that the workload-synthesis realization does not: the
+  # worker drains the ingestion queue and the console serves browsers, the two
+  # have unrelated load profiles, and only separate Deployments let an operator
+  # scale or restart one without the other. It also carries the
+  # schema-migration switches the platform reads on startup — the relational
+  # migration and the analytics-store migration are separate settings, applied
+  # in the order the platform's own maintainers set.
+  #
+  # The platform image is pinned to a resolvable release tag for reproducible
+  # renders, and the pin is set on the chart's shared image block so the
+  # console and the worker cannot be moved apart — they are versioned together
+  # and must not run different versions of the same platform.
+  source:
+    kind: helm-https-chart
+    url: https://langfuse.github.io/langfuse-k8s
+    chart: langfuse
+    # Default chart version. Override via infra.source_version.
+    version: "{{ optional .infra `source_version` \"2.1.2\" }}"
+
+  # The columnar analytics store is where every trace, observation and score this
+  # platform serves actually lives, and its two addresses have no sensible
+  # default: a Release reaches whichever store it runs or contracts for. A
+  # build that has not supplied them halts here rather than rendering a console
+  # with an address-less variable, which starts and then stays empty. The same
+  # halt the workload-synthesis realization raises, on the same two values, so
+  # the choice of realization does not change when a build is told about this.
+  assertions:
+    analytics_store_addresses_supplied: >-
+      {{- if not (and (hasKey .infra "analytics_store_url") (index .infra "analytics_store_url")) -}}
+      {{- fail "infra.analytics_store_url must name the HTTP address of the columnar analytics store holding traces, observations and scores; set it in the Release" -}}
+      {{- end -}}
+      {{- if not (and (hasKey .infra "analytics_store_migration_url") (index .infra "analytics_store_migration_url")) -}}
+      {{- fail "infra.analytics_store_migration_url must name the native-protocol address of the same analytics store, which the platform applies its schema migrations over; set it in the Release" -}}
+      {{- end -}}
+
+  # provides.host is the name of the Service fronting the console and the
+  # ingestion API, which is what the Component's provides contract promises.
+  #
+  # 🔴 It is NOT the bare rendered name. The valuesMapping below pins the chart's
+  # fullnameOverride to the rendered name, the release name the helm provider
+  # gives the chart, which spells the Component's name in the alphabet a
+  # Kubernetes name allows, and the chart then suffixes that name per Deployment:
+  # the console Service is "<rendered_name>-web". Nothing is named by the bare
+  # pinned name at all, so publishing the bare rendered name would publish an
+  # address nothing answers to. The worker has no Service of its own — it serves
+  # no application traffic — which is why there is only one address to
+  # publish and never a choice between two. Read from a render of the chart, not
+  # assumed.
+  #
+  # host and endpoint spell the Service name out twice on purpose: a provides
+  # entry cannot read another provides entry, so there is no home either could
+  # dereference instead. The repetition is forced, and the two must be edited
+  # together.
+  #
+  # port follows the console port the operator set. Unlike most charts this one
+  # gives the console's listen port, its container port and its Service port from
+  # one value, so an operator moving the port moves all three together.
+  #
+  # The published host carries no namespace, so the Recipe is independent of
+  # where it is deployed; a consumer in another namespace qualifies the host
+  # with the target namespace on its own side (caller-side routing).
+  provides:
+    host: "{{ .context.rendered_name }}-web"
+    port: "{{ .infra.port }}"
+    endpoint: "http://{{ .context.rendered_name }}-web:{{ .infra.port }}"
+    protocol: "http"
+
+  # The chart is configured for the shape this Component describes: the
+  # relational backend, the cache and the object store are wired through the
+  # topology, so the chart's bundled PostgreSQL, Valkey and object-store
+  # sub-charts are switched off, and so is the ClickHouse cluster it can
+  # provision through an operator, because the analytics store is supplied as
+  # operator-set pointer strings. Under this configuration the chart renders a
+  # Deployment for the console and a separate Deployment for the asynchronous
+  # worker, a ClusterIP Service fronting the console, a ServiceAccount, and the
+  # credential Secret it keeps its own application keys in.
+  #
+  # This Recipe reads from infra.overrides:
+  #   image        - map[string]string (langfuse.image.* fields: tag, pullPolicy, pullSecrets)
+  #   service_type - string (console Service type, default ClusterIP)
+  #   nodeSelector - map[string]string (pod scheduling, both Deployments)
+  #   tolerations  - []object (pod scheduling, both Deployments)
+  valuesMapping: |
+    {{- /*
+      The connection variables this Recipe reads off the inject pipe, under the
+      socket whose edge delivers them, each beside the provides key the edge's
+      inject block names it from. The pipe is read as a map, and every read of
+      these variables below goes through it, so a variable nothing delivered is
+      told apart from one delivered empty: an edge on one of these sockets
+      leaving any of its variables missing halts the build, naming the edge, the
+      variables and the inject block to write, rather than rendering a
+      connection setting with an empty value. A socket in $required is read
+      whether or not anything is wired to it, so leaving it empty halts too.
+    */ -}}
+    {{- $env := optional (default dict .context.inject) "env" dict -}}
+    {{- $reads := dict "backend" (dict "DATABASE_HOST" "host" "DATABASE_PORT" "port" "DATABASE_USERNAME" "user" "DATABASE_NAME" "database") "cache" (dict "REDIS_HOST" "host" "REDIS_PORT" "port") -}}
+    {{- $required := list "backend" "cache" -}}
+    {{- $gaps := list }}{{ $wired := list -}}
+    {{- range $alias, $edge := .context.uses }}{{ with get $reads $edge.socket -}}
+    {{- $wired = append $wired $edge.socket }}{{ $missing := list }}{{ $shape := list -}}
+    {{- range $var, $from := . }}{{ if not (hasKey $env $var) }}{{ $missing = append $missing $var }}{{ end }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- if $missing }}{{ $gaps = append $gaps (printf "the edge %q on its %s socket delivers no %s, so give that edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $alias $edge.socket (join " or " $missing) (join ", " $shape)) }}{{ end -}}
+    {{- end }}{{ end -}}
+    {{- range $socket := $required }}{{ if not (has $socket $wired) -}}
+    {{- $vars := list }}{{ $shape := list }}{{ range $var, $from := get $reads $socket }}{{ $vars = append $vars $var }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- $gaps = append $gaps (printf "nothing is wired to its %s socket to deliver %s, so wire one and give its edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $socket (join " and " $vars) (join ", " $shape)) -}}
+    {{- end }}{{ end -}}
+    {{- if $gaps }}{{ fail (printf "core/observability/langfuse %q composes its connection settings from variables its edges deliver on its inject pipe, but %s" .context.instance_id (join "; and " $gaps)) }}{{ end -}}
+    ## ── The three backing systems wired as edges ───────────────
+    ## All three are required sockets, so each is resolved by the time this
+    ## template runs. The analytics store is deliberately not among them: it is
+    ## reached through operator-set pointer strings, because a Release typically
+    ## reaches a columnar store it does not run itself.
+    {{- $backend := dict }}
+    {{- $cache := dict }}
+    {{- $store := dict }}
+    {{- $storeAlias := "" }}
+    {{- range $alias, $edge := .context.uses }}
+      {{- if eq $edge.socket "backend" }}
+        {{- $backend = $edge }}
+      {{- end }}
+      {{- if eq $edge.socket "cache" }}
+        {{- $cache = $edge }}
+      {{- end }}
+      {{- if eq $edge.socket "event_store" }}
+        {{- $store = $edge }}
+        {{- $storeAlias = $alias }}
+      {{- end }}
+    {{- end }}
+
+    ## The object store's secret key has no default to fall back on: an
+    ## event_store connection carrying no credential halts the build, naming
+    ## the connection and the slot to fill, unless the connection says its
+    ## store takes none.
+    {{- if and (not (hasKey (default dict $store.features) "credential")) (not (optional (default dict $store.values) "unauthenticated" false)) }}
+    {{- fail (printf "the event_store connection %s of %q reaches %q with nothing in its credential slot, and the secret key the platform presents to the object store has no default; attach the store's secret key under credential on that connection, or set unauthenticated: true in its values if the store takes no credential" $storeAlias .context.instance_id $store.target) }}
+    {{- end }}
+
+    ## The cache connection over TLS. A cache publishing valkey-tls or redis-tls accepts TLS
+    ## connections alone, so the chart's own TLS switch is turned on for it; any
+    ## other value ending in -tls names a cache served over TLS the platform is
+    ## not taught to reach, and halts rather than connecting in plaintext. A
+    ## server_ca on the connection is mounted into both Deployments, so its
+    ## attachment must name a Secret, and it is refused on a cache served
+    ## without TLS, where no handshake takes place to check a certificate in.
+    {{- $cacheTLS := false }}
+    {{- $cacheCA := "" }}
+    {{- range $alias, $edge := .context.uses }}
+      {{- if eq $edge.socket "cache" }}
+        {{- $proto := toString (optional (default dict $edge.provides) "protocol" "") }}
+        {{- $edgeTLS := has $proto (list "valkey-tls" "redis-tls") }}
+        {{- if $edgeTLS }}{{ $cacheTLS = true }}{{ else if hasSuffix "-tls" $proto }}
+        {{- fail (printf "the cache connection %s of %q reaches %q, which publishes protocol %s, a cache served over TLS that the Langfuse console and worker do not reach: they speak the Redis protocol, over TLS to a cache publishing valkey-tls or redis-tls; wire a Redis-protocol cache to the cache socket" $alias $.context.instance_id $edge.target $proto) }}
+        {{- end }}
+        {{- if hasKey (default dict $edge.features) "server_ca" }}
+          {{- $caProvides := optional (optional (default dict $edge.features) "server_ca" dict) "provides" dict }}
+          {{- if not (and (kindIs "map" $caProvides) (optional $caProvides "name" "")) }}
+          {{- fail (printf "the server_ca on the cache connection %s of %q publishes no Secret name, so no Secret could be mounted into the console and the worker: attach a server_ca publishing one, such as core/referenced-secret" $alias $.context.instance_id) }}
+          {{- end }}
+          {{- if not $edgeTLS }}
+          {{- fail (printf "the cache connection %s of %q holds a server_ca, but the cache it reaches, %q, publishes protocol %s, served without TLS, so no TLS handshake takes place to check a certificate in: turn client_tls on for that cache, or remove the server_ca" $alias $.context.instance_id $edge.target (default "none" $proto)) }}
+          {{- end }}
+          {{- $cacheCA = $caProvides.name }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+
+    ## The object store's address: the endpoint the store publishes, scheme
+    ## included. A store publishing none halts the build naming the connection;
+    ## the object-store section below explains why it is read, not composed.
+    {{- $storeEndpoint := toString (optional (default dict $store.provides) "endpoint" "") }}
+    {{- if not $storeEndpoint }}
+    {{- fail (printf "the event_store connection %s of %q is wired to %q, which publishes no endpoint, but the platform's S3 client is pointed at the full address of the object store it writes event bodies and media to, scheme included; wire a store publishing endpoint, such as core/storage/s3-object-store, to the event_store socket instead" $storeAlias .context.instance_id $store.target) }}
+    {{- end }}
+
+    ## The bucket stays the connection's own value. Where the store publishes a
+    ## bucket too, the two must name the same one, so a difference halts the
+    ## build naming both; a store publishing no bucket leaves the value alone.
+    {{- $storeBucket := toString (optional (default dict $store.provides) "bucket" "") }}
+    {{- if and $storeBucket (ne $storeBucket (toString $store.values.bucket)) }}
+    {{- fail (printf "the event_store connection %s of %q names the bucket %q, but %q, the store it is wired to, publishes the bucket %q, so the platform would write event bodies and media into a bucket other than the one the store publishes; set bucket in that connection's values to %q" $storeAlias .context.instance_id (toString $store.values.bucket) $store.target $storeBucket $storeBucket) }}
+    {{- end }}
+
+    ## The console's externally reachable base URL. The operator's value wins
+    ## when one was supplied; with none, the in-cluster Service address stands
+    ## in, which is correct for a Release nobody reaches from a browser outside
+    ## the cluster.
+    {{- $externalURL := .infra.external_base_url | default (printf "http://%s-web:%v" .context.rendered_name .infra.port) }}
+
+    ## ── Pin the chart's resource names to the rendered name ────
+    ## Names the console Service "<rendered_name>-web", matching provides.host.
+    ## Read the comment above provides for why the published name carries a
+    ## suffix.
+    fullnameOverride: "{{ .context.rendered_name }}"
+
+    langfuse:
+      logging:
+        level: "{{ .infra.log_level }}"
+
+      features:
+        experimentalFeaturesEnabled: {{ .values.experimental_features }}
+
+      ## ── Platform image pin ───────────────────────────────────
+      ## Set on the chart's SHARED image block rather than on either
+      ## Deployment's own, because the console and the worker are versioned
+      ## together and must not be split across versions — one tag here is the
+      ## only spelling under which that cannot be got wrong. The repositories
+      ## stay the chart's own defaults, so the images this realization runs are
+      ## the ones its chart is tested against, and it is why the Component's
+      ## engine_version says the chart-backed realization pins its own tag.
+      ## Override the whole block via infra.overrides.image.
+      image:
+        {{- if and .infra.overrides .infra.overrides.image }}
+        {{- range $k, $v := .infra.overrides.image }}
+        {{ $k }}: "{{ $v }}"
+        {{- end }}
+        {{- else }}
+        tag: "4.38.0"
+        {{- end }}
+
+      ## ── The three application keys ───────────────────────────
+      ## 🔴 ALL THREE ARE SUPPLIED HERE UNCONDITIONALLY, AND THAT IS A
+      ## CORRECTNESS REQUIREMENT RATHER THAN A CONVENIENCE. Left unset, the
+      ## chart GENERATES each one at render time from a random source, which
+      ## makes two renders of identical input differ — and these are the three
+      ## values that must never change once a Release has shipped them, since
+      ## rotating the encryption key makes everything already encrypted
+      ## unreadable and changing the salt invalidates every API key already
+      ## issued. Supplying
+      ## them takes the generating branch out of play entirely: the chart still
+      ## emits its credential Secret, but with no keys in it.
+      ##
+      ## Attached, each is bound by NAME so the material never appears in the
+      ## rendered artifact. All three are always attached — the Component
+      ## requires their slots — and a fill publishing no Secret name and data
+      ## key halts the build, so no key is ever written here.
+      salt:
+        {{- $salt := optional (optional (default dict .features) "salt" dict) "provides" dict }}
+        {{- if not (and (optional $salt "name" "") (optional $salt "key" "")) }}
+        {{- fail (printf "the salt credential of the Langfuse platform %q publishes no Secret name and data key, so the platform could not be pointed at the salt it hashes API keys with: attach a credential publishing both, such as core/referenced-secret" .context.instance_id) }}
+        {{- end }}
+        secretKeyRef:
+          name: "{{ $salt.name }}"
+          key: "{{ $salt.key }}"
+
+      encryptionKey:
+        {{- $encryptionKey := optional (optional (default dict .features) "encryption_key" dict) "provides" dict }}
+        {{- if not (and (optional $encryptionKey "name" "") (optional $encryptionKey "key" "")) }}
+        {{- fail (printf "the encryption_key credential of the Langfuse platform %q publishes no Secret name and data key, so the platform could not be pointed at the key it encrypts stored credentials under: attach a credential publishing both, such as core/referenced-secret" .context.instance_id) }}
+        {{- end }}
+        secretKeyRef:
+          name: "{{ $encryptionKey.name }}"
+          key: "{{ $encryptionKey.key }}"
+
+      nextauth:
+        url: "{{ $externalURL }}"
+        secret:
+          {{- $sessionSecret := optional (optional (default dict .features) "session_secret" dict) "provides" dict }}
+          {{- if not (and (optional $sessionSecret "name" "") (optional $sessionSecret "key" "")) }}
+          {{- fail (printf "the session_secret credential of the Langfuse platform %q publishes no Secret name and data key, so the console could not be pointed at the key it signs its session cookies with: attach a credential publishing both, such as core/referenced-secret" .context.instance_id) }}
+          {{- end }}
+          secretKeyRef:
+            name: "{{ $sessionSecret.name }}"
+            key: "{{ $sessionSecret.key }}"
+
+      ## ── The console ──────────────────────────────────────────
+      ## One value gives the console's listen port, its container port and its
+      ## Service port, so the published address and the listener move together.
+      web:
+        service:
+          {{- if and .infra.overrides .infra.overrides.service_type }}
+          type: "{{ .infra.overrides.service_type }}"
+          {{- else }}
+          type: ClusterIP
+          {{- end }}
+          port: {{ .infra.port }}
+        resources:
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+
+      ## ── The asynchronous worker ──────────────────────────────
+      ## Its port carries only its own health endpoint and is deliberately not
+      ## published on any Service: the worker serves no application traffic, and
+      ## the port exists so the platform's readiness can be observed separately
+      ## from the console's.
+      worker:
+        port: {{ .infra.worker_port }}
+        resources:
+          limits:
+            cpu: "{{ .infra.worker_compute.cpu }}"
+            memory: "{{ .infra.worker_compute.memory }}"
+          requests:
+            cpu: "{{ .infra.worker_compute.cpu }}"
+            memory: "{{ .infra.worker_compute.memory }}"
+
+      ## ── Scheduling overrides, applied to both Deployments ────
+      {{- if .infra.overrides }}
+      {{- if .infra.overrides.nodeSelector }}
+      nodeSelector: {{ toJson .infra.overrides.nodeSelector }}
+      {{- end }}
+      {{- if .infra.overrides.tolerations }}
+      tolerations: {{ toJson .infra.overrides.tolerations }}
+      {{- end }}
+      {{- end }}
+
+      ## ── The cache connection's authority, mounted in both Deployments ──
+      ## The Secret the cache connection's server_ca names, mounted whole and
+      ## read-only into the console and the worker, the chart's own extension
+      ## point for a volume both carry; redis.tls.caPath below names its ca.crt.
+      {{- with $cacheCA }}
+      extraVolumes:
+        - name: cache-server-ca
+          secret:
+            secretName: "{{ . }}"
+      extraVolumeMounts:
+        - name: cache-server-ca
+          mountPath: /etc/langfuse/cache-server-ca
+          readOnly: true
+      {{- end }}
+
+      ## ── Settings the chart carries no value of its own for ───
+      ## The chart maps every backing system it knows about onto its own value
+      ## surface, and these are the ones it does not: the analytics store, which
+      ## it can only address as a host plus a port while this Component supplies
+      ## two complete addresses; the cache key prefix; and the two ingestion
+      ## settings. The chart's own documented behaviour is that naming the
+      ## analytics store's migration address here takes its analytics-store
+      ## mapping out of play entirely, which is why every analytics-store value
+      ## is authored here rather than half here and half above — half and half
+      ## would emit each variable twice.
+      additionalEnv:
+        - name: CLICKHOUSE_MIGRATION_URL
+          value: "{{ .infra.analytics_store_migration_url }}"
+        - name: CLICKHOUSE_URL
+          value: "{{ .infra.analytics_store_url }}"
+        - name: CLICKHOUSE_USER
+          value: "{{ .infra.analytics_store_user }}"
+        - name: CLICKHOUSE_DB
+          value: "{{ .infra.analytics_store_database }}"
+        - name: CLICKHOUSE_CLUSTER_ENABLED
+          value: "{{ .infra.analytics_store_cluster }}"
+        {{- if hasKey (default dict .features) "analytics_store_password" }}
+        - name: CLICKHOUSE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: "{{ .features.analytics_store_password.provides.name }}"
+              key: "{{ .features.analytics_store_password.provides.key }}"
+        {{- end }}
+        - name: REDIS_KEY_PREFIX
+          value: "{{ $cache.values.key_prefix }}"
+        - name: LANGFUSE_OTEL_INGESTION_MAX_BODY_BYTES
+          value: "{{ .values.otel_max_body_bytes }}"
+        - name: LANGFUSE_OTEL_MEDIA_UPLOAD_ENABLED
+          value: "{{ .values.media_upload_enabled }}"
+
+    ## ── The relational backend ─────────────────────────────────
+    ## Composed from the `backend` edge's host, port, user and database, which
+    ## arrive on the inject pipe under the variables the workload-synthesis
+    ## realization reads too. The chart's own bundled
+    ## database is switched off: the backend is a component the Aggregate
+    ## declares and the topology wires, not one this realization brings with it.
+    ## The password is the one place the two credential shapes differ: with a
+    ## credential on that connection, the chart is pointed at the existing
+    ## secret BY NAME, so the material never appears in the rendered artifact;
+    ## with none, the credential is optional, so an inline development default
+    ## keeps the render working exactly as the workload-synthesis realization
+    ## does.
+    postgresql:
+      deploy: false
+      host: "{{ $env.DATABASE_HOST }}"
+      port: {{ $env.DATABASE_PORT }}
+      auth:
+        username: "{{ $env.DATABASE_USERNAME }}"
+        database: "{{ $env.DATABASE_NAME }}"
+        {{- if hasKey (default dict $backend.features) "credential" }}
+        existingSecret: "{{ $backend.features.credential.provides.name }}"
+        secretKeys:
+          userPasswordKey: "{{ $backend.features.credential.provides.key }}"
+        {{- else }}
+        password: "apppass"
+        {{- end }}
+
+    ## ── The ingestion queue ────────────────────────────────────
+    ## Composed from the `cache` edge's host and port, which arrive on the inject
+    ## pipe the same way, with the chart's own bundled
+    ## cache switched off for the same reason. The username is deliberately
+    ## emptied: the chart composes a connection string and puts a username in it
+    ## whenever one is set, and presenting credentials to a cache that wants none
+    ## fails the connection rather than defaulting — which is why a cache
+    ## connection carrying no credential emits no authentication at all,
+    ## matching the workload-synthesis realization and the standard-library
+    ## cache Recipes.
+    redis:
+      deploy: false
+      host: "{{ $env.REDIS_HOST }}"
+      port: {{ $env.REDIS_PORT }}
+      auth:
+        username: ""
+        {{- if hasKey (default dict $cache.features) "credential" }}
+        existingSecret: "{{ $cache.features.credential.provides.name }}"
+        existingSecretPasswordKey: "{{ $cache.features.credential.provides.key }}"
+        {{- end }}
+      ## Over TLS the chart composes a rediss:// connection string and the
+      ## platform's cache client verifies the cache's certificate and the name
+      ## dialed, Node's default: against the authority mounted above where the
+      ## connection holds a server_ca, and otherwise against the runtime's own
+      ## trust store, which a publicly trusted certificate chains to.
+      {{- if $cacheTLS }}
+      tls:
+        enabled: true
+        {{- if $cacheCA }}
+        caPath: /etc/langfuse/cache-server-ca/ca.crt
+        {{- end }}
+      {{- end }}
+
+    ## ── The columnar analytics store ───────────────────────────
+    ## Switched off as a thing this chart provisions. Its addresses are
+    ## operator-set pointer strings the runtime resolves, authored in
+    ## additionalEnv above; nothing here connects to it.
+    clickhouse:
+      deploy: false
+
+    ## ── The object store ───────────────────────────────────────
+    ## Composed from the resolved `event_store` edge, with the chart's own
+    ## bundled store switched off. The bucket, the region, the two key prefixes,
+    ## the access-key identifier and the addressing style are that edge's own
+    ## values, so one store serves two platforms by wiring two buckets, and the
+    ## secret half of the access key is the credential that edge carries, named
+    ## by reference. With none, which the check above admits only where the
+    ## connection says its store takes none, secretAccessKey is left out and the
+    ## chart then emits no secret-key variable. A store publishing a bucket of
+    ## its own was checked above to publish this one. Event bodies and media
+    ## share the connection and differ only in their key prefix.
+    ##
+    ## Batch export is switched off: it would write to the same bucket under no
+    ## prefix of its own, and the Component describes event bodies and media and
+    ## nothing else.
+    ##
+    ## The endpoint is the one the store publishes, scheme included, read above
+    ## rather than composed here: whether the store is reached over http or
+    ## https is the store's own fact, so a store served over https is reached
+    ## over https. The store's published protocol is not that scheme — an
+    ## object store publishes `s3` there, naming the wire protocol a consumer
+    ## speaks rather than the scheme its address is dialled over. The
+    ## workload-synthesis realization reads the same endpoint the same way.
+    s3:
+      deploy: false
+      bucket: "{{ $store.values.bucket }}"
+      region: "{{ $store.values.region }}"
+      endpoint: "{{ $storeEndpoint }}"
+      forcePathStyle: {{ $store.values.force_path_style }}
+      accessKeyId:
+        value: "{{ $store.values.access_key_id }}"
+      {{- if hasKey (default dict $store.features) "credential" }}
+      secretAccessKey:
+        secretKeyRef:
+          name: "{{ $store.features.credential.provides.name }}"
+          key: "{{ $store.features.credential.provides.key }}"
+      {{- end }}
+      eventUpload:
+        prefix: "{{ $store.values.event_prefix }}"
+      mediaUpload:
+        enabled: {{ .values.media_upload_enabled }}
+        prefix: "{{ $store.values.media_prefix }}"
+      batchExport:
+        enabled: false

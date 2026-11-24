@@ -1,0 +1,168 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: dify-sandbox
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    The Dify code sandbox on Kubernetes via the helm provider's Workload
+    synthesis: a stateless Deployment and a ClusterIP Service on the execution
+    port. Each execution is independent and its working directory is discarded,
+    so the sandbox holds nothing between calls and renders stateless.
+
+    Code the sandbox runs was supplied by an application author, so its egress
+    leaves through the proxy wired on the ssrf_proxy edge, which refuses private
+    destinations. The execution key comes from a credential when one is
+    attached and otherwise from a pinned development literal, for evaluation
+    and local development: while it is in force, any workload that can reach
+    this Service can execute code through it.
+
+    Python requirements the developer declared are mounted from a ConfigMap.
+    provides.host is the bare in-cluster Service name, with no namespace; a
+    consumer in another namespace qualifies it on its own side.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/ai-agent/dify-sandbox:1.0.0
+  # This Recipe reads no infra.overrides keys.
+  #
+  # provides.host is the bare Service name "<rendered_name>-default" — the helm
+  # provider names the synthesized ClusterIP Service "<rendered_name>-default"
+  # with no namespace segment, so the recipe is independent of where it is
+  # deployed. A same-namespace consumer reaches it under this name directly; a
+  # cross-namespace consumer qualifies it with the target namespace on its own
+  # side (caller-side routing).
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ .infra.port }}"
+    protocol: "http"
+  # The declared Python requirements become one requirements file in a
+  # ConfigMap, emitted through artifacts and mounted whole-directory at the
+  # dependencies directory the sandbox reads on startup. The entry renders
+  # empty — and so emits no file — when the developer declared none, and the
+  # workload then carries no mount either, rendering byte-identically to a
+  # Recipe with no such surface at all.
+  artifacts:
+    dify-sandbox-dependencies.yaml: |
+      {{- if .values.python_packages -}}
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: {{ .context.rendered_name }}-dependencies
+      data:
+        python-requirements.txt: |
+      {{- range .values.python_packages }}
+          {{ . }}
+      {{- end }}
+      {{- end }}
+  # The proxy identity resolved from the ssrf_proxy uses-edge arrives on
+  # .context.inject.env and is composed into HTTP_PROXY and HTTPS_PROXY, the
+  # variables the sandbox's own outbound client reads. That is the whole point
+  # of the edge: code the sandbox runs was supplied by an application author,
+  # so its egress leaves through the proxy, which refuses private destinations,
+  # rather than going out directly with the pod's own reachability.
+  #
+  # The execution key comes from a credential when one is attached, delivered
+  # on API_KEY via the credential subsystem, and from a pinned development
+  # literal otherwise, matching the literal the API-server and worker Recipes
+  # present on CODE_EXECUTION_API_KEY, so the three agree with no external
+  # secret.
+  workload: |
+    {{- /*
+      The connection variables this Recipe reads off the inject pipe, under the
+      socket whose edge delivers them, each beside the provides key the edge's
+      inject block names it from. The pipe is read as a map, and every read of
+      these variables below goes through it, so a variable nothing delivered is
+      told apart from one delivered empty: an edge on one of these sockets
+      leaving any of its variables missing halts the build, naming the edge, the
+      variables and the inject block to write, rather than rendering a
+      connection setting with an empty value. A socket in $required is read
+      whether or not anything is wired to it, so leaving it empty halts too.
+    */ -}}
+    {{- $env := optional (default dict .context.inject) "env" dict -}}
+    {{- $reads := dict "ssrf_proxy" (dict "SSRF_PROXY_HOST" "host" "SSRF_PROXY_PORT" "port") -}}
+    {{- $required := list "ssrf_proxy" -}}
+    {{- $gaps := list }}{{ $wired := list -}}
+    {{- range $alias, $edge := .context.uses }}{{ with get $reads $edge.socket -}}
+    {{- $wired = append $wired $edge.socket }}{{ $missing := list }}{{ $shape := list -}}
+    {{- range $var, $from := . }}{{ if not (hasKey $env $var) }}{{ $missing = append $missing $var }}{{ end }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- if $missing }}{{ $gaps = append $gaps (printf "the edge %q on its %s socket delivers no %s, so give that edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $alias $edge.socket (join " or " $missing) (join ", " $shape)) }}{{ end -}}
+    {{- end }}{{ end -}}
+    {{- range $socket := $required }}{{ if not (has $socket $wired) -}}
+    {{- $vars := list }}{{ $shape := list }}{{ range $var, $from := get $reads $socket }}{{ $vars = append $vars $var }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- $gaps = append $gaps (printf "nothing is wired to its %s socket to deliver %s, so wire one and give its edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $socket (join " and " $vars) (join ", " $shape)) -}}
+    {{- end }}{{ end -}}
+    {{- if $gaps }}{{ fail (printf "core/ai-agent/dify-sandbox %q composes its connection settings from variables its edges deliver on its inject pipe, but %s" .context.instance_id (join "; and " $gaps)) }}{{ end -}}
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # Each execution is independent and leaves nothing behind, so the default
+    # stateless form (a Deployment on the helm provider) is correct.
+    form: stateless
+    replicas: 1
+    containers:
+      main:
+        image: "langgenius/dify-sandbox:{{ .infra.engine_version }}"
+        variables:
+          SANDBOX_PORT: "{{ .infra.port }}"
+          GIN_MODE: release
+          WORKER_TIMEOUT: "{{ .values.worker_timeout }}"
+          ENABLE_NETWORK: "{{ .values.enable_network }}"
+          # The proxy identity arrives on the inject pipe and is composed into
+          # the two variables the sandbox's outbound client reads, so executed
+          # code reaches the network only through the proxy.
+          HTTP_PROXY: "http://{{ $env.SSRF_PROXY_HOST }}:{{ $env.SSRF_PROXY_PORT }}"
+          HTTPS_PROXY: "http://{{ $env.SSRF_PROXY_HOST }}:{{ $env.SSRF_PROXY_PORT }}"
+    {{- if not (hasKey (default dict .features) "code_execution_key") }}
+          API_KEY: dify-sandbox
+    {{- end }}
+    {{- if hasKey (default dict .features) "code_execution_key" }}
+        attachments:
+          API_KEY:
+            from: code_execution_key
+            as: env
+    {{- end }}
+        ports:
+          http: {{ .infra.port }}
+        # The sandbox answers GET /health without the execution key, and the
+        # platform's own Compose file checks that route. No timing is
+        # documented; the liveness probe first checks after 10 s.
+        health:
+          ready:
+            http: /health
+            periodSeconds: 10
+            timeoutSeconds: 5
+          live:
+            http: /health
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+        # The resource quantities are quoted so the rendered value stays a
+        # string whatever the Release supplies.
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+    {{- if .values.python_packages }}
+        volumeMounts:
+          - name: dependencies
+            path: /dependencies
+    {{- end }}
+    {{- if .values.python_packages }}
+    volumes:
+      dependencies:
+        configmap:
+          source: "{{ .context.rendered_name }}-dependencies"
+    {{- end }}
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          http: {{ .infra.port }}

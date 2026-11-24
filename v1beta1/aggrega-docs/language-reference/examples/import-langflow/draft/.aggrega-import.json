@@ -1,0 +1,175 @@
+{
+  "target": "compose",
+  "files": [
+    {
+      "path": "components/imported-ai-model-languagemodelcomponent.yaml",
+      "digest": "sha256:355fcf78678fb618de024c244de01f054d87660107f21fee7360c87261886a21"
+    },
+    {
+      "path": "aggregate.yaml",
+      "parts": [
+        {
+          "key": [
+            "apiVersion"
+          ],
+          "digest": "sha256:03607c07dca7814d8c396a8c3ad7851d740bb056db25d5960b8c60359ebe0654"
+        },
+        {
+          "key": [
+            "kind"
+          ],
+          "digest": "sha256:6f5881e619310e861acf6e6b2a56fe5fd47d7ada25f65236f33547be0e971da8"
+        },
+        {
+          "key": [
+            "metadata"
+          ],
+          "digest": "sha256:a6591ddc655ee5da343b3ad3b96e89cae577b59db6b64e12bfb6bda26d51a97f"
+        },
+        {
+          "key": [
+            "metadata",
+            "name"
+          ],
+          "digest": "sha256:c2634a18b04db5ad40c1c04f90b2f9cb1432894bc29977057ffc2a30d6338235"
+        },
+        {
+          "key": [
+            "metadata",
+            "version"
+          ],
+          "digest": "sha256:7adfc0ac54349f68a86593cad59441e811ed7c6a8dd442ba876541ea305403cd"
+        },
+        {
+          "key": [
+            "metadata",
+            "description"
+          ],
+          "digest": "sha256:75b410eb77eb02bc7d845dd9d3218733ebcf40f87725178fda12bababb4c8ebe"
+        },
+        {
+          "key": [
+            "spec"
+          ],
+          "digest": "sha256:7655624907478adcff0722912a102b1c3a8f311fb86415ccd7ba0e2e86905e96"
+        },
+        {
+          "key": [
+            "spec",
+            "components"
+          ],
+          "digest": "sha256:72d4d1df5344de7b60f64341f1f4f8b2e5ff0c464a110e0182a8ba8548fa8527"
+        },
+        {
+          "key": [
+            "spec",
+            "components",
+            "langflow"
+          ],
+          "digest": "sha256:97d35094d3101d8862ad547d22c5a10ca9748c6510d245b2326c516a27502257"
+        },
+        {
+          "key": [
+            "spec",
+            "components",
+            "langflow",
+            "type"
+          ],
+          "digest": "sha256:5ab9d0146952e5866ba465c7c1de763640b59dc84f37b4c8afaafe9a098ab491"
+        },
+        {
+          "key": [
+            "spec",
+            "components",
+            "langflow",
+            "values"
+          ],
+          "digest": "sha256:a137a72a889fb4f8d880d79d698d08257c85a6de4178e3c97c4bbb677101f6bb"
+        },
+        {
+          "key": [
+            "spec",
+            "components",
+            "langflow",
+            "values",
+            "flow_id"
+          ],
+          "digest": "sha256:2e2d7c62bc8b8a4b306a19dc82c18feef9b7fcce5f98b515cd98a0fdfbcd7e5a"
+        },
+        {
+          "key": [
+            "spec",
+            "components",
+            "langflow",
+            "values",
+            "flow_definition"
+          ],
+          "digest": "sha256:cfdaa8560a99af3d735daa425399b857efe517c8fb77e64aa352abc9cee214ee"
+        },
+        {
+          "key": [
+            "spec",
+            "components",
+            "langflow",
+            "uses"
+          ],
+          "digest": "sha256:f05384725f7abbbd4ce9c22837621ada4f617ff06515dd291e0c8dfe0f195f0a"
+        },
+        {
+          "key": [
+            "spec",
+            "components",
+            "langflow",
+            "uses",
+            "model"
+          ],
+          "digest": "sha256:eee520c03a65dfac6973949fa4b4c0dba4bde7ff026e3498ee31812e5398a6ed"
+        },
+        {
+          "key": [
+            "spec",
+            "components",
+            "langflow",
+            "uses",
+            "model",
+            "languagemodelcomponent-kboja"
+          ],
+          "digest": "sha256:d9d6625435ba47b43a432200e2e7058864241cf6028030887d5dd5d7f27d83ae"
+        },
+        {
+          "key": [
+            "spec",
+            "components",
+            "langflow",
+            "uses",
+            "model",
+            "languagemodelcomponent-kboja",
+            "target"
+          ],
+          "digest": "sha256:d490f165b3659e12e9cfa484550795a2db4218d210258e5e90f19c499b875e3d"
+        },
+        {
+          "key": [
+            "spec",
+            "components",
+            "languagemodelcomponent-kboja"
+          ],
+          "digest": "sha256:e7e6b9a2840d7cd2ef7f0686499c38d25840122c06297ee6ab6076c7113d17d2"
+        },
+        {
+          "key": [
+            "spec",
+            "components",
+            "languagemodelcomponent-kboja",
+            "type"
+          ],
+          "digest": "sha256:9eb5fd0da5fab113e8f1d48c5183a3bc5b451a9f3e2bb11f6c01653d1436b804"
+        }
+      ]
+    },
+    {
+      "path": "manifest.yaml",
+      "digest": "sha256:c1c7c713ee505e1860b222de12716d58d4904d201f82817171a7e547b2a8d77a"
+    }
+  ]
+}

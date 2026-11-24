@@ -1,0 +1,141 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/ai-agent/agenta-runner
+  version: 1.0.0
+  # metadata.license is deliberately absent, for the reason stated on
+  # core/ai-agent/agenta-api: the platform is published open-core, no single
+  # SPDX identifier covers it, and the class is carried on the
+  # component.aggrega.ai/upstream-licensing label below while the licence of the
+  # pinned artifact is named on this component's Recipe.
+  description: >
+    The agent runner of an agent workspace: the service that actually executes
+    an agent. It takes a run request from the model-facing service, starts the
+    harness the agent is configured for as a child process inside a sandbox,
+    mounts that agent's working directory into the sandbox, and relays the tool
+    calls the harness makes back to the platform through the api socket.
+
+    Its environment is deliberately narrow, and that is a security property
+    rather than an omission: a locally sandboxed harness can read this
+    container's environment, so the component declares no relational, cache,
+    queue or object-store socket and holds no platform credential beyond the
+    token it requires on every call. An Aggregate that adds such a value here
+    removes that property.
+
+    Realized on Kubernetes via its Helm Recipe, which synthesizes the runner as
+    a stateless Deployment behind a ClusterIP Service on its HTTP port, with the
+    local sandbox provider enabled and no remote provider configured. It exports
+    its host, port, endpoint and protocol to consumers.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: ai-agent
+    component.aggrega.ai/hosting: self-hosted
+    component.aggrega.ai/upstream-licensing: open-core
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  inject: [env]
+
+  # Agent execution belongs on its own tier: it runs code and tool calls the
+  # platform's users authored, and separating it from the services that hold
+  # the platform's data is what keeps a run's reach bounded.
+  usesSchema:
+    # The control-plane API the runner relays a harness's tool calls back to;
+    # the edge carries the API's in-cluster address. This is the only socket the
+    # component declares, and the narrowness is the point: a locally sandboxed
+    # harness runs as a process inside this container, so anything in this
+    # container's environment is readable by the agent's own code, and a run
+    # cannot read the database password, the encryption key or the object
+    # store's keys because they are not there to read.
+    api:
+      selector: "component.aggrega.ai/category=ai-agent"
+      inject: [env]
+      required: true
+
+  featuresSchema:
+    # The one credential this component holds. It is the shared token the
+    # platform presents on every call; the runner rejects an untokened request
+    # and refuses to start without the token configured.
+    # To replace the Recipe's development default, attach core/random-password: the
+    # cluster generates it, and slots sharing it take it by core/referenced-secret.
+    runner_token:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      description: "Token the runner checks on every incoming call. The control-plane API and the model-facing service present the same token, each as the credential on the connection it reaches the runner through, so all three ends carry one value. Unattached, the Recipe emits the pinned development literal `dev-agenta-runner-change-me`, suitable for evaluation only and published in this catalog, so every Release that leaves the slot unattached shares it — while it is at its default, anything that can reach this service can start a run."
+
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      #
+      # The sandbox is where the isolation lives. The runner supports a local
+      # sandbox inside its own container, which is the default and needs nothing
+      # else deployed, and a remote sandbox provider an operator contracts for
+      # separately. The two values below govern how long a sandbox is kept.
+      session_idle_minutes:
+        type: integer
+        min: 1
+        default: 15
+        description: How long a sandbox with no activity is kept before it is stopped. A shorter window frees compute sooner and makes the next turn of a paused conversation slower to start.
+      session_retention_minutes:
+        type: integer
+        min: 1
+        default: 30
+        description: How long a stopped sandbox is kept before it is deleted. Until it is deleted, resuming the session reuses the same sandbox.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 8765
+        description: Port the runner serves its HTTP API on; the model-facing service connects here. Most operators should omit this and let the Recipe assign the default (8765).
+      engine_version:
+        type: string
+        default: "v0.114.1"
+        description: Runner container image tag. It tracks the same release as the rest of the platform, so a Release moves them together.
+      log_level:
+        type: string
+        enum: [debug, info, warn, error]
+        default: info
+        description: Log verbosity the runner emits.
+      compute:
+        cpu:
+          type: string
+          default: 500m
+        memory:
+          type: string
+          default: 2Gi
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges,
+      # so the model-facing service reads one address for the runner.
+      host:
+        type: string
+        required: true
+        description: In-cluster DNS name of the Service fronting the runner. The model-facing tier dials this name to have an agent executed.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port that Service accepts run requests on. It follows the port
+          an operator set in the Release, so a consumer reads it rather than
+          assuming a default.
+      endpoint:
+        type: string
+        required: true
+        description: >
+          Full in-cluster base URL of the runner's API, with the host and the
+          port already composed. It is what the model-facing tier is
+          configured with to submit a run.
+      protocol:
+        type: string
+        description: URL scheme to reach `host` and `port` over, for a consumer composing its own address rather than reading `endpoint`.

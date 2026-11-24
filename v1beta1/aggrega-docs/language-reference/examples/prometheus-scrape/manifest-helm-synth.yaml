@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Manifest
+metadata:
+  name: manifest-helm-synth
+  version: "1.0.0"
+  description: >
+    Ops mapping for the Kubernetes target backed by Workload synthesis.
+    Prometheus is realized by the synthesized helm Recipe — the official
+    prom/prometheus image rendered directly into a StatefulSet, Services, and a
+    data volume with no external Helm chart — and Grafana by the synthesized
+    Grafana helm Recipe, which likewise renders the official image and fetches
+    nothing. Recipe selection at build time is by component type against the
+    loaded catalog.
+spec:
+  mappings:
+    components:
+      type:
+        core/observability/prometheus:1.0.0: helm/prometheus:1.0.0
+        core/observability/grafana:1.0.0: helm/grafana:1.0.0

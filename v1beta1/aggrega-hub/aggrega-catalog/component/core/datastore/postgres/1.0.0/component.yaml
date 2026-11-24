@@ -1,0 +1,322 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/datastore/postgres
+  version: 1.0.0
+  description: >
+    A PostgreSQL relational database. Provider-agnostic: the same component is
+    implemented by Compose Recipes (local development), Helm Recipes
+    (Kubernetes), Terraform Recipes (AWS RDS, Google Cloud SQL, Azure), and
+    CloudFormation Recipes, and by a reference Recipe that provisions nothing
+    and only wires a consumer to a server that already exists. Reach for the
+    synthesis Recipe on a cluster that runs no PostgreSQL control plane: it
+    needs no controller installed and no chart repository, so it builds with
+    nothing fetched. Reach for the controller-driven Recipe, which emits a
+    CloudNativePG Cluster custom resource, where that control plane is already
+    in place and the cluster should own failover, rolling upgrades and the
+    database's credentials. Reach for the reference Recipe where the server
+    already exists outside the deployment and nothing is to be provisioned.
+
+    On AWS RDS through Terraform, reach for
+    terraform/postgres-rds-terraform-aws-modules, which vendors the
+    terraform-aws-modules project's published RDS module, where the pull may
+    fetch it from its git repository, and for terraform/postgres-rds, which
+    authors its own body, where nothing may be fetched or read replicas are
+    needed. On Google Cloud SQL, reach for terraform/postgres-cloud-sql, where
+    the database runs in a Google Cloud project whose VPC network has private
+    services access to Cloud SQL. On Azure, reach for
+    terraform/postgres-flexible-server, a flexible server in a delegated subnet
+    of the operator's virtual network.
+
+    Backup is the core/backup attachment: the managed Recipes set the
+    service's automated backups from it, 7 days with none attached; on
+    Kubernetes the backup product the Manifest binds realizes it; Compose
+    halts on one.
+  # Backup, in full. The managed Recipes — RDS, Cloud SQL and the Azure
+  # flexible server — configure the service's own automated backups from a
+  # core/backup attachment bound to terraform/backup-native or
+  # cloudformation/backup-native, and keep them on, 7 days, with none
+  # attached. The controller-driven Recipe is backed up through
+  # helm/backup-cloudnative-pg, with the Barman Cloud plugin; the synthesized
+  # one by the backup product the Manifest binds to the attachment. No
+  # FeatureRecipe realizes core/backup on Compose, so an attachment on the
+  # Compose Recipe halts the build, naming it.
+  #
+  # PostgreSQL serves no Prometheus metrics of its own; the controller-driven
+  # Recipe publishes where its control plane's exporter serves them, and every
+  # other Recipe publishes those keys empty (see the metrics keys under provides).
+  #
+  # Every realization exports host and port to consumers through the uses
+  # topology. Three Helm Recipes realize the component, and the Manifest selects
+  # between them for each Release.
+  labels:
+    component.aggrega.ai/type: stateful-server
+    component.aggrega.ai/category: datastore
+    # This component is realized self-hosted (helm, compose), managed (RDS on
+    # Terraform and CloudFormation, Cloud SQL and Azure Database for PostgreSQL
+    # flexible server on Terraform) and referenced (a
+    # server that already exists), so no single hosting posture is its
+    # identity. `mixed` is the honest selector-only value for such a unified,
+    # multi-posture component; the actual posture of a Release follows the
+    # Recipe the Manifest selects. Selector-only: never stamped onto output.
+    component.aggrega.ai/hosting: mixed
+    component.aggrega.ai/upstream-licensing: osi-approved
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # Self-inject allowlist: the component may inject its own provides keys into
+  # the env delivery mechanism.
+  inject: ["env"]
+  featuresSchema:
+    # Optional password credential slot. When a credential is attached
+    # here, the Recipe wires the database password through the credential
+    # subsystem; when unattached, the Recipe falls back to its inline default.
+    # `required` omitted → optional, so a bare `db: {}` still loads.
+    # Transparent (inject: [env]) so a synthesized Workload may reference it as
+    # an env secret; the selector is secret-kind-pinned but family-agnostic so
+    # either an inject-value or a referenceable credential may fill it.
+    # To replace the Recipe's development default, attach core/random-password: the
+    # cluster generates it, and slots sharing it take it by core/referenced-secret.
+    password:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      description: "Optional database password credential. When attached, supplies POSTGRES_PASSWORD via the credential subsystem. Unattached, compose/postgres and helm/postgres set POSTGRES_PASSWORD to the development literal `apppass`, which this catalog publishes, so every Release that leaves the slot unattached shares that password. The controller-driven realization owns the database's credentials through infra.credentials and halts the build when this slot is filled. On the RDS Recipes RDS generates the master password and keeps it in AWS Secrets Manager, so the slot stays empty or takes core/generated-secret there, and any other credential halts the build. terraform/postgres-cloud-sql takes core/random-password here as the password of the user values.user names, and with nothing attached the module it sources draws one; it halts on any other credential. terraform/postgres-flexible-server requires core/random-password here as the administrator's password, and halts with nothing attached or on any other credential, since neither the service nor its module draws one."
+    # Optional application-user credential slot. When a credential is attached
+    # here, the helm Recipe creates a distinct non-superuser login role
+    # (named by values.app_user) with this credential as its password, via a
+    # role-creation script on the first-initialization path. Optional and
+    # transparent, mirroring the superuser `password` slot; unattached, no
+    # application role is created and the render is byte-identical. Realized on the
+    # helm target only — the Compose Recipe has no first-init role-creation path.
+    app_user_password:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      description: "Optional application-user password credential. When attached, the synthesized helm Recipe creates a non-superuser login role (named by values.app_user) with this password; unattached, no application role is created. The controller-driven realization owns the database's credentials through infra.credentials and halts the build when this slot is filled, and so do the managed Recipes, which create only the one user values.user names."
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate. Each value
+      # carries a default or may be omitted, so a bare `db: {}` deploys a
+      # working database and every value stays configurable.
+      database:
+        type: string
+        default: appdb
+        description: Logical database name created on startup (POSTGRES_DB).
+      user:
+        type: string
+        default: appuser
+        description: Bootstrap superuser role created on startup (POSTGRES_USER), owner of the initial database. For an additional non-superuser application role, see app_user.
+      app_user:
+        type: string
+        default: app
+        description: >
+          Name of an optional non-superuser application login role. The role is
+          created only when an application-user credential is attached to the
+          app_user_password slot (helm target only); the bootstrap superuser is
+          named by `user`. Attaching that credential and setting this to an
+          empty string asks for a role it has not named, and the
+          build halts rather than emitting an unnamed role.
+      encoding:
+        type: string
+        description: Database encoding passed to initdb (e.g. UTF8). Omit to use the image default. terraform/postgres-cloud-sql accepts UTF8 alone, the one encoding Cloud SQL creates a database with, and halts on any other. terraform/postgres-flexible-server creates the database with it as its charset.
+      locale:
+        type: string
+        description: Database locale passed to initdb (e.g. en_US.utf8). Omit to use the image default. terraform/postgres-cloud-sql accepts en_US.UTF8 alone, the one collation Cloud SQL creates a database with, and halts on any other. terraform/postgres-flexible-server creates the database with it as its collation.
+      init_scripts:
+        type: object
+        valuesType: string
+        description: >
+          SQL or shell scripts executed on first database initialization from
+          /docker-entrypoint-initdb.d. Each key is a filename, each value is the
+          file content. Scripts run once, when the data directory is empty, in
+          alphabetical key order. The controller-driven realization runs each
+          entry as SQL in the application database instead, in the same key
+          order, so content that is not SQL belongs on a synthesized realization.
+      custom_config:
+        type: string
+        description: >
+          Raw server configuration block (postgresql.conf format). Applied
+          verbatim as the server's configuration file; unspecified settings keep
+          their built-in defaults. The controller-driven realization takes server
+          configuration as named settings rather than as a file and halts the
+          build when this is set, naming the key it offers instead.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 5432
+        description: >
+          Server listen port. Most operators should omit this and let the Recipe
+          assign the default (5432). The controller-driven realization runs the
+          server on 5432 and cannot move it, and Cloud SQL and Azure Database
+          for PostgreSQL flexible server serve PostgreSQL on 5432 alone, so
+          those realizations halt the build on any other value rather than
+          handing a consumer a port the server does not answer on.
+      engine_version:
+        type: string
+        default: "16"
+        description: PostgreSQL major version (the postgres image tag).
+      # The managed Recipes size the instance by its instance class or tier, and
+      # a Recipe cannot tell these defaults from a value a Release wrote, so
+      # they are not read there rather than refused, and each description says
+      # so.
+      compute:
+        cpu:
+          type: string
+          default: 250m
+          description: CPU the database server is given. The managed Recipes do not read it; the RDS Recipes size the instance by infra.overrides.instance_class (DBInstanceClass on CloudFormation), terraform/postgres-cloud-sql by infra.overrides.tier, and terraform/postgres-flexible-server by infra.overrides.sku_name.
+        memory:
+          type: string
+          default: 512Mi
+          description: Memory the database server is given. The managed Recipes do not read it; the RDS Recipes size the instance by infra.overrides.instance_class (DBInstanceClass on CloudFormation), terraform/postgres-cloud-sql by infra.overrides.tier, and terraform/postgres-flexible-server by infra.overrides.sku_name.
+      storage:
+        type: object
+        properties:
+          size:
+            type: string
+            default: 10Gi
+            description: >
+              Size of the database's storage. terraform/postgres-flexible-server
+              provisions it as Premium SSD in the sizes Azure Database for
+              PostgreSQL flexible server offers, from 32Gi, so this default
+              halts the build there naming the key.
+          type:
+            type: string
+            description: >
+              On Kubernetes, the storage class the database volume is
+              provisioned from: leave it unset to take the cluster's default
+              storage class, or name another class the cluster offers. On a
+              managed database, the provider's volume type instead, such as
+              `gp3` or `io1` on AWS RDS: left unset, the RDS Recipes provision
+              `gp3`. On Cloud SQL it is the data disk type, `PD_SSD`, `PD_HDD`
+              or `HYPERDISK_BALANCED`, and left unset
+              terraform/postgres-cloud-sql provisions `PD_SSD`.
+              terraform/postgres-flexible-server provisions Premium SSD, takes
+              no disk type and halts the build when this is set. The Compose
+              Recipe names no class, and the reference Recipe provisions no
+              volume.
+      ha:
+        enabled:
+          type: boolean
+          default: false
+          description: Enable read-replica high availability. The synthesized-Helm and Compose Recipes deploy a single instance and do not implement read-replica high availability. terraform/postgres-flexible-server turns on the service's zone-redundant high availability, a standby server in another availability zone, and halts the build on a Burstable SKU, which takes none.
+        read_replicas:
+          type: integer
+          min: 0
+          default: 0
+          description: Number of read replicas to deploy when high availability is enabled. terraform/postgres-rds and terraform/postgres-cloud-sql provision them beside the primary; the other managed Recipes provision one instance and halt the build on a count above zero.
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+      control_plane_present:
+        type: boolean
+        default: false
+        description: >
+          Operator affirmation that the CloudNativePG control plane is installed
+          in the target cluster. The controller-driven realization halts the build
+          unless this is set true, so a Cluster custom resource is never emitted as
+          an orphan into a cluster that cannot reconcile it. Every other
+          realization ignores this flag.
+      credentials:
+        type: string
+        enum: [generated, supplied]
+        default: generated
+        description: >
+          Who owns the database's credentials on the controller-driven realization.
+          `generated` — the controller creates the Secret holding the owning role's
+          password and owns it, which is what it does when nothing is supplied; the
+          developer's `database` and `user` values are still honored, and no
+          password reaches the rendered artifact. `supplied` — the controller reads
+          that role's credentials from an existing Secret named in
+          `credentials_secret` and generates none. Every other realization
+          halts the build on `supplied`: the synthesized ones take the database
+          password from the `password` credential slot and the application
+          role's from `app_user_password`, the reference one owns no
+          credential, on the RDS ones RDS owns the password, and on
+          terraform/postgres-cloud-sql and terraform/postgres-flexible-server
+          the `password` slot carries it.
+      credentials_secret:
+        type: string
+        default: ""
+        description: >
+          Name of the existing Secret the controller-driven realization reads the
+          database owner's credentials from when `credentials` is `supplied`. The
+          Secret lives in the same namespace as the database, is of type
+          `kubernetes.io/basic-auth`, and carries a `username` entry that must
+          match `values.user` alongside a `password` entry holding that role's
+          password. Leave it empty when `credentials` is `generated`; a
+          controller-driven build halts if `supplied` is selected without it.
+          Every other realization reads no Secret by this name and halts the
+          build when it is set.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      host:
+        type: string
+        required: true
+        description: >
+          Address a client opens its database connection to. Which address
+          that is follows the realization the Manifest selected — a Service's
+          DNS name in-cluster, a pointer string a provisioning tool resolves
+          for a managed instance, or the address of a server that already
+          exists — so a consumer reads this rather than deriving one. A
+          managed realization publishes the DNS name the Release sets in
+          infra.overrides.host instead of its pointer, so a consumer on another
+          target receives an address it can resolve.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port the server accepts connections on. It follows the port an
+          operator set, so a consumer reads it rather than assuming 5432.
+      user:
+        type: string
+        description: >
+          Name of the login role a consumer authenticates as. The matching
+          password arrives through the credential attached to the component,
+          never through this contract.
+      database:
+        type: string
+        description: >
+          Name of the logical database created at startup. A consumer names it
+          in its connection string to land in the right database rather than
+          the server's default.
+      protocol:
+        type: string
+        description: Wire protocol the published address speaks — `postgres`, which is what a consumer selects a driver for.
+      # Where Prometheus finds the database's metrics. PostgreSQL serves none of
+      # its own. The CloudNativePG control plane runs an exporter in every
+      # instance it manages, whatever the Cluster says: /metrics on a container
+      # port named metrics, 9187, in plain HTTP with no caller check, a listener
+      # that answers that one path and nothing else. No Service carries the port,
+      # so the controller-driven realization publishes the label selector of the
+      # instance pods, the port name and the path, for a scraper that discovers
+      # those pods directly. Every other realization runs no exporter and
+      # publishes the three keys empty. None of the keys carries a namespace: a
+      # scraper reads where the target runs from its own connection.
+      metrics_pod_selector:
+        type: string
+        description: >
+          Kubernetes label selector matching every instance pod that serves the
+          database's metrics, for a scraper that discovers those pods directly.
+          Set by the controller-driven realization, beside `metrics_pod_port`
+          and `metrics_path`; empty on every other realization, which serves no
+          metrics.
+      metrics_pod_port:
+        type: string
+        description: >
+          Name of the container port on those pods that carries the metrics,
+          `metrics`. Set and empty together with `metrics_pod_selector`.
+      metrics_path:
+        type: string
+        description: >
+          Path the metrics are served at on that port, `/metrics`. Set and empty
+          together with `metrics_pod_selector`.

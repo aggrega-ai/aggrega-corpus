@@ -1,0 +1,715 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Aggregate
+metadata:
+  name: core/agenta
+  version: 1.0.0
+  description: >
+    A self-contained Agenta installation packaged as a reusable module: the
+    workspace in which a team builds agents that do work, by describing the job
+    in chat, connecting the applications the agent needs, setting what it may
+    do on its own, and correcting it through feedback. It composes fourteen
+    single-workload components, from a control-plane API and an agent runner to
+    the PostgreSQL, Redis-compatible, object-store and authentication services
+    they share. It is not a trace store, which core/observability/langfuse is,
+    nor a prompt registry, which core/devtool/promptlayer is.
+
+    Its credentials, the object store's key pair included, are module
+    parameters an importing Aggregate passes down, each attached through
+    core/referenced-secret on every slot that holds it,
+    on the connection where a component presents it. The key the platform
+    signs its internal tokens with and the key it encrypts stored credentials
+    under have no default; every other default is a development credential
+    every reader holds, for evaluation only. A Release sets infra.external_base_url on the api,
+    services, console and mobile components, or the build halts.
+
+    Realized on helm: its Agenta components have no compose Recipe. The
+    Manifest of every Release importing it maps core/referenced-secret, or the
+    build halts, and maps the backend to a PostgreSQL Recipe other than
+    postgres-cloudnative-pg, which halts on the filled credential slot.
+
+    Both Redis-compatible instances run without authentication. The module
+    ships no reverse proxy, no remote sandbox provider, no model provider and no outbound mail;
+    an ingress tier routes to the four components it exports.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  parameters:
+    # Each parameter below is one credential the platform's components must agree
+    # on, and fills every credential slot that holds it. They are module
+    # parameters because an Aggregate importing this module hands it parameters
+    # and nothing else, so a parameter is the one way a Release reaches a
+    # credential slot on a component inside it — and one parameter per credential
+    # means it is authored once and cannot drift between the components that must
+    # agree on it.
+    #
+    # The module attaches core/referenced-secret on each of those slots — on a
+    # component that verifies the credential or uses it itself, its own slot; on
+    # a component that presents it to another, the credential of the connection
+    # it presents it on — so every workload carries a reference to a Secret
+    # rather than the value itself. What a parameter means follows the
+    # realization the Manifest binds for that Feature, as each parameter's
+    # description says; under k8s-existing-secret one Secret may carry all of
+    # them, each under its own data key.
+    #
+    # auth_key and crypt_key have no default: a key every reader of this catalog
+    # holds would let anyone mint the platform's internal tokens or read what it
+    # stored encrypted, so the importing Aggregate passes each one down and its
+    # Release fulfills it.
+    #
+    # Each other parameter's pinned default is what lets the module render
+    # self-contained. It is a
+    # development credential: every reader of this catalog holds it, so it is for
+    # evaluation and local development, and a Release carrying real traffic
+    # supplies its own through the importing Aggregate, which declares parameters
+    # of its own and passes them down through its aggregates entry for the
+    # Release to fulfill.
+    # Each default is also a valid Kubernetes object name and meets what its
+    # product requires of the credential, so it serves under either realization
+    # of the Feature.
+    db_password:
+      type: string
+      default: "agenta-db-password-for-evaluation-only"
+      description: Password the PostgreSQL backend is initialized with, and the one the authentication core, the schema-migration step, both API tiers, both worker tiers and the scheduler authenticate to it with. What the value is depends on the core/referenced-secret realization the Manifest binds - the password itself with k8s-secret-from-parameter, which emits a Secret carrying it; the name of a Secret already in the namespace, holding the password under the data key db-password, with k8s-existing-secret. The platform's services place the password inside their connection URLs as it is, so keep it to characters a URL does not reserve. The default is a development credential shipped so the module renders self-contained, for evaluation only; pass your own down from the importing Aggregate for any Release carrying real traffic.
+    auth_key:
+      type: string
+      required: true
+      minLength: 1
+      description: Key the platform signs its own internal tokens with, held by both API tiers, both worker tiers, the scheduler and both front ends. What the value is depends on the core/referenced-secret realization the Manifest binds - the key itself with k8s-secret-from-parameter, which emits a Secret carrying it; the name of a Secret already in the namespace, holding the key under the data key auth-key, with k8s-existing-secret. There is no default, so the importing Aggregate passes one down and its Release fulfills it.
+    crypt_key:
+      type: string
+      required: true
+      minLength: 1
+      description: Key the stored model-provider credentials and connected-application tokens are encrypted under, held by the same seven components as auth_key. Changing it makes what is already stored unreadable. What the value is depends on the core/referenced-secret realization the Manifest binds - the key itself with k8s-secret-from-parameter, which emits a Secret carrying it; the name of a Secret already in the namespace, holding the key under the data key crypt-key, with k8s-existing-secret. There is no default, so the importing Aggregate passes one down and its Release fulfills it.
+    services_internal_key:
+      type: string
+      default: "agenta-services-internal-key-for-evaluation-only"
+      description: Key the control-plane API, the model-facing service and the queue-consuming worker present to each other on internal calls. The platform treats an empty value, or the placeholder replace-me its own examples ship, as no key at all. What the value is depends on the core/referenced-secret realization the Manifest binds - the key itself with k8s-secret-from-parameter, which emits a Secret carrying it; the name of a Secret already in the namespace, holding the key under the data key services-internal-key, with k8s-existing-secret. The default is a development credential shipped so the module renders self-contained, for evaluation only; pass your own down from the importing Aggregate for any Release carrying real traffic.
+    runner_token:
+      type: string
+      default: "agenta-runner-token-for-evaluation-only"
+      description: Token the runner requires on every incoming call, which both API tiers present. While it is at its default, anything that can reach the runner can start an agent run. What the value is depends on the core/referenced-secret realization the Manifest binds - the token itself with k8s-secret-from-parameter, which emits a Secret carrying it; the name of a Secret already in the namespace, holding the token under the data key runner-token, with k8s-existing-secret. The default is a development credential shipped so the module renders self-contained, for evaluation only; pass your own down from the importing Aggregate for any Release carrying real traffic.
+    # The object store's key pair is its own account, and both API tiers
+    # present the same pair to it: each half is a parameter, attached to the
+    # store's slot and to the matching slot of both tiers' store connections.
+    store_access_key:
+      type: string
+      default: "admin"
+      description: Access key identifier of the object store's account, and the one both API tiers present to it. What the value is depends on the core/referenced-secret realization the Manifest binds - the identifier itself with k8s-secret-from-parameter, which emits a Secret carrying it; the name of a Secret already in the namespace, holding the identifier under the data key store-access-key, with k8s-existing-secret. The default is a development value shipped so the module renders self-contained, for evaluation only; pass your own down from the importing Aggregate for any Release carrying real traffic.
+    store_secret_key:
+      type: string
+      default: "agenta-store-secret-key-for-evaluation-only"
+      description: Secret access key of the object store's account, the pair of store_access_key, and the one both API tiers present to it. What the value is depends on the core/referenced-secret realization the Manifest binds - the secret itself with k8s-secret-from-parameter, which emits a Secret carrying it; the name of a Secret already in the namespace, holding the secret under the data key store-secret-key, with k8s-existing-secret. The default is a development credential shipped so the module renders self-contained, for evaluation only; pass your own down from the importing Aggregate for any Release carrying real traffic.
+    # Unattached, the authentication core issues no key and answers every caller
+    # that can reach it. This module attaches one, so the core requires this key
+    # of every caller, and both API tiers and both front ends present it.
+    auth_core_api_key:
+      type: string
+      default: "agenta-auth-core-api-key-for-evaluation-only"
+      description: API key the authentication core requires of every caller, and the one both API tiers and both front ends present to it. What the value is depends on the core/referenced-secret realization the Manifest binds - the key itself with k8s-secret-from-parameter, which emits a Secret carrying it; the name of a Secret already in the namespace, holding the key under the data key auth-core-api-key, with k8s-existing-secret. The core refuses to start unless the key is at least 20 characters of letters, digits, = and - alone, and the default meets that rule. The default is a development credential shipped so the module renders self-contained, for evaluation only; pass your own down from the importing Aggregate for any Release carrying real traffic.
+  components:
+    # Fourteen single-workload components: a control-plane API, a model-facing
+    # service, an agent runner, a browser console, a small-screen front end, a
+    # stream-consuming worker, a queue-consuming worker, a scheduler, a
+    # schema-migration step, a PostgreSQL backend, two Redis-compatible
+    # instances, an S3-compatible object store, and the authentication core the
+    # platform holds its accounts in.
+    #
+    # This module is where an agent itself is built, configured and run. It
+    # records traces and runs evaluations of its own, as material for improving
+    # an agent rather than as the product it offers. core/observability/langfuse,
+    # in the catalogue's observability category, is the self-hosted platform
+    # whose identity is tracing and evaluating what a language-model application
+    # did, and core/devtool/promptlayer, in the devtool category, is the hosted
+    # registry whose identity is authoring and versioning prompts an application
+    # fetches at run time; an Aggregate that wants one of those and only that
+    # wires there. All three are worth having for different reasons, and an
+    # Aggregate may wire more than one.
+    #
+    # This module is the working platform core, and four parts of a full Agenta
+    # installation are deliberately out of scope, each stated beside what it
+    # concerns: outbound mail beside api, the model provider beside services,
+    # the remote sandbox provider beside runner, and the reverse proxy beside
+    # exportedComponents.
+
+    # The relational backend, whose edges are what make the platform stateful.
+    # Six components reach it: the API, the model-facing service, both workers,
+    # the scheduler and the migration step. Each edge carries the backend's
+    # in-cluster host and port along with its user, and names two databases on
+    # the edge itself, one for the platform's own model and one for the traces
+    # it records; naming them on the edge rather than in the backend's own
+    # values is what lets one server hold both without either name being fixed
+    # in a component. Its initialization creates the three
+    # databases the module needs: the platform's own model, its traces, and the
+    # authentication core's accounts. The core's database is created here rather
+    # than by the core itself, because the core is given one database name and
+    # this module puts all three on one server.
+    db:
+      type: core/datastore/postgres
+      values:
+        user: agenta
+        # The database published on this component's provides, and so the one
+        # the authentication core is given — it is the only consumer in this
+        # module that reads the published name. Every other consumer names the
+        # database it wants on its own edge, which is why the platform's two are
+        # not this value.
+        database: agenta_supertokens
+        init_scripts:
+          10-agenta-databases.sql: |
+            CREATE DATABASE agenta_core OWNER agenta;
+            CREATE DATABASE agenta_tracing OWNER agenta;
+      # Because the module fills the backend's credential slot, the backend is
+      # realized by a Recipe that reads that slot. postgres-cloudnative-pg, whose
+      # controller owns the database's credentials itself, halts the build when
+      # the slot is filled, so a Manifest importing this module maps the backend
+      # to another PostgreSQL realization.
+      features:
+        password:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.db_password }}"
+            key: db-password
+    # The discardable instance: sessions, cached reads, rate-limit counters. Five
+    # components reach it, and five reach the durable instance below, which is
+    # where work is put and taken: the API, the model-facing service and the
+    # scheduler write to it, and the two worker tiers read from it. They are two
+    # instances of one component rather than two components, because it is one
+    # engine deployed twice with different durability, and keeping them apart
+    # means a discardable cache can be sized, evicted and lost without touching
+    # queued work.
+    #
+    # The two instances' own credentials are left unattached, for a reason the
+    # module cannot work around. No credential is attached to either instance, and
+    # both run without authentication: filling their credential slot switches
+    # authentication on, and none of the five components reaching either
+    # declares a slot to present a password, so every one of them would be
+    # refused.
+    cache:
+      type: core/datastore/redis
+    # The instance work is put on and taken from. Separate from the cache above
+    # so that losing a cache never loses queued work.
+    queue:
+      type: core/datastore/redis
+    # Where the files an agent writes are kept. The API and the model-facing
+    # service are wired to it so that files written during a run are kept in a
+    # bucket both edges name, agenta, the one bucket the store holds and
+    # creates, which is what lets an agent's working directory survive the
+    # sandbox it ran in being torn down.
+    #
+    # Its account is the key pair both API tiers present: store_access_key in
+    # its access_key_id slot and in the credential_id of each tier's store
+    # connection, store_secret_key in its secret_access_key slot and in each
+    # connection's credential, all by reference.
+    store:
+      type: core/storage/s3-object-store
+      values:
+        bucket: agenta
+      features:
+        access_key_id:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.store_access_key }}"
+            key: store-access-key
+        secret_access_key:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.store_secret_key }}"
+            key: store-secret-key
+    # The authentication core, which the platform cannot start without. Four
+    # components reach core/security/supertokens, the API, the model-facing
+    # service and both front ends, and each edge carries that core's own base
+    # URL, not a protocol endpoint: the platform addresses the core by its URI
+    # rather than speaking OpenID Connect to it, so an identity provider is not a
+    # substitute here. It holds its accounts in a database on the same backend
+    # the rest of the module uses.
+    auth:
+      type: core/security/supertokens
+      uses:
+        backend:
+          db:
+            target: db
+            inject:
+              env:
+                - { in: POSTGRESQL_HOST, from: host }
+                - { in: POSTGRESQL_PORT, from: port }
+                - { in: POSTGRESQL_USER, from: user }
+                - { in: POSTGRESQL_DATABASE_NAME, from: database }
+            features:
+              credential:
+                type: core/referenced-secret
+                values:
+                  origin: "{{ .parameters.db_password }}"
+                  key: db-password
+      features:
+        api_key:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.auth_core_api_key }}"
+            key: auth-core-api-key
+    # The schema-migration step. It creates the tables the five services below
+    # expect, so the module sequences it ahead of them.
+    migrations:
+      type: core/ai-agent/agenta-migrations
+      uses:
+        backend:
+          db:
+            target: db
+            inject:
+              env:
+                - { in: BACKEND_HOST, from: host }
+                - { in: BACKEND_PORT, from: port }
+                - { in: BACKEND_USER, from: user }
+            features:
+              credential:
+                type: core/referenced-secret
+                values:
+                  origin: "{{ .parameters.db_password }}"
+                  key: db-password
+    # The agent runner, and the module's isolation boundary. The model-facing
+    # service hands a run to it, and it starts the agent's harness as a process
+    # inside its own sandbox. It is wired to the API alone, with no backend, no
+    # cache, no queue and no object store, because a locally sandboxed harness
+    # shares that container and can read its environment, so the platform's
+    # database password, its encryption key and the object store's keys are
+    # kept out of the one place an agent's own code could read them. That is a
+    # property of this topology rather than of any single component, and
+    # widening the runner's wiring removes it.
+    #
+    # The module wires no remote sandbox provider: the runner uses the sandbox
+    # inside its own container, so an operator who wants agent runs on separate
+    # compute contracts for a provider and configures the runner itself. Its one
+    # credential is the token it requires of its callers.
+    runner:
+      type: core/ai-agent/agenta-runner
+      uses:
+        api:
+          api:
+            target: api
+            inject:
+              env:
+                - { in: API_ENDPOINT, from: endpoint }
+      features:
+        runner_token:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.runner_token }}"
+            key: runner-token
+    # The control-plane API: the platform's own data plane. The module carries
+    # no outbound-mail path, so the platform's invitations and notifications
+    # need a mail service this module does not compose.
+    api:
+      type: core/ai-agent/agenta-api
+      uses:
+        backend:
+          db:
+            target: db
+            inject:
+              env:
+                - { in: BACKEND_HOST, from: host }
+                - { in: BACKEND_PORT, from: port }
+                - { in: BACKEND_USER, from: user }
+            features:
+              credential:
+                type: core/referenced-secret
+                values:
+                  origin: "{{ .parameters.db_password }}"
+                  key: db-password
+        cache:
+          volatile:
+            target: cache
+            inject:
+              env:
+                - { in: CACHE_HOST, from: host }
+                - { in: CACHE_PORT, from: port }
+        queue:
+          durable:
+            target: queue
+            inject:
+              env:
+                - { in: QUEUE_HOST, from: host }
+                - { in: QUEUE_PORT, from: port }
+        auth_core:
+          auth:
+            target: auth
+            inject:
+              env:
+                - { in: AUTH_CORE_ENDPOINT, from: endpoint }
+            features:
+              credential:
+                type: core/referenced-secret
+                values:
+                  origin: "{{ .parameters.auth_core_api_key }}"
+                  key: auth-core-api-key
+        store:
+          objects:
+            target: store
+            features:
+              credential_id:
+                type: core/referenced-secret
+                values:
+                  origin: "{{ .parameters.store_access_key }}"
+                  key: store-access-key
+              credential:
+                type: core/referenced-secret
+                values:
+                  origin: "{{ .parameters.store_secret_key }}"
+                  key: store-secret-key
+        runner:
+          runner:
+            target: runner
+            inject:
+              env:
+                - { in: RUNNER_ENDPOINT, from: endpoint }
+            features:
+              credential:
+                type: core/referenced-secret
+                values:
+                  origin: "{{ .parameters.runner_token }}"
+                  key: runner-token
+      # Every credential the service holds or presents: the ones it presents
+      # are on its connections; the ones below it holds itself.
+      features:
+        auth_key:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.auth_key }}"
+            key: auth-key
+        crypt_key:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.crypt_key }}"
+            key: crypt-key
+        services_internal_key:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.services_internal_key }}"
+            key: services-internal-key
+    # The model-facing service: completions, chat, and starting an agent run.
+    # The module composes no model provider: which models an agent may use is
+    # configured in the platform at run time, against provider credentials
+    # supplied there rather than in the module's topology.
+    services:
+      type: core/ai-agent/agenta-services
+      uses:
+        backend:
+          db:
+            target: db
+            inject:
+              env:
+                - { in: BACKEND_HOST, from: host }
+                - { in: BACKEND_PORT, from: port }
+                - { in: BACKEND_USER, from: user }
+            features:
+              credential:
+                type: core/referenced-secret
+                values:
+                  origin: "{{ .parameters.db_password }}"
+                  key: db-password
+        cache:
+          volatile:
+            target: cache
+            inject:
+              env:
+                - { in: CACHE_HOST, from: host }
+                - { in: CACHE_PORT, from: port }
+        queue:
+          durable:
+            target: queue
+            inject:
+              env:
+                - { in: QUEUE_HOST, from: host }
+                - { in: QUEUE_PORT, from: port }
+        auth_core:
+          auth:
+            target: auth
+            inject:
+              env:
+                - { in: AUTH_CORE_ENDPOINT, from: endpoint }
+            features:
+              credential:
+                type: core/referenced-secret
+                values:
+                  origin: "{{ .parameters.auth_core_api_key }}"
+                  key: auth-core-api-key
+        store:
+          objects:
+            target: store
+            features:
+              credential_id:
+                type: core/referenced-secret
+                values:
+                  origin: "{{ .parameters.store_access_key }}"
+                  key: store-access-key
+              credential:
+                type: core/referenced-secret
+                values:
+                  origin: "{{ .parameters.store_secret_key }}"
+                  key: store-secret-key
+        runner:
+          runner:
+            target: runner
+            inject:
+              env:
+                - { in: RUNNER_ENDPOINT, from: endpoint }
+            features:
+              credential:
+                type: core/referenced-secret
+                values:
+                  origin: "{{ .parameters.runner_token }}"
+                  key: runner-token
+      # The same credentials as the control-plane API.
+      features:
+        auth_key:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.auth_key }}"
+            key: auth-key
+        crypt_key:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.crypt_key }}"
+            key: crypt-key
+        services_internal_key:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.services_internal_key }}"
+            key: services-internal-key
+    # Drains the platform's continuous streams into the tracing database.
+    worker_streams:
+      type: core/ai-agent/agenta-worker-streams
+      uses:
+        backend:
+          db:
+            target: db
+            inject:
+              env:
+                - { in: BACKEND_HOST, from: host }
+                - { in: BACKEND_PORT, from: port }
+                - { in: BACKEND_USER, from: user }
+            features:
+              credential:
+                type: core/referenced-secret
+                values:
+                  origin: "{{ .parameters.db_password }}"
+                  key: db-password
+        cache:
+          volatile:
+            target: cache
+            inject:
+              env:
+                - { in: CACHE_HOST, from: host }
+                - { in: CACHE_PORT, from: port }
+        queue:
+          durable:
+            target: queue
+            inject:
+              env:
+                - { in: QUEUE_HOST, from: host }
+                - { in: QUEUE_PORT, from: port }
+      features:
+        auth_key:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.auth_key }}"
+            key: auth-key
+        crypt_key:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.crypt_key }}"
+            key: crypt-key
+    # Runs the platform's discrete background jobs: webhooks, triggers, agent
+    # turns and evaluations.
+    worker_queues:
+      type: core/ai-agent/agenta-worker-queues
+      uses:
+        backend:
+          db:
+            target: db
+            inject:
+              env:
+                - { in: BACKEND_HOST, from: host }
+                - { in: BACKEND_PORT, from: port }
+                - { in: BACKEND_USER, from: user }
+            features:
+              credential:
+                type: core/referenced-secret
+                values:
+                  origin: "{{ .parameters.db_password }}"
+                  key: db-password
+        cache:
+          volatile:
+            target: cache
+            inject:
+              env:
+                - { in: CACHE_HOST, from: host }
+                - { in: CACHE_PORT, from: port }
+        queue:
+          durable:
+            target: queue
+            inject:
+              env:
+                - { in: QUEUE_HOST, from: host }
+                - { in: QUEUE_PORT, from: port }
+        services:
+          services:
+            target: services
+            inject:
+              env:
+                - { in: SERVICES_ENDPOINT, from: endpoint }
+            features:
+              credential:
+                type: core/referenced-secret
+                values:
+                  origin: "{{ .parameters.services_internal_key }}"
+                  key: services-internal-key
+      features:
+        auth_key:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.auth_key }}"
+            key: auth-key
+        crypt_key:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.crypt_key }}"
+            key: crypt-key
+    # Decides when a time-triggered thing is due and enqueues it.
+    scheduler:
+      type: core/ai-agent/agenta-cron
+      uses:
+        backend:
+          db:
+            target: db
+            inject:
+              env:
+                - { in: BACKEND_HOST, from: host }
+                - { in: BACKEND_PORT, from: port }
+                - { in: BACKEND_USER, from: user }
+            features:
+              credential:
+                type: core/referenced-secret
+                values:
+                  origin: "{{ .parameters.db_password }}"
+                  key: db-password
+        cache:
+          volatile:
+            target: cache
+            inject:
+              env:
+                - { in: CACHE_HOST, from: host }
+                - { in: CACHE_PORT, from: port }
+        queue:
+          durable:
+            target: queue
+            inject:
+              env:
+                - { in: QUEUE_HOST, from: host }
+                - { in: QUEUE_PORT, from: port }
+      features:
+        auth_key:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.auth_key }}"
+            key: auth-key
+        crypt_key:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.crypt_key }}"
+            key: crypt-key
+    # The browser console.
+    console:
+      type: core/ai-agent/agenta-web
+      uses:
+        api:
+          api:
+            target: api
+            inject:
+              env:
+                - { in: API_ENDPOINT, from: endpoint }
+        services:
+          services:
+            target: services
+            inject:
+              env:
+                - { in: SERVICES_ENDPOINT, from: endpoint }
+        auth_core:
+          auth:
+            target: auth
+            inject:
+              env:
+                - { in: AUTH_CORE_ENDPOINT, from: endpoint }
+            features:
+              credential:
+                type: core/referenced-secret
+                values:
+                  origin: "{{ .parameters.auth_core_api_key }}"
+                  key: auth-core-api-key
+      features:
+        auth_key:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.auth_key }}"
+            key: auth-key
+        crypt_key:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.crypt_key }}"
+            key: crypt-key
+    # The small-screen front end.
+    mobile:
+      type: core/ai-agent/agenta-web-mobile
+      uses:
+        api:
+          api:
+            target: api
+            inject:
+              env:
+                - { in: API_ENDPOINT, from: endpoint }
+        services:
+          services:
+            target: services
+            inject:
+              env:
+                - { in: SERVICES_ENDPOINT, from: endpoint }
+        auth_core:
+          auth:
+            target: auth
+            inject:
+              env:
+                - { in: AUTH_CORE_ENDPOINT, from: endpoint }
+            features:
+              credential:
+                type: core/referenced-secret
+                values:
+                  origin: "{{ .parameters.auth_core_api_key }}"
+                  key: auth-core-api-key
+      features:
+        auth_key:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.auth_key }}"
+            key: auth-key
+        crypt_key:
+          type: core/referenced-secret
+          values:
+            origin: "{{ .parameters.crypt_key }}"
+            key: crypt-key
+  # The module exports the control-plane API as api, the endpoint an external
+  # client and the ingress tier's API route talk to; the model-facing service as
+  # services, the endpoint the playground and the ingress tier's services route
+  # talk to; the console as console, the browser endpoint; and the small-screen
+  # front end as mobile.
+  #
+  # It ships no internal reverse proxy: a single external endpoint is assembled
+  # at the ingress tier, which routes /api to the control-plane API, /services
+  # to the model-facing service, /m to the small-screen front end, and / to the
+  # console. That endpoint's address is the infra.external_base_url a Release
+  # sets on each of these four components.
+  exportedComponents:
+    api: api
+    services: services
+    console: console
+    mobile: mobile

@@ -1,0 +1,309 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: loki
+  version: 1.0.0
+  # The packaged Loki server is AGPL-3.0.
+  license: AGPL-3.0
+  description: >
+    Grafana Loki log-aggregation server for local development via Docker
+    Compose, synthesized from the Workload kind by the compose provider: one
+    service running the grafana/loki image at the release the Kubernetes
+    realization pins, in single-binary mode, from one configuration file
+    mounted from a compose config, with the chunk store on a named volume.
+
+    The configuration carries what the Kubernetes realization configures —
+    authentication off, one replica, a TSDB schema at v13 over a filesystem
+    store, and the developer's retention_period enforced by the in-process
+    compactor — with structured metadata accepted, so the server takes OTLP logs
+    over HTTP at /otlp on provides.port beside its push and query API, and
+    serves its own metrics in the Prometheus format at /metrics on the same
+    port, published as provides.metrics_endpoint. A
+    memcached wired to the chunk_cache socket becomes the server's chunk-cache
+    client, driven by that edge's batch size, parallelism, timeout and entry
+    lifetime, over TLS to one publishing memcached-tls, checked against the
+    image's trust store; a server_ca on that connection halts the build.
+    Unwired, there is none.
+
+    Nothing is published to the host: a consumer on the compose network reaches
+    the server at the service name, provides.host. Docker Compose sets no size
+    on a volume, so infra.storage.size reaches nothing here. The image carries
+    no shell or client and Loki ships no health command, so the service declares
+    no healthcheck. Reach for it under Docker Compose; on Kubernetes, reach for
+    `loki`.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: compose
+  implements: core/observability/loki:1.0.0
+  # This Recipe reads no infra.overrides keys, and infra.source_version names a
+  # chart version this Recipe pulls no chart for, so it reads that key neither.
+  #
+  # The contract is key-for-key the one the Kubernetes realization publishes, so
+  # a consumer reads the same keys on either target. Only the host is spelled
+  # differently: it is the name the compose provider gives the synthesized
+  # service, which is the component instance's own name, and a consumer on the
+  # same compose network resolves it directly. protocol is "http" — the push,
+  # query and OTLP endpoints all sit on the server's fixed HTTP port 3100, so
+  # provides.port is that fixed value, as on Kubernetes. An OpenTelemetry
+  # exporter sends logs to http://<host>:<port>/otlp, the base address to which
+  # it appends /v1/logs itself, published as otlp_http_endpoint.
+  #
+  # metrics_endpoint is the address the server serves its own metrics at, in
+  # the Prometheus format: /metrics on the same fixed port, always on, with no
+  # credential configured for it. Both addresses are spelled out in full on
+  # purpose: a provides entry cannot read another.
+  provides:
+    host: "{{ .context.instance_id }}"
+    port: "3100"
+    protocol: "http"
+    otlp_http_endpoint: "http://{{ .context.instance_id }}:3100/otlp"
+    metrics_endpoint: "http://{{ .context.instance_id }}:3100/metrics"
+
+  # The pin and the names the artifact and the workload share, each written once
+  # here; the two are separate templates with no binding either could
+  # dereference, so they read them from here.
+  #
+  # image is the Loki server image. The Component declares no version knob, so
+  # the release is pinned in each Recipe: this is the tag recipe/helm/loki pins
+  # on the chart, and a pin sits inside the Recipe that renders it, with no
+  # catalog kind holding one for two Recipes to share, so the two are moved
+  # together.
+  #
+  # config_name is the compose config the artifact declares and the volume
+  # sources; config_path is the file it is mounted as and the server is started
+  # on, the path the chart mounts it at, since a compose config carries no file
+  # name.
+  #
+  # The chunk-cache client the configuration writes speaks the memcached
+  # protocol to whatever is wired on chunk_cache, a socket whose selector admits
+  # any datastore. The check that the wired cache publishes memcached, or
+  # memcached-tls while it serves TLS alone, lives in the TargetProtocol
+  # library's Check bundle, imported under artifacts by every Recipe of this
+  # Component. The check_ entries are what it reads — the socket, the
+  # protocols, why Loki needs them and a component publishing them — and it
+  # stops the build, naming the connection, on a cache publishing another
+  # protocol or none.
+  locals:
+    image: "docker.io/grafana/loki:3.6.7"
+    config_name: "{{ .context.instance_id }}-config"
+    config_path: /etc/loki/config/config.yaml
+    check_socket: chunk_cache
+    check_protocol: '["memcached", "memcached-tls"]'
+    check_reason: "Loki's chunk-cache client speaks the memcached protocol, which a cache publishes as the protocol memcached, or memcached-tls while it serves TLS alone"
+    check_example: core/datastore/memcached
+
+  # The single-binary Loki configuration, as one compose config the workload
+  # mounts as one file at config_path.
+  #
+  # What it carries is what recipe/helm/loki configures through the chart: auth
+  # off, replication factor 1, a TSDB schema at v13 over a filesystem object
+  # store, the developer's retention_period on limits_config with the compactor
+  # enforcing it, the limits the chart writes by default, so the two targets
+  # accept and refuse the same streams, and the HTTP and gRPC listeners and
+  # timeouts the chart sets. Where the chart joins a memberlist ring through
+  # the cluster's DNS, a single server on Compose keeps its ring in memory and
+  # advertises the loopback address, as the project's own Docker configuration
+  # does, and its data lives under /loki, where the data volume is mounted.
+  #
+  # allow_structured_metadata is written out although Loki 3 defaults it on:
+  # Loki refuses an OTLP log payload as malformed without it, and structured
+  # metadata needs the v13 schema above, so the two settings OTLP ingestion
+  # rests on are both stated here.
+  #
+  # The chunk cache. A memcached wired to the chunk_cache socket holds
+  # decompressed chunks between queries. The Component admits one connection on
+  # the socket and halts the build on a second, since the server has a single
+  # chunk-cache client; wired, the block below is that client, written as the
+  # chart writes it on Kubernetes, pointed at the host and port the edge
+  # resolved to, with the batch size, parallelism, timeout and entry lifetime
+  # from that edge's own values and the chart's own write-back and connection
+  # settings. Unwired, no chunk_store_config is written and every chunk is read
+  # from the server's own store.
+  #
+  # A cache publishing memcached-tls is reached over TLS: the client gets
+  # tls_enabled and checks the cache's certificate and the name dialed against
+  # the trust store the image carries, the system bundle of its distroless
+  # base. A server_ca on the connection is refused by name: the client reads an
+  # authority from a file, and no credential Feature the catalog realizes on
+  # Compose delivers a Secret as files, so the Kubernetes realization is the one
+  # that takes it. Read from Loki's chunk-cache client at the release pinned
+  # here and from the image itself.
+  artifacts:
+    loki-config.compose-fragment.yaml: |
+      {{- $cache := dict }}
+      {{- range $alias, $edge := .context.uses }}
+      {{- if eq $edge.socket "chunk_cache" }}
+      {{- $cache = $edge }}
+      {{- if hasKey (default dict $edge.features) "server_ca" }}
+      {{- fail (printf "the chunk_cache connection %s of %q holds a server_ca, but this Compose realization of core/observability/loki cannot give it to the server: the server reads the authority from a file, and no credential Feature the catalog realizes on Compose delivers a Secret as files; remove the server_ca, so the server checks the cache's certificate against its image's default trust store, or map the server to helm/loki" $alias $.context.instance_id) }}
+      {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- $cacheTLS := eq (toString (optional (default dict (optional $cache "provides" dict)) "protocol" "")) "memcached-tls" }}
+      configs:
+        {{ .locals.config_name }}:
+          content: |
+            auth_enabled: false
+            server:
+              http_listen_port: 3100
+              grpc_listen_port: 9095
+              http_server_read_timeout: 600s
+              http_server_write_timeout: 600s
+            common:
+              instance_addr: 127.0.0.1
+              path_prefix: /loki
+              replication_factor: 1
+              ring:
+                kvstore:
+                  store: inmemory
+              storage:
+                filesystem:
+                  chunks_directory: /loki/chunks
+                  rules_directory: /loki/rules
+            schema_config:
+              configs:
+                - from: "2024-04-01"
+                  store: tsdb
+                  object_store: filesystem
+                  schema: v13
+                  index:
+                    prefix: index_
+                    period: 24h
+            limits_config:
+              allow_structured_metadata: true
+              retention_period: "{{ .values.retention_period }}"
+              max_cache_freshness_per_query: 10m
+              query_timeout: 300s
+              reject_old_samples: true
+              reject_old_samples_max_age: 168h
+              split_queries_by_interval: 15m
+              volume_enabled: true
+            compactor:
+              retention_enabled: true
+              delete_request_store: filesystem
+            pattern_ingester:
+              enabled: false
+            query_range:
+              align_queries_with_step: true
+            ruler:
+              storage:
+                type: local
+              wal:
+                dir: /loki/ruler-wal
+      {{- if $cache }}
+            chunk_store_config:
+              chunk_cache_config:
+                background:
+                  writeback_buffer: 500000
+                  writeback_goroutines: 1
+                  writeback_size_limit: 500MB
+                default_validity: "{{ $cache.values.entry_lifetime }}"
+                memcached:
+                  batch_size: {{ $cache.values.batch_size }}
+                  parallelism: {{ $cache.values.parallelism }}
+                memcached_client:
+                  addresses: "{{ $cache.provides.host }}:{{ $cache.provides.port }}"
+                  consistent_hash: true
+                  max_idle_conns: 72
+                  timeout: "{{ $cache.values.timeout }}"
+      {{- if $cacheTLS }}
+                  tls_enabled: true
+      {{- end }}
+      {{- end }}
+    # The check that the cache wired to chunk_cache publishes memcached, from
+    # the TargetProtocol library, reading the check_ locals above. It writes no
+    # file.
+    target-protocol:
+      $import: TargetProtocol#/artifacts/Check
+
+  # Synthesized-mode Workload: the image, the arguments, the mounted
+  # configuration, the data volume and the resources are translated from the
+  # Workload kind by the compose provider.
+  workload: |
+    {{- /* The chunk_cache connection the configuration is written from — the
+           one the Component admits, found as the artifact finds it; the two are
+           separate templates, so each reads the edges itself. */ -}}
+    {{- $cache := dict -}}
+    {{- range $alias, $edge := .context.uses -}}
+    {{- if eq $edge.socket "chunk_cache" -}}
+    {{- $cache = dict "address" (printf "%v:%v" $edge.provides.host $edge.provides.port) "values" $edge.values -}}
+    {{- /* Over TLS the configuration carries tls_enabled, so the digest takes
+           that too; the key is set only then, so a plaintext connection's
+           digest is the one it always was. */ -}}
+    {{- if eq (toString (optional (default dict $edge.provides) "protocol" "")) "memcached-tls" -}}
+    {{- $_ := set $cache "tls" true -}}
+    {{- end -}}
+    {{- end -}}
+    {{- end -}}
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    containers:
+      main:
+        image: "{{ .locals.image }}"
+        # The image's own entrypoint starts the server; the arguments name the
+        # mounted configuration and run every Loki target in the one process,
+        # the arguments the chart gives it on Kubernetes.
+        args:
+          - "-config.file={{ .locals.config_path }}"
+          - -target=all
+        # docker compose up re-creates a service's container when the service's
+        # own definition changed since the container was created, and a config's
+        # content is no part of that definition. So the service carries the
+        # digest of what the configuration is written from — the developer's
+        # values and the chunk_cache connection's address and values — as
+        # CONFIG_DIGEST, a variable nothing reads: a change to any of them
+        # changes the definition, and the next docker compose up re-creates the
+        # server with the configuration it is written into.
+        variables:
+          CONFIG_DIGEST: "{{ sha256sum (toJson (list .values $cache)) }}"
+        ports:
+          http: 3100
+        # No healthcheck is declared. A compose service's healthcheck runs inside
+        # the image, and this image holds the server's binary and its system
+        # files and nothing else — no shell, HTTP client or socket tool — and the
+        # binary has no command reporting its health, so no check can run. The
+        # realization on Kubernetes keeps the chart's readiness probe on /ready.
+        #
+        # Each quantity is quoted because it is a string: a value with no unit
+        # suffix — a whole-core cpu count, say — would otherwise be read as a
+        # number and rejected before the target ever sees it. As on Kubernetes,
+        # infra.compute sets the limits.
+        resources:
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+        # The chunk store, the index, the compactor's working files and the
+        # ruler's write-ahead log live on the data volume. It is mounted at /loki
+        # because the image creates that directory owned by the user the server
+        # runs as: Docker Compose fills an empty named volume from the image's own
+        # directory at the mount point, ownership included, where a mount point
+        # the image lacks would be created owned by root and refuse the server's
+        # writes.
+        volumeMounts:
+          - name: data
+            path: /loki
+          - name: config
+            path: "{{ .locals.config_path }}"
+    volumes:
+      # Docker Compose creates and names the volume; it has no volume-size
+      # concept, so the size below reaches no emitted byte.
+      data:
+        persistent:
+          size: "{{ if .infra.storage }}{{ .infra.storage.size | default "10Gi" }}{{ else }}10Gi{{ end }}"
+      config:
+        configmap:
+          source: "{{ .locals.config_name }}"
+    # A ClusterIP service entry keeps the server on the compose network, which is
+    # where its shippers, its OpenTelemetry exporters and a dashboards server
+    # sit: a consumer wired to it resolves the service name and the port straight
+    # from the edge. Nothing is published to the host.
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          http: 3100

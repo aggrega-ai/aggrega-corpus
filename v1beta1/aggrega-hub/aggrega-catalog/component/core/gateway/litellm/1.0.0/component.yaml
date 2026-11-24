@@ -1,0 +1,724 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/gateway/litellm
+  version: 1.0.0
+  # metadata.license is deliberately absent. The field carries the SPDX
+  # identifier of the software the entity describes, and no single identifier
+  # covers this one: the proxy is published open-core, so the terms depend on
+  # which part a deployment uses. The class that situation falls into is stated
+  # instead through component.aggrega.ai/upstream-licensing below, and the
+  # licence of the artifact each Recipe actually pins is named on that Recipe,
+  # which is the surface that knows which artifact it pinned.
+  description: >
+    An AI gateway that fronts several models behind one in-cluster,
+    OpenAI-compatible endpoint, routing each request by the alias it asks for.
+    Each model wired to its models socket is served under the connection's
+    alias, with that connection's credential; values.models adds aliases
+    typed by hand, presenting provider_key. No credential reaches the calling
+    application. It publishes one alias as its model, so an agent's model
+    socket takes it in place of a model.
+
+    Because it holds those credentials, it forwards only the request fields
+    the proxy declares for the route, and refuses the rest naming the field.
+    It answers only its model routes, the model listing, its health checks
+    and key management.
+
+    Its other optional sockets take the Presidio analyzer and anonymizer, the
+    vector-search store that core/semantic-caching keeps replies in, and the
+    guard that core/prompt-injection-shield sends requests through; wiring
+    one alone changes no request. On Kubernetes, reach for
+    helm/litellm-gateway, the synthesis, where the build must fetch nothing,
+    and helm/litellm-gateway-chart, BerriAI's chart, where its registry is
+    reachable. On Docker Compose, compose/litellm-gateway runs it for local
+    development, without the semantic cache.
+
+    values.log_masking masks what it lists in the copies of a successful call
+    the gateway hands to its logs, never in what the provider or the caller
+    receives. It excludes core/data-masking.
+
+    Attached, core/semantic-caching keeps end users apart only by the end user
+    each request names, which the gateway does not verify, and
+    core/period-budget, once spent, refuses the administrative key's model
+    requests too.
+  # values.metrics_enabled, described beside the value below, has each Recipe
+  # serve the gateway's Prometheus metrics to a GET of /metrics on port 9090,
+  # published as metrics_endpoint; false, that key is empty.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: gateway
+    component.aggrega.ai/hosting: self-hosted
+    component.aggrega.ai/upstream-licensing: open-core
+    # Model API: the endpoint this gateway publishes answers the OpenAI API —
+    # the chat, completion and embedding routes the proxy serves, each request
+    # naming an alias of the model map — so a consumer drives it with an
+    # OpenAI client whichever provider answers behind it. It is what lets a
+    # model socket selecting this key admit the gateway beside the models
+    # themselves; the gateway publishes the endpoint and the model name such a
+    # socket's consumers read.
+    model.aggrega.ai/api: openai
+    # The gateway capability dimension: this router reads the model name out of
+    # the request body and routes on it, so a runtime control that has to parse
+    # an LLM payload can attach here. The value is asserted by what the Recipe
+    # renders — the model map below is in the rendered configuration, not merely
+    # in this component's schema.
+    gateway.aggrega.ai/intelligence: semantic
+    # Data-path capability labels. Each states what this gateway is able to do,
+    # never what a given Release has switched on — the two read alike to a
+    # developer and only the first is a property of the product. They sit beside
+    # the tier label above rather than replacing it: that one says the router
+    # parses the request body, these say what it can do to the traffic.
+    #
+    # Caller identity: the gateway verifies the virtual key a caller presents
+    # against the keys it issued, and composes headers naming that key's user
+    # and team, and its organization where the key names one, which travel
+    # upstream on requests to the model aliases an attachment lists; the
+    # release pinned here creates organizations only under an enterprise
+    # licence, so its keys name none. The identity is composed by the gateway
+    # rather than carried from the caller's own credentials, and that is the
+    # fidelity this value names. It names nobody until core/context-propagation
+    # is attached, with the api_key and database_url slots filled.
+    dataplane.aggrega.ai/caller-identity: injected-header
+    # Content masking: the gateway can replace sensitive text in the chat and
+    # completion payload it routes with a placeholder before the text travels
+    # further — matches of patterns supplied in its configuration, and entity
+    # types a recognizer service it calls detects, which is the fidelity this
+    # value names. It masks nothing until an attachment lists what to mask,
+    # which is what attaching core/data-masking does, and the entity half needs
+    # the pii_analyzer and pii_anonymizer sockets wired.
+    dataplane.aggrega.ai/content-masking: entity-recognition
+    # Prompt guard: the gateway can match the chat and completion payload it is
+    # routing against patterns supplied in its configuration, and refuse a
+    # request whose content matches. It matches nothing until a list is
+    # supplied, which is what attaching core/prompt-deny-patterns does. The
+    # claim is bounded to the model payload the gateway already parses to
+    # route — not to an arbitrary HTTP body, which nothing in this family
+    # inspects.
+    dataplane.aggrega.ai/prompt-guard: pattern-list
+    # Upstream TLS: the gateway can require a provider's certificate to chain to
+    # a trust anchor supplied in its configuration. The capability is what the
+    # label asserts; whether a given Release turns the check on is a separate
+    # question this label does not answer.
+    dataplane.aggrega.ai/upstream-tls: trust-anchor
+    # Period budget: the gateway can refuse model requests once what its
+    # traffic has cost over a period, priced in US dollars from the cost table
+    # it keeps per model, exceeds a limit set in its configuration, which is
+    # the fidelity this value names. It refuses nothing until core/period-budget
+    # is attached, with the api_key and database_url slots filled. It checks
+    # a request presenting the administrative key against the limit as it
+    # checks a caller's, so once the limit is passed it refuses the
+    # administrator's model requests too; its model listing and key management
+    # still answer that key.
+    dataplane.aggrega.ai/period-budget: cost
+    # Concurrency cap: the gateway can refuse a request once the requests in
+    # flight to one entry of its model map reach a cap — the entry's
+    # max_parallel_requests, one slot of which the proxy's router takes for
+    # each request it sends to the entry — so it keeps one cap for each
+    # upstream target it sends to, and a request finding its entry full is
+    # answered 429, or sent on along a fallback chain where one is configured
+    # for its alias. Its one total, global_max_parallel_requests, is read only
+    # by a request limiter an environment variable switches on, which counts
+    # a request for its first second, so it holds no cap on the total. The
+    # router keeps each entry's count in memory, where a record lapses ten
+    # minutes after it is made unless litellm_settings.default_in_memory_ttl
+    # sets another lifetime, and a fresh count then starts at zero; the
+    # Recipe sets that lifetime while it writes a cap. The capability is what
+    # the label asserts; no cap applies until core/concurrency-limit is
+    # attached. Read in LiteLLM's source at v1.103.1, the release
+    # engine_version defaults to, and run against it, on 2026-10-12.
+    dataplane.aggrega.ai/concurrency-cap: per-target
+  annotations:
+    # How the gateway's Prometheus metrics authenticate, which `aggrega lint`
+    # reads on a connection that scrapes them. The address published as
+    # metrics_endpoint is port 9090 of the path allowlist in front of the
+    # gateway, which forwards a GET of /metrics alone to the gateway's own
+    # metrics listener and asks no key, so a scrape presents no credential
+    # whether or not the api_key slot is filled.
+    observability.aggrega.ai/metrics-credential: none
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # Self-inject allowlist: the component may inject its own provides keys into
+  # the env delivery mechanism.
+  inject: [env]
+
+  usesSchema:
+    # The two services the gateway's Presidio integration calls,
+    # core/security/presidio-analyzer and core/security/presidio-anonymizer:
+    # the analyzer finds sensitive spans in a message's text, the anonymizer
+    # replaces the spans the analyzer found. The gateway needs both addresses
+    # whenever it calls either, and takes each as its own setting, so each
+    # service arrives on a socket of its own. Each selector admits only the
+    # service of its own role, so a service wired to the other's socket is
+    # refused by name. The
+    # selected component's published endpoint arrives on the edge and the
+    # Recipe delivers it into the gateway's environment; no inject block is
+    # authored on the edge, because the variable the gateway reads is the
+    # Recipe's to name. The compiler routes the address without checking what
+    # answers there, and the wired service must speak the Presidio HTTP API the
+    # gateway calls. Both optional: a gateway with neither wired builds and
+    # runs exactly as it does without them. Wiring one without the other halts
+    # the build in the Recipe, because the gateway can use neither alone. The
+    # gateway calls them only for a guardrail in its configuration that masks
+    # entity types: one a core/data-masking attachment writes, or the
+    # log-masking entry the Recipe writes while values.log_masking lists
+    # entity types, which masks what is logged and changes no request. So
+    # wiring the sockets alone changes no request and nothing logged.
+    pii_analyzer:
+      selector: "security.aggrega.ai/text-anonymization=analyzer"
+    pii_anonymizer:
+      selector: "security.aggrega.ai/text-anonymization=anonymizer"
+    # The store the gateway's semantic cache keeps its replies in, each beside
+    # the vector of the prompt it answered, and searches by similarity when a
+    # prompt arrives; the store removes a reply once its lifetime has passed.
+    # The cache drives the store through the Redis query engine's vector search,
+    # which a store states it serves by publishing vector_search, as
+    # core/datastore/redis does from release 8.0.0 on. The selector admits the
+    # key-value stores, and the Recipe halts the build when the store wired here
+    # publishes no vector_search, because a cache whose store lacks that search
+    # caches nothing while every request still succeeds. The store's published
+    # host and port arrive on the edge, and the Recipe delivers them into the
+    # gateway's environment under names only the cache's configuration reads.
+    # A store publishing redis-tls, served over TLS alone, is reached over TLS:
+    # the Recipe delivers the cache's whole connection URL instead, rediss://
+    # with the store's host and port and, with a credential on the connection,
+    # the password as a reference the container expands from its secret, so the
+    # password reaches no rendered file. The cache checks the store's
+    # certificate chain against the authority in server_ca where one is
+    # attached, and against its image's default trust store where not, and
+    # checks that the certificate names the host it dials, the store's
+    # published host. A certificate that does not fails the connection, and the
+    # cache then raises nothing to the request: every lookup is a miss and
+    # nothing is stored. The image's Python verifies strictly, so an authority
+    # certificate carrying no key usage extension fails the handshake when the
+    # cache connects. Any other protocol ending in -tls halts the build, naming
+    # the connection, and so do a server_ca publishing no Secret name and one on
+    # a connection whose store serves no TLS. Optional: wired alone it changes
+    # no request, since the cache is on only while core/semantic-caching is
+    # attached, and that attachment halts the build unless this socket is wired.
+    # The cache keeps replies apart by the key the gateway verified for each
+    # request, with that key's team and organization, which a request cannot set
+    # for itself (see the request guard under infra). Under that attachment's
+    # end_user scope the cache keeps end users apart by the end user a request
+    # names, in a header or a body field, exactly as the caller writes it. A key
+    # the gateway issues names a user and a team, never an end user, and the
+    # release pinned here reads an end user from a signed token only under an
+    # enterprise licence, so nothing the gateway verifies stands behind that
+    # name: whoever presents a key and names another end user is served the
+    # replies stored for that end user under that key.
+    #
+    # The password the cache presents to the store is the connection's own, in
+    # its credential slot, for a store that requires one: core/datastore/redis
+    # does once a credential is attached to its own password slot, and a
+    # credential holding the same password is attached here, both reading one
+    # parameter. With none, the cache presents no password, because presenting
+    # one to a store that requires none fails the connection. The cache reads
+    # the password inside its connection URL, written there unencoded: the URL
+    # the cache composes itself from the host and port for a store served
+    # without TLS, and the one the Recipe composes for a store publishing
+    # redis-tls, into which the container inserts the password when it starts.
+    # A password carrying /, ?, # or %, or a tab or a line break, therefore
+    # breaks that URL when the gateway starts, and nothing refuses it at build,
+    # where the password is never seen; use a password of letters and digits.
+    cache_store:
+      selector: "datastore.aggrega.ai/engine=kv"
+      valueSchema:
+        unauthenticated:
+          type: boolean
+          default: false
+          description: Declares that the store this connection reaches takes no password, so a connection carrying none is intended rather than an omission. It changes nothing this component renders.
+      featuresSchema:
+        credential:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [env]
+          description: "Optional password the gateway's semantic cache presents to the store this connection reaches. When attached, the Recipe delivers it as REDIS_PASSWORD, referenced from the secret that holds it, and the cache reads it inside its connection URL, unencoded: a password carrying /, ?, # or %, or a tab or a line break, breaks that URL when the gateway starts, and nothing checks it at build, so use letters and digits. Attach a credential holding the password the store itself requires. Unattached, the cache connects without a password, which suits a store with none."
+        # The authority the semantic cache checks the store's certificate
+        # against, for a store publishing redis-tls whose certificate an
+        # authority the gateway does not already trust signs. Secret-kind-pinned
+        # because a referenceable Secret is what the Recipe mounts, and so marked
+        # sensitive as every secret-kind slot is, though the authority's
+        # certificate is not itself secret; delivered as a file.
+        server_ca:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [file]
+          description: "Optional authority the gateway's semantic cache checks the store's certificate against while the store publishes protocol redis-tls, where the gateway does not already trust the authority that signs it. Its Secret holds ca.crt and sits in the gateway's namespace. The Recipe mounts the whole Secret read-only into the gateway and names its ca.crt in the cache's connection URL; the cache checks the certificate's chain against it and that the certificate names the store's published host, and, verifying strictly, refuses an authority certificate that carries no key usage extension; with a refused certificate every lookup is a miss and nothing is stored. The build halts on a server_ca publishing no Secret name, and on one wired to a store served without TLS. Fill it with core/referenced-secret."
+    # The guard every model request is sent through while
+    # core/prompt-injection-shield is attached: a service in the model's path
+    # speaking the OpenAI chat-completions API, which checks each request and
+    # forwards what it admits to the model behind it. The selector admits a
+    # component whose prompt guard is a trained classifier's; the shield's
+    # realization halts the build unless the guard wired here is
+    # core/security/nemo-guardrails, the one guard its two sensitivities are
+    # measured on. The guard's published endpoint and threshold arrive on the
+    # edge: the Recipe writes the endpoint into every entry of the model map as
+    # the address the entry is sent to, and the realization checks the threshold.
+    # Optional: wired alone it changes no request, since the map is pointed at
+    # the guard only while the shield is attached, and that attachment halts the
+    # build unless this socket is wired.
+    guard:
+      selector: "dataplane.aggrega.ai/prompt-guard=classifier"
+    # The models the gateway serves, each wired as a connection: any ai-model
+    # Component, managed or self-hosted, one or several. Each connection
+    # becomes one entry of the routing table, after the entries of
+    # values.models, published under the connection's alias, sent to the
+    # endpoint the model publishes and asking for the model name it publishes —
+    # pointers the compiler pipes into the configuration and never resolves.
+    # The gateway describes a wired model to its proxy through the OpenAI API
+    # alone, so a connection whose target's model.aggrega.ai/api is not openai
+    # halts the build, naming it: such an upstream is typed into values.models
+    # in the proxy's own provider/model notation instead. An alias a connection
+    # and an entry of values.models both publish halts the build, naming it.
+    #
+    # The credential the gateway presents to a wired model is the one its
+    # connection carries in the credential slot, and never provider_key. A
+    # connection carrying one is written in the proxy's openai/<model>
+    # notation, naming the variable the Recipe delivers it under; one carrying
+    # none is written in its hosted_vllm/<model> notation, which reaches an
+    # OpenAI-API server presenting no credential. A connection to a target
+    # labelled component.aggrega.ai/hosting: managed with no credential halts
+    # the build unless its values set unauthenticated: true. A self-hosted
+    # server that checks a key holds it in a slot of its own, and its
+    # connection carries a credential holding the same key.
+    #
+    # Optional: with nothing wired, the routing table is values.models alone.
+    models:
+      selector: "component.aggrega.ai/category=ai-model"
+      valueSchema:
+        unauthenticated:
+          type: boolean
+          default: false
+          description: Declares that the model this connection reaches takes no credential, so a connection carrying none is intended rather than an omission. It changes nothing this component renders.
+      featuresSchema:
+        credential:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [env]
+          description: "Optional credential the gateway presents to the model this connection reaches. When attached, the Recipe delivers it as LITELLM_MODEL_<ALIAS>_API_KEY, the connection's alias in capitals with every character other than a letter or a digit as an underscore, referenced from the secret that holds it, and the connection's entry in the routing table names that variable. Unattached, the entry presents no credential."
+
+  featuresSchema:
+    # Every slot is optional and transparent (`required` omitted → optional;
+    # inject: [env] so a synthesized Workload may reference them as env
+    # secrets). The selector is secret-kind-pinned but family-agnostic, so any
+    # credential Feature of the secret kind may fill any slot. No slot's value
+    # reaches the configuration body — the Recipe delivers each as an
+    # environment variable, referenced from the secret that holds it, and the
+    # configuration names the variable where it reads one, never the value.
+    #
+    # The key the gateway requires of its callers, which LiteLLM calls its
+    # master key: the Recipe delivers it as LITELLM_MASTER_KEY, the variable
+    # the proxy reads it from at startup, and the gateway compares a presented
+    # key with it exactly. Unlike a server that holds one key, the gateway also
+    # accepts the keys it has issued through its key-management API, which it
+    # keeps in its bookkeeping database; with no database_url attached it
+    # refuses every key but this one.
+    api_key:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      description: "Optional administrative key guarding the gateway's own API, which LiteLLM calls its master key. When attached, the Recipe delivers it as LITELLM_MASTER_KEY, the environment variable the proxy reads at startup, so callers and the management API must present it. Unlike a server that checks one key, the gateway also accepts the keys it issues through its key-management API and keeps in its bookkeeping database: with database_url attached a caller may present such a key instead, and with none the gateway accepts this key alone. Unattached, the gateway starts with no administrative key and treats every caller as an unprivileged internal user, which suits a development Release and not a shared one."
+    # The one credential of the hand-typed entries of values.models. That list
+    # serves the upstreams this catalog does not model, and the providers
+    # whose own model API a wired entry cannot describe; every entry of it
+    # presents this credential. A model wired to the models socket presents
+    # the credential its own connection carries and never this one, so each
+    # wired model holds a key of its own.
+    provider_key:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      description: "Optional credential the gateway presents to the upstreams the hand-typed entries of values.models target. When attached, every such entry names the environment variable the Recipe delivers it under, so the gateway authenticates upstream and the calling application never holds the credential. A model wired to the models socket never presents it: its credential is the one its own connection carries. Unattached, a hand-typed entry presents no credential, so a request routed to an upstream that requires one fails at the provider. This one slot holds one credential for every hand-typed entry; upstreams that each need their own are wired to the models socket, one connection and one credential each, where their model API allows it."
+    # The connection string names the database's user and usually its
+    # password, so it is a credential and arrives through a slot like the two
+    # above: the Recipe renders a reference to the secret holding it, and the
+    # string itself is never written into the gateway's own resources. Whether
+    # it appears anywhere else in the output is decided by the credential
+    # realization the Manifest binds: one pointing at a secret that already
+    # exists renders none of it.
+    database_url:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      description: "Optional connection string for the gateway's own bookkeeping database, which backs key management, spend tracking and request logs. When attached, the Recipe delivers it as the environment variable the proxy reads at startup, referenced from the secret that holds it, so the gateway's Deployment carries the reference and never the string. The compiler never connects to the database. Unattached, the gateway runs stateless — it serves and routes normally, and the features that need persistence are simply inactive."
+
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      #
+      # The model map is this component's reason to exist, and it has two
+      # parts: the models wired to the models socket, and this hand-typed list.
+      # Each entry here publishes one alias a caller may ask for and names the
+      # upstream target that alias resolves to, written in the proxy's own
+      # provider/model notation. The list is for what a wired entry cannot
+      # describe: an upstream this catalog does not model, and a provider
+      # whose own model API is not the OpenAI API, which the proxy addresses
+      # through that provider's prefix. Every entry presents provider_key, the
+      # list's one credential. A model the catalog does model and that speaks
+      # the OpenAI API is better wired, so it is a component in the graph and
+      # presents a credential of its own. Aliases are deliberately independent
+      # of their targets: a target can be repointed without any caller changing
+      # what it asks for.
+      #
+      # Optional, because the wired models are a map on their own; the build
+      # halts when neither this list nor the models socket gives the gateway a
+      # model to serve.
+      #
+      # Each Helm Recipe carries the map in a ConfigMap the proxy reads at
+      # startup, from the configuration bundle both import. The configuration
+      # names every alias the gateway serves and the target behind each one, so
+      # a reader of the rendered artifact can see the routing table the gateway
+      # will serve. How the gateway chooses between entries that publish the
+      # same alias is not a value of this component: it is core/target-selection,
+      # attached to the gateway, whose realization target-selection-litellm
+      # writes the proxy's routing strategy. With none attached the proxy picks
+      # among such entries at random.
+      models:
+        type: array
+        description: The hand-typed part of the model map. Each entry publishes one alias and names the upstream target it resolves to, and presents provider_key as its credential. Optional; the gateway also serves every model wired to its models socket, and the build halts when neither gives it a model.
+        items:
+          name:
+            type: string
+            required: true
+            description: The alias the gateway publishes and a caller asks for. Independent of the target below, so the target can change without a caller changing.
+          target:
+            type: string
+            required: true
+            description: The provider-qualified upstream model this alias resolves to, in the proxy's own provider/model notation (for example openai/gpt-4o or anthropic/claude-sonnet-4). A deterministic pointer string the runtime resolves per request; the compiler never contacts the provider.
+      # The alias this gateway publishes as its model. A component wired to the
+      # gateway's address over a model socket — an agent, a tool, a memory store
+      # — reads one model name off the edge, the same key a model publishes, and
+      # sends it with every request; this value is that name. It names one alias
+      # rather than defaulting to the first entry, so the order of the map never
+      # decides what a consumer asks for. A caller that wants another alias the
+      # map publishes names it itself, in its own request or configuration.
+      # A Recipe writes the gateway's published values from what the gateway
+      # itself was given, which holds none of its connections, so the alias a
+      # wired model is served under cannot become the published one by
+      # default: with no entry in values.models, this value is required.
+      model:
+        type: string
+        description: The alias of the model map published as this gateway's model, which a component wired to the gateway sends as the model name of its requests. It must be an alias the gateway serves, from values.models or from a connection on the models socket, and the build halts naming this value otherwise. It may be omitted only when the gateway serves one alias and an entry of values.models publishes it, which is then the one published; with several distinct aliases, or with no entry in values.models, the build halts without it.
+      # What to mask in the gateway's logs, which the developer decides with
+      # the rest of what the application is: the regular expressions under
+      # patterns and the entity types under entities, declared once in the
+      # TextMaskingSchemas library for this value and for core/data-masking, so
+      # each list means the same thing on both. There is nothing else to set: a
+      # logged copy is masked for good, and every copy the Recipe's masking
+      # reaches is masked.
+      #
+      # Listing something has the Recipe deliver the log-masking module beside
+      # the configuration, register its failure callback right after the
+      # request guard, and write one guardrail entry and two settings into the
+      # configuration body, as its artifact template states. Masked are the
+      # copies of a successful call the gateway hands to its logs: the
+      # messages, the standard logging payload's messages and reply, a streamed
+      # reply as assembled, the request and reply as the provider saw them,
+      # the request the spend logs keep, and the reply each logging integration
+      # receives. In each, the text a caller or a model wrote is masked; the
+      # words that say what a part is, the identifiers that tie parts together,
+      # and parts that are not text pass as they are. The Recipe configures no
+      # logging integration and keeps no request text in the spend logs, so
+      # these are the copies one configured beside it would receive.
+      #
+      # Listing nothing, the default, adds nothing to what the Recipe renders:
+      # no module, no callback, no guardrail entry and no setting, so the
+      # gateway renders byte for byte as it does without the value. No list is
+      # assumed, because a default set would decide on the reader's behalf
+      # what counts as sensitive in their logs.
+      #
+      # It does not meet core/data-masking on this gateway: that attachment's
+      # realization turns the gateway's logging of message contents off, so log
+      # masking would have nothing left to act on, and a reader could take the
+      # two for one protection. The assertion log_masking_not_beside_data_masking
+      # below halts the build when both are present, naming both.
+      log_masking:
+        $ref: "TextMaskingSchemas#/schemas/MaskedTextParameter"
+        description: "What to mask in the copies of each call the gateway hands to its logs, while the request it forwards and the reply it returns stay exactly as they were sent. List regular expressions under patterns, matched inside the gateway, and entity types under entities, found and replaced by the Presidio analyzer and anonymizer wired to the pii_analyzer and pii_anonymizer sockets, which listing any requires; a type the analyzer does not recognize in English halts the build, naming the ones it does. It masks each copy of a successful call the gateway hands to its logs, the request the spend logs keep and the reply each logging integration receives among them, on every call, and a caller cannot turn it off. A failed call carries no request text in any log the catalog renders: its text is withheld, matched or not, its error text leaves the gateway's own log with only its kind staying, and failed calls leave the spend logs and the daily spend totals, so beside core/audit-logging the request log keeps answered requests only. An integration configured outside the catalog can still receive a provider's own error message, and one registered ahead of the gateway's own failure callback a failed call's text as it came. Left unmasked: all the provider receives and the caller is answered; request metadata, tool definitions and headers; the gateway's debug output; and text nothing matches. A call whose copies cannot be masked, as when a recognizer cannot be reached, is still logged and counted, with every text in its copies replaced by [TEXT_WITHHELD]. Listing nothing masks nothing and adds nothing to the gateway. The build halts while it lists something and core/data-masking is attached to the gateway."
+      # The gateway's own metrics, in the Prometheus format. LiteLLM records them
+      # with its Prometheus callback and serves them on a listener of its own,
+      # which checks no key and binds to the gateway's own address, the pod's
+      # loopback one. With this value true each Recipe turns both on, and its
+      # path allowlist listens on port 9090 as well, forwarding a GET of
+      # /metrics alone to that listener and answering everything else 403; the
+      # port is on the gateway's Service on the workload synthesis, and on a
+      # metrics Service of its own on the chart Recipe. The metrics carry the
+      # identities the gateway attributes spend to, the hashed keys, the key
+      # aliases and the user emails, as labels, so anything that reaches the
+      # port reads them; the port sits on a ClusterIP Service, inside the
+      # cluster. The main port still answers /metrics 403. False leaves all of
+      # it off and the address unpublished.
+      metrics_enabled:
+        type: boolean
+        default: false
+        description: Has the gateway serve its own Prometheus metrics through its path allowlist on port 9090 of the Service its Recipe serves them on, where a GET of /metrics alone is forwarded, and publishes their address as `metrics_endpoint`; while false that key is empty. The port checks no caller, and the metrics name the hashed keys, key aliases and user emails the gateway attributes spend to, so anything that reaches the port reads them.
+    infra:
+      # The request guard. Because the gateway holds the upstream credential,
+      # it forwards from a caller only the request fields the proxy declares
+      # for the route the request took, and refuses the rest — so a caller
+      # cannot point the gateway at an address of its own through a
+      # request-body model list, inject an upstream header, or pass an
+      # unrecognised field through to the model server behind it, nor send a
+      # provider key of its own to be used in place of the gateway's, even one
+      # it holds legitimately; the request is answered with an error naming the
+      # field and nothing is forwarded. Further fields a caller must send are
+      # admitted by the Release, through infra.admitted_request_fields. The
+      # gateway itself writes the identity it knows a request by — the hash of
+      # the key it verified, that key's team and organization, and the end user
+      # the request names — into one of the request's two metadata mappings,
+      # chosen by route, and its semantic cache keeps replies apart by those
+      # fields. Where that mapping is the caller's own metadata, the gateway's
+      # value replaces any the caller wrote; where the gateway keeps the
+      # caller's metadata apart, as on the responses and messages routes, it
+      # removes the team, organization and end user fields a caller wrote
+      # there, and a request naming the key's hash there,
+      # metadata.user_api_key, is refused the same way. So no caller can pass
+      # for another key.
+      #
+      # admitted_request_fields comes from the LiteLLMGuardSchemas library, which
+      # declares it once for every Component running this proxy behind the
+      # shared request guard; the keys under properties are this Component's
+      # own.
+      $ref: "LiteLLMGuardSchemas#/schemas/RequestGuardInfra"
+      properties:
+        # Operational Sizing — filled by the Operator in the Release. Developer
+        # never sees this.
+        #
+        # The routes answered on this port. For the same reason as the request
+        # guard above, the gateway answers only the routes it serves — the
+        # model request routes, where the guard checks the fields, in the
+        # spellings it serves whatever the model alias; the model listing; its
+        # health checks; and, of its administrative routes, key management —
+        # and refuses every other path without forwarding it. So its
+        # token-count routes, its pass-through routes to providers' own APIs,
+        # its other administrative routes (organizations, teams, users, budgets,
+        # spend and request logs among them) and its administrative console are
+        # not available through it, nor is a model route whose path carries the
+        # model name, as an Azure-style path does; a caller that needs a token
+        # count computes it on its own side.
+        port:
+          type: integer
+          min: 1024
+          max: 65535
+          default: 4000
+          description: Proxy port callers connect to. Most operators should omit this and let the Recipe assign the default (4000).
+        external_base_url:
+          type: string
+          description: >
+            Externally reachable origin of the gateway, as assembled at the ingress
+            tier — scheme, host and, where it is not the scheme's default, port,
+            with no path; for example https://llm.example.com. The gateway composes
+            from this the sign-in callback address it hands an identity provider,
+            the address of its admin console it sends a browser to after sign-in,
+            and the gateway address it writes into every alert it sends. The
+            product documents this setting as an origin only, so the Recipe halts
+            the build on an address carrying a path. Omitted, the gateway composes
+            each of those addresses from the request that arrives, which is correct
+            for a gateway nobody signs in to from outside the cluster.
+        # Each Recipe delivers code into the proxy on every Release — the
+        # request guard, and the masking core/data-masking or
+        # values.log_masking asks for — which relies on the proxy's own
+        # internals and is proven only at the releases that Recipe lists, so
+        # each halts on any other tag.
+        engine_version:
+          type: string
+          default: "v1.103.1"
+          description: Gateway image tag. Selects the image tag of the proxy container on every Recipe. Each Recipe delivers code into the proxy that is proven only at the LiteLLM releases it lists, and halts the build on any other value, naming them.
+        # Selects the version of BerriAI's litellm-helm chart the chart-backed
+        # Recipe pulls; the workload-synthesis Recipe pulls no chart and reads
+        # nothing here. Changing it away from that Recipe's default does not
+        # guarantee value-mapping compatibility with the other chart version.
+        source_version:
+          type: string
+          description: Version of BerriAI's litellm-helm chart the chart-backed Recipe pulls, defaulting to the version that Recipe was checked against. The workload-synthesis Recipe pulls no chart and reads nothing here.
+        compute:
+          cpu:
+            type: string
+            default: "1"
+          memory:
+            type: string
+            default: 2Gi
+        overrides:
+          type: object
+          additionalProperties: true
+          description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      # host, port and protocol are the gateway family's contract, the same keys
+      # every other gateway component publishes; endpoint is the
+      # OpenAI-compatible base URL a caller wiring to the gateway reads.
+      # Callers speak that one API to one address whichever provider answers
+      # behind it. endpoint and model together are the contract every model
+      # component publishes, which is what lets a model socket take this gateway
+      # in place of a model with its consumer's Recipe unchanged.
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name of the Service fronting the gateway. A consumer
+          that composes its own address dials this name; one that does not
+          reads `endpoint` instead.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port that Service accepts caller traffic on. It follows the port
+          an operator set in the Release, so a consumer reads it rather than
+          assuming a default.
+      endpoint:
+        type: string
+        required: true
+        description: >
+          Full base URL of the OpenAI-compatible API the gateway serves, with
+          the host, the port and the API path already composed. A caller hands
+          it to a client library as its base URL and asks for an alias the
+          model map publishes.
+      model:
+        type: string
+        required: true
+        description: >
+          The alias a consumer wired to the gateway sends as its model name:
+          values.model, or the one alias the map publishes when that is
+          omitted. Other aliases the map publishes are served at the same
+          endpoint to a caller that names them itself.
+      protocol:
+        type: string
+        description: URL scheme to reach `host` and `port` over, for a consumer composing its own address rather than reading `endpoint`.
+      # The address a Prometheus server scrapes the gateway's own metrics at,
+      # while values.metrics_enabled is true: /metrics on port 9090 of the
+      # Service the Recipe serves them on, which its path allowlist forwards to
+      # the gateway's metrics listener. The Recipe publishes it spelled out in
+      # full.
+      metrics_endpoint:
+        type: string
+        description: >
+          The full address Prometheus scrapes this component's metrics at —
+          scheme, host, port and path, `http://<host>:9090/metrics`, the host
+          being the name of the Service the Recipe serves them on. Empty while
+          values.metrics_enabled is false.
+
+  # The model map's rules, the credential rule every socket declaring
+  # unauthenticated carries, the refusal of the store password outside its
+  # connection, and the refusal of log masking beside core/data-masking. Each
+  # reads what the Aggregate and the Release wrote — the values, the
+  # attachments, and each connection's target labels, values and
+  # attachments — all known before a Recipe binds, so each holds whichever
+  # Recipe renders this component and halts before anything renders. That the
+  # gateway serves at least one model, from values.models or the models
+  # socket, is checked by its Recipes instead, where the routing table is
+  # written: validating such a Recipe on its own places this component in a
+  # build that wires no connection and gives it no values, which an assertion
+  # here requiring a model would refuse every time.
+  assertions:
+    # The model the gateway publishes must be one it serves, and must not be
+    # chosen by the order of the map. So values.model, where set, names an
+    # alias an entry of values.models or a connection on the models socket
+    # publishes; where it is omitted, the gateway serves one alias and an
+    # entry of values.models publishes it, which is then the published one.
+    # With no alias at all there is nothing to check here, and the Recipe
+    # halts the build instead.
+    published_model_is_a_mapped_alias: >-
+      {{- $aliases := list -}}
+      {{- range (optional .values "models" list) -}}
+      {{- $aliases = append $aliases .name -}}
+      {{- end -}}
+      {{- $aliases = uniq $aliases -}}
+      {{- $wired := sortAlpha (keys (optional .uses "models" dict)) -}}
+      {{- $served := uniq (concat $aliases $wired) -}}
+      {{- if $served -}}
+      {{- with optional .values "model" "" -}}
+      {{- if not (has . $served) -}}
+      {{- if $wired -}}
+      {{- fail (printf "values.model is %q, but neither an entry of values.models nor a connection on the models socket publishes that alias, so a component wired to this gateway would ask for a model it does not serve; set values.model to one of the aliases the gateway serves: %s" . (join ", " $served)) -}}
+      {{- else -}}
+      {{- fail (printf "values.model is %q, but no entry of values.models publishes that alias, so a component wired to this gateway would ask for a model it does not serve; set values.model to one of the aliases the map publishes: %s" . (join ", " $aliases)) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- else -}}
+      {{- if not $aliases -}}
+      {{- fail (printf "values.model is not set and values.models has no entry, so the gateway has no alias of its own to publish as its model, and the alias a connection on the models socket is served under is not among what its published values are written from; set values.model to one of the aliases the models socket publishes: %s" (join ", " $wired)) -}}
+      {{- else if gt (len $served) 1 -}}
+      {{- if $wired -}}
+      {{- fail (printf "values.model is not set, but the gateway serves %d aliases (%s), from values.models and from its models socket, so it cannot tell which one a component wired to it asks for; set values.model to one of them" (len $served) (join ", " $served)) -}}
+      {{- else -}}
+      {{- fail (printf "values.model is not set, but values.models publishes %d aliases (%s), so the gateway cannot tell which one a component wired to it asks for; set values.model to one of them" (len $aliases) (join ", " $aliases)) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- end -}}
+      {{- end -}}
+    # A wired model is served under its connection's alias, beside the entries
+    # of values.models. An alias both publish would name a hand-typed upstream
+    # and a wired model at once, and the proxy would share the requests for it
+    # between the two, so it halts, naming the alias.
+    wired_alias_is_not_typed: >-
+      {{- $typed := list -}}
+      {{- range (optional .values "models" list) -}}
+      {{- $typed = append $typed .name -}}
+      {{- end -}}
+      {{- range $alias, $connection := (optional .uses "models" dict) -}}
+      {{- if has $alias $typed -}}
+      {{- fail (printf "the models connection %s of %q is served under the alias %q, which an entry of values.models also publishes, so one alias would name a hand-typed upstream and a wired model at once; rename the connection, or remove that entry from values.models" $alias $.metadata.instance_id $alias) -}}
+      {{- end -}}
+      {{- end -}}
+    # A wired model's entry is written from the endpoint and the model name the
+    # model publishes, for the proxy to address over the OpenAI API, which is
+    # what model.aggrega.ai/api: openai asserts answers at that endpoint. A
+    # model whose API is another needs the proxy's prefix for that provider,
+    # which nothing the model publishes names, so it halts rather than being
+    # written as a guess.
+    wired_model_speaks_the_openai_api: >-
+      {{- range $alias, $connection := (optional .uses "models" dict) -}}
+      {{- $api := optional $connection.labels "model.aggrega.ai/api" "" -}}
+      {{- if ne $api "openai" -}}
+      {{- fail (printf "the models connection %s of %q reaches %q, whose model.aggrega.ai/api is %q, but the gateway describes a wired model to its proxy only through the OpenAI API, so it cannot write an entry for it from what that model publishes; type that upstream into values.models in the proxy's provider/model notation instead, with provider_key as its credential" $alias $.metadata.instance_id $connection.target $api) -}}
+      {{- end -}}
+      {{- end -}}
+    # A connection to a target its catalog labels a managed service
+    # (component.aggrega.ai/hosting: managed) carries a credential, or says on
+    # the connection that its target takes none. The rule reads the target's
+    # labels, the connection's unauthenticated value and its credential slot,
+    # all known before a Recipe binds, so it holds whichever Recipe renders this
+    # component; a self-hosted target draws nothing. The list names every
+    # socket of this component that declares unauthenticated.
+    managed_target_needs_a_credential: >-
+      {{- range $socket := list "models" "cache_store" -}}
+      {{- range $alias, $connection := (optional $.uses $socket dict) -}}
+      {{- $managed := eq (optional $connection.labels "component.aggrega.ai/hosting" "") "managed" -}}
+      {{- $optedOut := optional $connection.values "unauthenticated" false -}}
+      {{- if and $managed (not (hasKey $connection.features "credential")) (not $optedOut) -}}
+      {{- fail (printf "the %s connection %s of %q reaches %q, whose component.aggrega.ai/hosting label is managed, with no credential: attach one under credential on that connection, or set unauthenticated: true in its values" $socket $alias $.metadata.instance_id $connection.target) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- end -}}
+    # The password the semantic cache presents to its store is the credential
+    # of the store's own connection, and the gateway declares no slot named
+    # cache_store_password. An attachment under that name would be a free
+    # attachment no Recipe reads, and the cache would connect without the
+    # password while the build stayed green, so it halts, naming where the
+    # password goes.
+    store_password_is_on_the_connection: >-
+      {{- if hasKey (optional . "features" dict) "cache_store_password" -}}
+      {{- fail (printf "%q carries an attachment named cache_store_password, but the gateway declares no such slot and its Recipe reads none: the password the semantic cache presents to its store is the credential of the connection wired to the cache_store socket. Attach it under credential on that connection, at uses.cache_store.<alias>.features.credential, and remove the cache_store_password attachment" .metadata.instance_id) -}}
+      {{- end -}}
+    # values.log_masking masks only the copy of a call the gateway hands to its
+    # logs, and core/data-masking changes what travels; the two read alike, as
+    # one protection of the same text, and are not. And that Feature's
+    # realization on this gateway turns its logging of message contents off,
+    # so log masking would have nothing left to act on. So the value listing
+    # something halts beside an attachment of that Feature, naming both. The
+    # attachment's type is compared with any version it was authored with set
+    # aside, so core/data-masking and core/data-masking:1.0.0 are both found.
+    # A value listing nothing masks nothing, so it meets the Feature freely.
+    log_masking_not_beside_data_masking: >-
+      {{- $logMasking := optional .values "log_masking" dict -}}
+      {{- if or (optional $logMasking "patterns" list) (optional $logMasking "entities" list) -}}
+      {{- range $name, $attachment := (optional . "features" dict) -}}
+      {{- if eq (first (splitList ":" (toString $attachment.type))) "core/data-masking" -}}
+      {{- fail (printf "%q lists what to mask in its logs under values.log_masking, and the core/data-masking attachment %q is on it too: that attachment's realization turns the gateway's logging of message contents off, so log masking would have nothing left to act on, and a reader could take the two for one protection. Remove values.log_masking to mask what travels, or the %q attachment to mask only what is logged" $.metadata.instance_id $name $name) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- end -}}

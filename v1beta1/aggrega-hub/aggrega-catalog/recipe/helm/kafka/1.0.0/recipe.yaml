@@ -1,0 +1,230 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: kafka
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    Apache Kafka single-node KRaft on Kubernetes via the helm provider's
+    Workload synthesis (a StatefulSet with a per-replica data volume, a
+    ClusterIP Service exposing the client bootstrap port, and a headless
+    governing Service). Nothing has to be installed in the cluster first and no
+    chart repository has to be reachable, so this is the realization to reach for
+    where no Kafka control plane runs and where the build has to complete without
+    network access; reach for the controller-driven recipe where the Strimzi
+    Cluster Operator is already in place. The node runs the broker and controller
+    roles in one process (no ZooKeeper) and stores its commit log on the
+    persistent volume at
+    /var/lib/kafka/data so log data survives restarts. The cluster identity is
+    supplied verbatim through CLUSTER_ID from the developer value, and the image
+    reads it as-is with no random generation, so the rendered manifest is
+    byte-identical across builds. KAFKA_ADVERTISED_LISTENERS advertises the
+    in-cluster Service name so clients reconnect through the stable address
+    rather than the pod's own hostname. provides.host is the bare, self-contained
+    in-cluster service name of the synthesized Service — it carries no namespace,
+    so the recipe is independent of where it is deployed. A consumer in another
+    namespace qualifies the host with the target namespace on its own side
+    (caller-side routing). The image serves no Prometheus metrics, so the metrics
+    keys are published empty and values.metrics_enabled true halts the build.
+    The Java heap is half infra.compute.memory, in whole Mi or Gi.
+
+    With infra.client_tls true the client port serves TLS alone from the Secret
+    attached to server_certificate, mounted as files, and protocol is kafka-ssl.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/messaging/kafka:1.0.0
+  # This Recipe reads no infra.overrides keys.
+  #
+  # provides.host is the bare Service name "<rendered_name>-default" — the helm
+  # provider names the synthesized ClusterIP Service "<rendered_name>-<service-key>"
+  # (here "<rendered_name>-default"), with no namespace segment. provides.port is
+  # the client bootstrap port producers and consumers connect to; protocol is
+  # "kafka", and "kafka-ssl" while infra.client_tls is on, when the port accepts
+  # TLS alone. provides.bootstrap_servers is that one address joined "host:port",
+  # the whole list for a client that takes one: a single node serves every
+  # client. It spells the Service name a second time because a locals entry
+  # cannot read the rendered name the two are built from.
+  #
+  # The metrics keys are published empty. The official image installs the Kafka
+  # distribution and nothing beside it, and Kafka keeps its own metrics behind
+  # JMX, so no Prometheus endpoint exists here to publish.
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ .infra.broker_port }}"
+    bootstrap_servers: "{{ .context.rendered_name }}-default:{{ .infra.broker_port }}"
+    protocol: "{{ if .infra.client_tls }}kafka-ssl{{ else }}kafka{{ end }}"
+    metrics_pod_selector: ""
+    metrics_pod_port: ""
+    metrics_path: ""
+  # values.metrics_enabled asks for a Prometheus endpoint this realization
+  # cannot serve: the image carries no exporter, and adding one would mean
+  # fetching an agent the image does not ship. Accepting the value and
+  # publishing nothing would let a Release believe its brokers are scraped, so
+  # the build halts and names the value instead.
+  assertions:
+    kafka_metrics_enabled_unsupported: >-
+      {{- if .values.metrics_enabled -}}
+      {{- fail "values.metrics_enabled is true, but this realization runs the official Apache Kafka image, which keeps its metrics behind JMX and carries no Prometheus exporter, so there is no metrics endpoint to turn on or publish; set values.metrics_enabled to false, or select the controller-driven kafka-strimzi recipe in the Manifest, which turns the Strimzi metrics reporter on" -}}
+      {{- end -}}
+  # With infra.client_tls true the client listener on broker_port serves TLS
+  # alone, presenting the tls.crt and tls.key of the Secret attached to
+  # server_certificate, and requests no client certificate. The build halts
+  # naming server_certificate when client_tls is true and nothing is attached,
+  # or the attachment publishes no Secret name — a core/secret-value fill is
+  # one: the image writes every Kafka variable as one line of its configuration
+  # file, so a PEM certificate delivered as a value would break it — and naming
+  # client_tls when a certificate is attached while it is false. A consumer
+  # checks the broker's certificate against the authority that signed it, which
+  # its server_ca slot holds where its image does not already trust it.
+  workload: |
+    {{- $tls := .infra.client_tls }}
+    {{- $cert := hasKey (default dict .features) "server_certificate" }}
+    {{- if and $tls (not $cert) }}
+    {{- fail (printf "infra.client_tls is true on %q, so the broker serves its clients TLS alone, but nothing is attached to its server_certificate slot, so the broker has no certificate to present; attach to server_certificate a Secret holding tls.crt and tls.key, through core/referenced-secret, or set infra.client_tls to false" .context.instance_id) }}
+    {{- end }}
+    {{- if and $cert (not $tls) }}
+    {{- fail (printf "a certificate is attached to the server_certificate slot of %q, but infra.client_tls is false, so the broker serves plaintext and nothing presents the certificate; set infra.client_tls to true to serve TLS from it, or remove the attachment" .context.instance_id) }}
+    {{- end }}
+    {{- $certProvides := optional (optional (default dict .features) "server_certificate" dict) "provides" dict }}
+    {{- if and $tls (not (and (kindIs "map" $certProvides) (optional $certProvides "name" ""))) }}
+    {{- fail (printf "the server_certificate slot of %q is filled by an attachment that publishes no Secret name, but the broker reads its certificate and key from files mounted from a Secret named here, since the image writes every Kafka variable as one line of its configuration file and a PEM certificate delivered as a value would break it; bind the slot to core/referenced-secret, whose k8s-existing-secret realization names a Secret that already exists" .context.instance_id) }}
+    {{- end }}
+    {{- $client := "PLAINTEXT" }}
+    {{- if $tls }}{{ $client = "TLS" }}{{ end }}
+    {{- $heap := 0 }}
+    {{- $mem := toString .infra.compute.memory }}
+    {{- if regexMatch `^[1-9][0-9]*Mi$` $mem }}{{ $heap = div (int (trimSuffix "Mi" $mem)) 2 }}
+    {{- else if regexMatch `^[1-9][0-9]*Gi$` $mem }}{{ $heap = mul (int (trimSuffix "Gi" $mem)) 512 }}
+    {{- end }}
+    {{- if lt $heap 1 }}
+    {{- fail (printf "infra.compute.memory is %q on %q, and this realization gives the broker a Java heap of half the container's memory, which it reads from a quantity in whole mebibytes or gibibytes; set infra.compute.memory in the Release to such a quantity, such as 512Mi or 2Gi" $mem .context.instance_id) }}
+    {{- end }}
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # form: stateful selects a StatefulSet on the helm provider; the Kafka commit
+    # log persists to the per-replica persistentTemplate volume at
+    # /var/lib/kafka/data, so the stateful shape (and its per-replica claim) is
+    # correct.
+    form: stateful
+    replicas: 1
+    containers:
+      main:
+        image: "apache/kafka:{{ .infra.engine_version }}"
+        # Minimal single-node KRaft configuration. The node runs both the
+        # broker and controller roles; CLUSTER_ID is supplied verbatim from the
+        # developer value so the render is deterministic. Every value here is
+        # quoted. The Workload schema declares these values as strings because
+        # an environment variable is a string — every consumer, on every provider,
+        # delivers it as one — and quoting keeps values carrying ':' or ','
+        # valid in the workload YAML. CLUSTER_ID has no KAFKA_ prefix — the
+        # image reads it under that exact name.
+        #
+        # The listeners and the controller quorum bind infra.broker_port and
+        # infra.controller_port, the ports the container, the probes and both
+        # Services declare, so a broker an operator moves to other ports listens
+        # where its Services route.
+        #
+        # With infra.client_tls on, the client listener is named TLS and mapped
+        # to the SSL security protocol; it is not named SSL because the image's
+        # start-up script, on an advertised listener spelled SSL://, demands a
+        # keystore file and password files, which a kubernetes.io/tls Secret does
+        # not hold. The certificate and key reach Kafka as PEM through its
+        # directory configuration provider, which reads each file of the Secret
+        # mounted at /etc/kafka/tls as a configuration value, and is allowed to
+        # read that directory alone. On one node the broker reaches its own
+        # inter-broker listener — transaction markers go to the partition
+        # leader over it — so the inter-broker listener is the TLS listener at
+        # the advertised Service name, which the certificate names, and the
+        # broker trusts its own certificate chain for it. The controller
+        # listener stays plaintext inside the pod.
+        #
+        # KAFKA_HEAP_OPTS gives the broker a Java heap of half
+        # infra.compute.memory, read from a quantity in Mi or Gi; any other
+        # quantity halts. The image's start script otherwise sets a 1 GiB heap,
+        # above the Component's default 512Mi limit, and a broker whose heap
+        # grows past its container's limit is killed for it. It is set the same
+        # way whether or not infra.client_tls is on.
+        variables:
+          KAFKA_NODE_ID: "1"
+          KAFKA_PROCESS_ROLES: "broker,controller"
+          KAFKA_CONTROLLER_QUORUM_VOTERS: "1@localhost:{{ .infra.controller_port }}"
+          KAFKA_LISTENERS: "{{ $client }}://:{{ .infra.broker_port }},CONTROLLER://:{{ .infra.controller_port }}"
+          KAFKA_ADVERTISED_LISTENERS: "{{ $client }}://{{ .context.rendered_name }}-default:{{ .infra.broker_port }}"
+          KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,{{ $client }}:{{ if $tls }}SSL{{ else }}PLAINTEXT{{ end }}"
+          KAFKA_INTER_BROKER_LISTENER_NAME: "{{ $client }}"
+          KAFKA_HEAP_OPTS: "-Xmx{{ $heap }}M -Xms{{ $heap }}M"
+    {{- if $tls }}
+          KAFKA_CONFIG_PROVIDERS: "dir"
+          KAFKA_CONFIG_PROVIDERS_DIR_CLASS: "org.apache.kafka.common.config.provider.DirectoryConfigProvider"
+          KAFKA_CONFIG_PROVIDERS_DIR_PARAM_ALLOWED_PATHS: "/etc/kafka/tls"
+          KAFKA_SSL_KEYSTORE_TYPE: "PEM"
+          KAFKA_SSL_KEYSTORE_CERTIFICATE_CHAIN: "${dir:/etc/kafka/tls:tls.crt}"
+          KAFKA_SSL_KEYSTORE_KEY: "${dir:/etc/kafka/tls:tls.key}"
+          KAFKA_SSL_TRUSTSTORE_TYPE: "PEM"
+          KAFKA_SSL_TRUSTSTORE_CERTIFICATES: "${dir:/etc/kafka/tls:tls.crt}"
+    {{- end }}
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+          KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: "1"
+          KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: "1"
+          KAFKA_LOG_DIRS: "/var/lib/kafka/data"
+          CLUSTER_ID: "{{ .values.cluster_id }}"
+        ports:
+          broker: {{ .infra.broker_port }}
+          controller: {{ .infra.controller_port }}
+        # Kafka documents no health endpoint, so both probes open a TCP
+        # connection to the client port the Service targets. No start-up time is
+        # documented either; both probes first check after 15 s, the delay the
+        # Strimzi operator gives a Kafka node's own probes by default, and wait
+        # up to 5 s for an answer.
+        health:
+          ready:
+            tcp: {{ .infra.broker_port }}
+            initialDelaySeconds: 15
+            timeoutSeconds: 5
+          live:
+            tcp: {{ .infra.broker_port }}
+            initialDelaySeconds: 15
+            timeoutSeconds: 5
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+        volumeMounts:
+          - name: data
+            path: /var/lib/kafka/data
+    {{- if $tls }}
+        attachments:
+          # The certificate Secret mounts whole, read-only, one file per data
+          # key, so the configuration provider reads tls.crt and tls.key from
+          # this directory.
+          server-certificate:
+            from: server_certificate
+            as: file
+            path: /etc/kafka/tls
+    {{- end }}
+    volumes:
+      data:
+        persistentTemplate:
+          size: "{{ .infra.storage.size }}"
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          broker: {{ .infra.broker_port }}
+      headless:
+        type: Headless
+        ports:
+          broker: {{ .infra.broker_port }}
+          controller: {{ .infra.controller_port }}

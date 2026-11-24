@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: adminer-chart
+  version: 1.0.0
+  description: >
+    Adminer composed as a Helm sub-chart. The helm-chart provider copies the
+    local ./charts/adminer chart verbatim into the umbrella. The String Pipe is
+    expressed in chart terms: the database host resolved from the `databases`
+    uses-edge arrives on .context.inject.env.ADMINER_DEFAULT_SERVER and the
+    valuesMapping routes it into the sub-chart's values.
+  maintainers:
+    - name: "Massimiliano Ferrero"
+      email: "m.ferrero@cognitio.it"
+spec:
+  capability: helm-chart
+  implements: core/devtool/adminer
+
+  source: ./charts/adminer
+
+  # The image serves Adminer on 8080, so the chart's container port and the
+  # Service's target port stay 8080 whatever port an operator sets; the chart's
+  # port value, from infra.port, is the Service's port, and provides.port is
+  # that Service port.
+  provides:
+    host: "{{ .context.instance_id }}"
+    port: "{{ optional .infra `port` 8080 }}"
+
+  valuesMapping: |
+    {
+      "image": "adminer:4",
+      "design": "{{ .values.design }}",
+      "adminerDefaultServer": "{{ .context.inject.env.ADMINER_DEFAULT_SERVER }}",
+      "port": {{ optional .infra `port` 8080 }}
+    }

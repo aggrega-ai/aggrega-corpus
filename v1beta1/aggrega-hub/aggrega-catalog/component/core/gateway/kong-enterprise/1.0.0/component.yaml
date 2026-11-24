@@ -1,0 +1,486 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/gateway/kong-enterprise
+  version: 1.0.0
+  description: >
+    Kong Gateway Enterprise, Kong's paid edition of its database-backed API
+    gateway. Like core/gateway/kong it routes client traffic by configuration
+    held in the PostgreSQL backend wired to its backend socket, and serves each
+    model wired to its models socket at /<alias>/v1 through Kong's AI proxy.
+
+    The image is supplied by the operator: Kong distributes the enterprise
+    image under its own terms, so the Release names in infra.image one it is
+    entitled to pull, version tag included, and the catalog names none.
+    Nothing renders until the Release sets `infra.image`. The
+    licence reaches the gateway by reference to a Secret bound to the required
+    license slot, never as a value.
+
+    The compiler validates no licence and contacts no vendor, so a Release that
+    builds cleanly says nothing about one. Kong reads the licence as a node
+    starts, and a node with no valid licence behaves as with an expired one:
+    its entity configuration becomes read-only and proxy traffic is served with
+    the configuration already in place. Kong sells its AI plugins as its AI
+    Gateway Enterprise offering, an entitlement no build can see, so an AI
+    Feature halts the build until infra.ai_gateway_entitled affirms it.
+
+    Realized on Kubernetes by kong-enterprise-chart, over the official Kong
+    Helm chart; there is no compose realization.
+
+    With `values.metrics_enabled` true the Recipe puts the gateway's Status API
+    port on a ClusterIP Service of its own and publishes /metrics there as
+    `metrics_endpoint`; false, neither. The port is already open on the pod:
+    from another address it answers a GET of /status, /status/ready or
+    /metrics, with no caller check, and refuses every other request, POST
+    /status/ready and any route the image adds among them.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: gateway
+    # The Release runs the gateway as containers in its own cluster.
+    component.aggrega.ai/hosting: self-hosted
+    # The enterprise image is distributed under Kong's own terms, so no single
+    # licence identifier applies and metadata.license is left absent.
+    component.aggrega.ai/upstream-licensing: proprietary
+    # Model API: the endpoint this gateway publishes answers the OpenAI API —
+    # the chat and completion routes its AI proxy serves for each model wired
+    # to its models socket, under that connection's alias in the path — so a
+    # consumer drives it with an OpenAI client whichever model answers behind
+    # it. It is what lets a model socket selecting this key admit the gateway
+    # beside the models themselves; the gateway publishes the endpoint and the
+    # model name such a socket's consumers read. The value names what the
+    # product serves, not a configured state: with nothing wired to the models
+    # socket the gateway serves no model, and both of those are empty.
+    model.aggrega.ai/api: openai
+    # The gateway capability dimension: on the routes serving the models wired
+    # to the models socket, Kong's AI proxy reads each request's body — the
+    # model it names, which it refuses where it is not the route's own, and
+    # the messages it carries — and the tokens each reply reports, so a
+    # runtime control that has to parse a model payload can attach here. The
+    # value names what the product does on such a route, not a configured
+    # state: with nothing wired to the models socket no route parses a model
+    # payload, and each Feature selecting this value says, through its
+    # realization, what this gateway honours of it.
+    gateway.aggrega.ai/intelligence: semantic
+    # Period budget: the gateway can refuse model requests once the tokens it
+    # has counted over a period reach a limit set in its configuration — the
+    # tokens each model's reply reports reading, writing or both, which Kong's
+    # AI Rate Limiting Advanced counts — which is the fidelity this value
+    # names. Kong counts cost only from a price its configuration gives each
+    # model, in whatever unit that configuration chooses, and keeps no price
+    # table of its own, so this value is not cost. It refuses nothing until
+    # core/period-budget is attached; the Recipe then writes the budget into
+    # the configuration of the routes serving the wired models.
+    dataplane.aggrega.ai/period-budget: tokens
+    # Content masking: Kong's AI PII Sanitizer can replace sensitive text in
+    # the chat and completion payload the gateway routes with a placeholder
+    # before the text travels further — matches of regular expressions
+    # supplied in its configuration, and entity types Kong's PII service, which
+    # it calls, detects — which is the fidelity this value names. The value
+    # names what the product can do, not a configured state: it masks nothing
+    # until core/data-masking is attached; every attachment needs the
+    # pii_sanitizer socket wired, since the sanitizer sends its patterns to the
+    # PII service too; and data-masking-kong-enterprise says what this gateway
+    # honours of the Feature.
+    dataplane.aggrega.ai/content-masking: entity-recognition
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # Why the period budget, the data masking, and each AI gateway control that
+  # selects gateway.aggrega.ai/intelligence: semantic, is or is not realized
+  # here. Attaching any of the six named in infra.ai_gateway_entitled's
+  # description halts the build until that key affirms Kong's AI Gateway
+  # Enterprise entitlement:
+  # - core/period-budget: Kong's AI Rate Limiting Advanced, counting the
+  #   tokens each reply reports, for the whole gateway or for each wired
+  #   model; period-budget-kong-enterprise refuses what it cannot keep.
+  # - core/data-masking: Kong's AI PII Sanitizer on each wired model's routes,
+  #   calling the PII service wired to pii_sanitizer. The sanitizer reads the
+  #   text of the user's turns, a completion's prompt and a reply's message
+  #   text, and Kong's reference names no setting that refuses a request for
+  #   what it does not read or withholds the rest of a reply, so
+  #   data-masking-kong-enterprise refuses each of the Feature's protections
+  #   Kong cannot give while it stays at its default, and an attachment builds
+  #   once the Release relaxes them; that FeatureRecipe lists what each
+  #   relaxation lets through. It refuses restore, and refuse on a scope
+  #   reaching replies.
+  # - core/fallback-chain: Kong's AI Proxy Advanced on a chained alias's
+  #   routes, its targets the walk's models in priority order;
+  #   fallback-chain-kong-enterprise refuses what it cannot keep, and the
+  #   pair it makes with core/retry-policy.
+  # - core/retry-policy: retry-policy-kong-enterprise halts every attachment.
+  #   Each wired model's route holds one model, and Kong's AI balancer is not
+  #   shown to send a request to that one target a second time: Kong's
+  #   reference reads both ways, the code that decides it ships compiled, and
+  #   the retry count of the service a route belongs to resends no POST once
+  #   sent and acts on no status code. A measurement on a gateway running
+  #   under a licence would settle which reading holds.
+  # - core/semantic-caching: Kong's AI Semantic Cache keeps no entries apart
+  #   per caller; semantic-caching-kong-enterprise halts every attachment.
+  # - core/target-selection: each wired model's route holds one model, so
+  #   there is nothing to choose between; target-selection-kong-enterprise
+  #   halts every attachment.
+  # - core/concurrency-limit, core/response-validation, core/audit-logging,
+  #   and core/prompt-injection-shield, which selects any gateway: not
+  #   realized here, so an attachment halts the build.
+  # core/prompt-deny-patterns is not realized either, and the gateway carries
+  # no dataplane.aggrega.ai/prompt-guard value. It is realized on
+  # core/gateway/kong, through the AI Prompt Guard of Kong 3.9.3, whose reading
+  # of a request was established there. Kong's reference documents the same
+  # plugin for the enterprise releases a Release may name here, but the text
+  # it reads and the size of request it reads change between those releases,
+  # which no build can see.
+  #
+  # Self-inject allowlist: the component may inject resolved uses-edge values
+  # into the env delivery mechanism.
+  inject: [env]
+
+  # The Kong licence. Kong reads it when a node starts, from the variable
+  # KONG_LICENSE_DATA first; the Recipe sets that variable from the Secret this
+  # slot's attachment names, so the licence travels by reference and is in no
+  # rendered file. Fill it with core/referenced-secret: bound to
+  # k8s-existing-secret it names a Secret that already exists, which is how a
+  # licence held outside the Release is reached; a credential that publishes no
+  # Secret name and data key cannot fill it, and the Recipe halts naming it.
+  # Required: a Release that binds nothing here halts the build, naming the
+  # slot. What the build cannot see is whether the Secret holds a valid licence,
+  # or one carrying the AI Gateway Enterprise entitlement Kong sells its AI
+  # plugins under; Kong's support reference describes enterprise plugins on a
+  # node without a valid licence as skipped, a debug log line recording it.
+  featuresSchema:
+    license:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      required: true
+      inject: []
+      description: "The Kong Gateway Enterprise licence, held in a Kubernetes Secret this attachment names: the gateway reads it by reference to that Secret, never as a value written into the Release or the rendered output. Required: the build halts when no attachment binds it."
+
+  usesSchema:
+    # The PostgreSQL backend Kong stores its configuration in. The selected
+    # component's provides host, port, user, and database arrive on the
+    # injection context and compose Kong's KONG_PG_* connection.
+    backend:
+      selector: "component.aggrega.ai/type=stateful-server"
+      inject: [env]
+      required: true
+      # A statement about this connection's target, authored on the connection:
+      # the backend it reaches takes no credential. It changes nothing this
+      # component renders.
+      valueSchema:
+        unauthenticated:
+          type: boolean
+          default: false
+          description: Declares that the backend this connection reaches takes no credential, so a connection carrying none is intended rather than an omission. It changes nothing this component renders.
+      # Optional password credential, held on the connection it is presented on
+      # and shared with the backend. When attached, supplies KONG_PG_PASSWORD via
+      # the credential subsystem; when unattached, the Recipe falls back to its
+      # inline default.
+      # To replace the Recipe's development default, attach core/random-password
+      # on the connection: the cluster generates it, and the backend takes the
+      # same credential by core/referenced-secret.
+      featuresSchema:
+        credential:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [env]
+          description: "Optional password the gateway presents to the backend this connection reaches, shared with that backend. When attached, supplies the backend password via the credential subsystem. Unattached, helm/kong-enterprise-chart presents the development literal `apppass`, which this catalog publishes, so every Release that leaves the slot unattached shares that password."
+    # The models the gateway serves through its AI proxy, each wired as a
+    # connection: any ai-model Component, managed or self-hosted, one or
+    # several. Each connection becomes one service with a chat route at
+    # /<alias>/v1/chat/completions and a completion route at
+    # /<alias>/v1/completions, sent to the endpoint the model publishes and
+    # asking for the model name it publishes — pointers the compiler pipes into
+    # the configuration and never resolves. A route asks for the model it was
+    # written for whatever model name a request carries, so the path chooses the
+    # model. The gateway writes a wired model's route for the OpenAI API alone,
+    # so a connection whose target's model.aggrega.ai/api is not openai halts
+    # the build, naming it. The alias names the route's path and the service and
+    # routes in Kong; every character an alias can carry is one Kong accepts in
+    # both. The routes are the ones core/gateway/kong serves, written from the
+    # same configuration.
+    #
+    # The Recipe imports the routes into the backend database in a step that
+    # runs in the gateway's own pod before the gateway starts, retried until the
+    # schema is provisioned, so the Component's database contract is unchanged.
+    # The pod carries a digest of what the routes are written from — each
+    # connection's alias, the endpoint and model name its model publishes and
+    # whether it carries a credential, the values of each AI Feature whose
+    # plugin the routes carry, and, beside data masking, the address the
+    # pii_sanitizer connection publishes — so a changed route set rolls the
+    # gateway, and the new pod imports it before it serves. The import adds
+    # and updates rows and removes none: a route whose connection is removed
+    # stays in the database, and keeps answering, until it is deleted through
+    # the Admin API, and so does a plugin an AI Feature wrote once the Feature
+    # is removed.
+    #
+    # For the same reason the gateway declares no callers, and its model routes
+    # check no caller's key. Kong tells callers apart only as the consumers an
+    # authentication plugin names, and a consumer and its key, once imported,
+    # would stay able to authenticate after the caller is removed from the
+    # Release, a rotated key leaving the old one working. Nor can a key-auth key
+    # be held by reference, so a caller's key could reach Kong only as a literal
+    # in a rendered file.
+    #
+    # The credential the gateway presents to a wired model is the one its
+    # connection carries in the credential slot, sent as a bearer token in the
+    # Authorization header; the configuration names the variable holding it
+    # through Kong's environment vault, never the value, and it replaces any
+    # Authorization header the request carried. A connection carrying none adds
+    # no credential, and the request's own headers pass on as they came. A
+    # connection to a target labelled
+    # component.aggrega.ai/hosting: managed with no credential halts the build
+    # unless its values set unauthenticated: true. A self-hosted server that
+    # checks a key holds it in a slot of its own, and its connection carries a
+    # credential holding the same key.
+    #
+    # Optional: with nothing wired, the gateway serves no model and its
+    # rendered output is the same as a gateway without this socket.
+    models:
+      selector: "component.aggrega.ai/category=ai-model"
+      valueSchema:
+        unauthenticated:
+          type: boolean
+          default: false
+          description: Declares that the model this connection reaches takes no credential, so a connection carrying none is intended rather than an omission. It changes nothing this component renders.
+      featuresSchema:
+        credential:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [env]
+          description: "Optional credential the gateway presents to the model this connection reaches, as a bearer token. When attached, the Recipe delivers it as AI_PROXY_<ALIAS>_API_KEY, the connection's alias in capitals with every character other than a letter or a digit as an underscore, as a Kubernetes secretKeyRef, and the connection's route reads the token through Kong's environment vault, naming the variable rather than the value. Unattached, the route adds no credential."
+    # Kong's AI PII service, core/security/kong-ai-pii-service: the service
+    # Kong's AI PII Sanitizer sends the text it masks to, which finds the
+    # sensitive spans in it and rewrites them in one call. The sanitizer sends
+    # its regular expressions to the service as well, so it needs the service
+    # whatever it is asked to mask. The selector admits a component carrying
+    # security.aggrega.ai/text-anonymization: sanitizer. The selected
+    # component's published protocol, host and port arrive on the edge, and
+    # the routes the Recipe writes hand them to the sanitizer as its scheme,
+    # host and port; no inject block is authored on the edge. The compiler
+    # routes the address without checking what answers there, and the wired
+    # service must speak Kong's AI PII service API, which the sanitizer calls.
+    # The sanitizer reaches one service, so a data masking attachment halts
+    # while this socket carries more than one connection.
+    # Optional: wired alone it changes no request, because the sanitizer is
+    # configured only while core/data-masking is attached, and that attachment
+    # halts the build while this socket is unwired.
+    pii_sanitizer:
+      selector: "security.aggrega.ai/text-anonymization=sanitizer"
+
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate. The backend
+      # user and database arrive on the `backend` uses-edge.
+      #
+      # The alias this gateway publishes as its model. A component wired to the
+      # gateway's address over a model socket — an agent, a tool, a memory store
+      # — reads one endpoint and one model name off the edge, the same keys a
+      # model publishes; the endpoint is this alias's route and the model name
+      # is the alias. A Recipe writes the gateway's published values from what
+      # the gateway itself was given, which holds none of its connections, so
+      # the published alias is named here rather than taken from the socket:
+      # with a connection on the models socket this value is required, and with
+      # none it is omitted.
+      model:
+        type: string
+        description: The alias of a connection on the models socket that this gateway publishes as its model, and whose route its published endpoint addresses. It must be an alias a models connection carries, and the build halts naming this value otherwise; it is required while the models socket holds a connection, and omitted while it holds none.
+      # The gateway's own metrics, in the Prometheus format, at /metrics on its
+      # Status API, the listener the chart also points the gateway's probes at;
+      # the chart binds it on every interface of the pod. Kong's bundled
+      # Prometheus plugin serves them there whether or not a plugin instance is
+      # configured, and this value configures none, so the plugin's per-request
+      # series stay off. The Status API checks no caller itself, and the routes
+      # of the open-source gateway it is built on, read at Kong 3.9.3, answer
+      # beside the metrics: POST /status/ready, which with status=draining marks
+      # the node draining so its readiness fails until it restarts and the pod
+      # leaves its Service; GET /status/ready; GET /status/dns; and GET
+      # /status, memory, connections and database reachability. The enterprise
+      # image is the Release's and its source is not published, so whatever it
+      # adds to that listener is not read here. So the realization puts an
+      # allowlist in front of it, through the configuration property Kong
+      # documents for the gateway's editions alike: from any address but the
+      # pod's loopback one only a GET of /status, /status/ready or /metrics
+      # reaches it, and every other request, whatever the image adds there
+      # included, is answered 403. This value puts the port on a ClusterIP
+      # Service of its own, which names it for a scraper and adds no caller that
+      # could not reach the pod already. False leaves it as it is and the
+      # address unpublished.
+      metrics_enabled:
+        type: boolean
+        default: false
+        description: Makes the gateway's own metrics, in the Prometheus format at /metrics on its Status API port, reachable on a ClusterIP Service and publishes their address as `metrics_endpoint`; while false that key is empty. From another address the port answers a GET of /metrics, /status/ready or /status (memory, connections and database reachability), with no caller check, and refuses every other request, POST /status/ready, which with status=draining would take the gateway out of readiness, and any route the enterprise image adds among them. It is already open on the pod, and naming it on a Service adds no audience.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      proxy_port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 8000
+        description: Proxy data-plane port consumers connect to.
+      admin_port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 8001
+        description: Admin API port, reachable in-cluster only.
+      # No default and no version knob: access to the enterprise image is
+      # governed by Kong's terms rather than by the catalog, so the catalog
+      # names none and the Release names the one it runs, tag included.
+      image:
+        type: string
+        required: true
+        description: Full reference of the Kong Gateway Enterprise image the gateway runs, version tag included, as in kong/kong-gateway:3.16.0.0, optionally followed by a digest — the image the operator is entitled to pull. There is no default, because access to the image is governed by Kong's terms rather than by the catalog, and the catalog therefore names none. The tag must begin with the gateway's version, which the chart reads from it; a build that omits the image, or names one whose tag carries no version, halts.
+      image_pull_secret:
+        type: string
+        description: Name of a pre-created image-pull Secret granting access to the registry the image is pulled from. Set this when that registry needs credentials; omit it when the cluster can pull the image without them.
+      # The AI entitlement, affirmed rather than checked: the licence carries it
+      # inside a document the build never reads, and Kong refuses nothing
+      # without it.
+      ai_gateway_entitled:
+        type: boolean
+        default: false
+        description: Affirms that the licence the license slot names carries Kong's AI Gateway Enterprise entitlement, under which Kong sells the plugins its AI Features run on. The compiler runs ahead of time and never reads the licence, so it asks rather than checks. With core/semantic-caching, core/period-budget, core/data-masking, core/fallback-chain, core/retry-policy or core/target-selection attached and this left unaffirmed, the build halts, because Kong skips an AI plugin the licence does not entitle silently rather than refusing it.
+      source_version:
+        type: string
+        description: Version of the Helm chart the realization pulls. Changing it away from the Recipe's default does not guarantee value-mapping compatibility with the new chart.
+      compute:
+        cpu:
+          type: string
+          default: 250m
+        memory:
+          type: string
+          default: 512Mi
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name of the Service fronting the proxy data plane. A
+          consumer sends its client traffic here rather than to the service
+          behind the gateway.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port that Service accepts proxied traffic on. It carries the
+          proxy port an operator set, never the Admin API port, which stays
+          in-cluster.
+      protocol:
+        type: string
+        description: How the published address is spoken to — `http`, so a consumer composes an address on that scheme.
+      # endpoint and model together are the contract every model component
+      # publishes, which is what lets a model socket take this gateway in place
+      # of a model with its consumer's Recipe unchanged. Neither is required:
+      # with nothing wired to the models socket the gateway serves no model and
+      # publishes both empty.
+      endpoint:
+        type: string
+        description: >
+          Full base URL of the OpenAI-compatible API the gateway serves for the
+          model values.model names, with the host, the port and that alias's
+          route already composed. A caller hands it to a client library as its
+          base URL. Every other wired model is served at the same host and port
+          under its own alias in the path. Empty while nothing is wired to the
+          models socket.
+      model:
+        type: string
+        description: >
+          The alias a consumer wired to the gateway sends as its model name:
+          values.model. The route behind the endpoint asks for the model it was
+          written for whatever name a request carries. Empty while nothing is
+          wired to the models socket.
+      metrics_endpoint:
+        type: string
+        description: >
+          The full address Prometheus scrapes this component's metrics at —
+          scheme, host, port and path, `http://<host>:<status port>/metrics`,
+          the host being the Service the realization puts the Status API port
+          on. Empty while values.metrics_enabled is false.
+
+  # The rules of the models socket, and the credential rule every socket
+  # declaring unauthenticated carries. Each reads what the Aggregate and the
+  # Release wrote — the values, and each connection's target labels, values and
+  # attachments — all known before a Recipe binds, so each holds whichever
+  # Recipe renders this component and halts before anything renders.
+  #
+  # DELIBERATE NEAR-DUPLICATE of core/gateway/kong's four assertions of the same
+  # names: the two gateways serve the same routes from the same configuration,
+  # so the rules that guard those routes are the same, and an assertion is a
+  # string on the Component that no library kind can hold for two Components to
+  # share. If one of them changes, change both in the same edit.
+  assertions:
+    # The model the gateway publishes must be one it serves. values.model names
+    # the alias of a connection on the models socket, and is required while the
+    # socket holds one, because the published values are written from what the
+    # gateway was given and a connection is not among it. With nothing wired, a
+    # value naming an alias names a route the gateway does not serve.
+    published_model_is_a_wired_alias: >-
+      {{- $wired := sortAlpha (keys (optional .uses "models" dict)) -}}
+      {{- with optional .values "model" "" -}}
+      {{- if not (has . $wired) -}}
+      {{- if $wired -}}
+      {{- fail (printf "values.model is %q, but no connection on the models socket carries that alias, so a component wired to this gateway would be sent to a route it does not serve; set values.model to one of the aliases the models socket carries: %s" . (join ", " $wired)) -}}
+      {{- else -}}
+      {{- fail (printf "values.model is %q, but nothing is wired to the models socket, so the gateway serves no model to publish under that alias; wire a model to the models socket under that alias, or remove values.model" .) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- else -}}
+      {{- if $wired -}}
+      {{- fail (printf "values.model is not set, but the models socket carries %s, so the gateway cannot tell which of them a component wired to it asks for, and the alias a connection is served under is not among what its published values are written from; set values.model to one of them" (join ", " $wired)) -}}
+      {{- end -}}
+      {{- end -}}
+    # A wired model's route is written from the endpoint and the model name the
+    # model publishes, for the AI proxy to reach over the OpenAI API, which is
+    # what model.aggrega.ai/api: openai asserts answers at that endpoint. A
+    # model whose API is another needs the proxy's own settings for that
+    # provider, which nothing the model publishes names, so it halts rather
+    # than being written as a guess.
+    wired_model_speaks_the_openai_api: >-
+      {{- range $alias, $connection := (optional .uses "models" dict) -}}
+      {{- $api := optional $connection.labels "model.aggrega.ai/api" "" -}}
+      {{- if ne $api "openai" -}}
+      {{- fail (printf "the models connection %s of %q reaches %q, whose model.aggrega.ai/api is %q, but the gateway writes a wired model's route from the endpoint and model name it publishes for the OpenAI API alone, so it cannot write a route for it; wire a model whose model.aggrega.ai/api is openai instead" $alias $.metadata.instance_id $connection.target $api) -}}
+      {{- end -}}
+      {{- end -}}
+    # The Recipe names the variables a models connection's credential is
+    # delivered under after the connection's alias in capitals, with every
+    # character other than a letter or a digit as an underscore, so two aliases
+    # that rule maps to one name — fast-a and fast_a — would deliver two
+    # credentials under one variable. It halts, naming both connections.
+    credential_variables_are_distinct: >-
+      {{- $seen := dict -}}
+      {{- range $alias, $connection := (optional .uses "models" dict) -}}
+      {{- if hasKey $connection.features "credential" -}}
+      {{- $variable := regexReplaceAll "[^A-Z0-9]" (upper $alias) "_" -}}
+      {{- with get $seen $variable -}}
+      {{- fail (printf "the models connections %s and %s of %q would each deliver their credential under one variable, because the gateway names a connection's variables after its alias in capitals with every character other than a letter or a digit as an underscore; rename one of the two connections" . $alias $.metadata.instance_id) -}}
+      {{- end -}}
+      {{- $_ := set $seen $variable $alias -}}
+      {{- end -}}
+      {{- end -}}
+    # A connection to a target its catalog labels a managed service
+    # (component.aggrega.ai/hosting: managed) carries a credential, or says on
+    # the connection that its target takes none. The rule reads the target's
+    # labels, the connection's unauthenticated value and its credential slot,
+    # all known before a Recipe binds, so it holds whichever Recipe renders this
+    # component; a self-hosted target draws nothing. The list names every
+    # socket of this component that declares unauthenticated.
+    managed_target_needs_a_credential: >-
+      {{- range $socket := list "backend" "models" -}}
+      {{- range $alias, $connection := (optional $.uses $socket dict) -}}
+      {{- $managed := eq (optional $connection.labels "component.aggrega.ai/hosting" "") "managed" -}}
+      {{- $optedOut := optional $connection.values "unauthenticated" false -}}
+      {{- if and $managed (not (hasKey $connection.features "credential")) (not $optedOut) -}}
+      {{- fail (printf "the %s connection %s of %q reaches %q, whose component.aggrega.ai/hosting label is managed, with no credential: attach one under credential on that connection, or set unauthenticated: true in its values" $socket $alias $.metadata.instance_id $connection.target) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- end -}}

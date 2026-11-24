@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/ai-model/azure-managed
+  version: 1.0.0
+  description: >
+    An Azure managed online endpoint, reached as an external reference: no
+    compute runs in-cluster and the compiler never calls the provider. This is
+    the handle for a model an organisation has deployed behind its own scoring
+    endpoint rather than one of a provider's catalogue models, so the host is
+    per-deployment and operator-supplied in the Release. Consumers read that
+    endpoint and the model name over a `uses` edge, the contract every model
+    here publishes, so an application reaching a privately deployed model is
+    wired exactly like one reaching a public API. Authentication is the
+    consumer's concern: a workload uses the identity its platform gives it, or
+    attaches its own credential, rather than receiving a key from this
+    realization.
+  labels:
+    component.aggrega.ai/type: resource
+    component.aggrega.ai/category: ai-model
+    # Model API: the managed online endpoint's own scoring API answers at the
+    # address published here, a request's body being whatever the deployed
+    # model accepts. It is not the OpenAI API.
+    model.aggrega.ai/api: native
+    component.aggrega.ai/hosting: managed
+    component.aggrega.ai/upstream-licensing: proprietary
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  schema:
+    values:
+      $ref: "BaseComponents#/schemas/BaseModelParameter"
+    infra:
+      # An Azure managed online endpoint's scoring host is per-deployment, so the
+      # endpoint is operator-supplied rather than a fixed host.
+      endpoint: { type: string }
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      # endpoint and model are the family contract an ai-agent consumer reads.
+      endpoint:
+        type: string
+        required: true
+        description: >
+          Scoring URL of the managed online endpoint a consumer posts to. It
+          belongs to the resource an organisation provisioned, so the Release
+          supplies it and the value differs per environment.
+      model:
+        type: string
+        required: true
+        description: >
+          The name this model is registered under behind that endpoint, which
+          the provider calls a deployment name. A consumer sends it where the
+          endpoint serves more than one, and otherwise records which model it
+          reached.

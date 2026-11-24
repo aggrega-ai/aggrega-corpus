@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Release
+metadata:
+  name: k8s-helm-synth
+  environment: production
+  version: "1.0.0"
+spec:
+  aggregate: aggregate
+  manifest: manifest-helm-synth
+  boundaries:
+    app:
+      directory: app
+      components:
+        team-dashboards:
+          infra:
+            port: 3000
+        ops-dashboards:
+          infra:
+            port: 3001
+        metrics:
+          # Operational sizing owned by the operator. The synthesized Recipe
+          # renders the image tag from engine_version, the container resource
+          # requests and limits from compute, and the data volume claim from
+          # storage.
+          infra:
+            engine_version: "v3.5.0"
+            compute:
+              cpu: 500m
+              memory: 512Mi
+            storage:
+              size: 8Gi

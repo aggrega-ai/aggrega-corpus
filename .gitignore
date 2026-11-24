@@ -1,0 +1,4 @@
+# Every file under a frozen directory is tracked as archived, so no ignore pattern a
+# checkout's own configuration sets applies there. The archived trees' own .gitignore
+# files sit deeper and still apply inside them, as they did where those trees came from.
+!/v[0-9]*/**

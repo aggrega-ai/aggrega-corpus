@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Feature
+metadata:
+  # Named for the choice it declares. In the field, "semantic routing" names
+  # routing a request by what it means, which this Feature does not declare, so
+  # that name is left free for a Feature that does.
+  name: core/target-selection
+  version: 1.0.0
+  description: >
+    Declares which way an AI gateway chooses among several targets that can
+    serve the same request. Its strategy is latency, which picks the target
+    observed to answer quickest, or cost, which picks the target that is
+    cheapest to call.
+
+    It is the choice between targets rather than the routing itself: which
+    targets are candidates comes from the gateway's own routing table, so a
+    table that publishes each model alias once leaves nothing to choose
+    between.
+
+    The developer attaches it in the Aggregate, since the strategy is a
+    value, and a Release binds its realization in the Manifest. On
+    core/gateway/litellm, target-selection-litellm writes latency as the
+    proxy's routing strategy and refuses cost by name: the proxy's price table
+    does not name OpenAI's and Anthropic's models in the provider/model form
+    the gateway's targets take, so it would choose by order. On
+    core/gateway/kong-enterprise and core/gateway/traefik-hub,
+    target-selection-kong-enterprise and target-selection-traefik-hub halt
+    every attachment, since each of their model routes carries one target. On
+    core/gateway/higress, target-selection-higress halts every attachment,
+    since the gateway can measure a service's latency but cannot make its choice
+    route the request, and chooses no target by cost. On
+    core/gateway/agentgateway, target-selection-agentgateway halts every
+    attachment, since the gateway takes the quickest target only when a random
+    draw picks it, and chooses no target by cost. Each halts on any other
+    gateway.
+  annotations:
+    routing.aggrega.ai/tier: "gateway"
+    security.aggrega.ai/class: "routing_policy"
+  maintainers:
+    - name: "Massimiliano Ferrero"
+      email: "m.ferrero@cognitio.it"
+spec:
+  appliesTo: "gateway.aggrega.ai/intelligence=semantic"
+  interoperability:
+    conflictsWith: []
+  schema:
+    values:
+      $ref: "BaseComponents#/schemas/BaseFeatureParameter"
+      properties:
+        strategy:
+          type: string
+          enum: [latency, cost]
+          default: latency
+          description: "How the gateway chooses among the targets that can serve a request: latency, the target observed to answer quickest; or cost, the target cheapest to call."
+      required: [strategy]

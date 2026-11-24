@@ -1,0 +1,35 @@
+# Content pins for this entity's external inputs, written by `aggrega pin`.
+# Commit it beside the entity. Run `aggrega pin` on the entity again to bring it up to date.
+version: 1
+localSourceDigests:
+  - path: chart/Chart.yaml
+    digest: sha256:b89da6a0f4f86f80166c7074a444b452a96c8d000ef1de3aaa680368a65324cc
+  - path: chart/templates/servicemonitor.yaml
+    digest: sha256:03840d88cae41379d7c91d5b17819a201b3fbb2f6d9b4f36d1a8c39ca96ca377
+ignore:
+  plugin:
+    name: provider/helm
+    patterns:
+      - .git/
+      - .hg/
+      - .svn/
+      - .bzr/
+      - templates/.?*
+    files:
+      - .helmignore
+  rules:
+    - pattern: .git/
+      within: chart
+      from: plugin
+    - pattern: .hg/
+      within: chart
+      from: plugin
+    - pattern: .svn/
+      within: chart
+      from: plugin
+    - pattern: .bzr/
+      within: chart
+      from: plugin
+    - pattern: templates/.?*
+      within: chart
+      from: plugin

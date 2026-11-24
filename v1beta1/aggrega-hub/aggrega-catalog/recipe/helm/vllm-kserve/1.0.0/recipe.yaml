@@ -1,0 +1,156 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: vllm-kserve
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    vLLM realized as a KServe InferenceService the KServe controller reconciles,
+    rather than a directly synthesized StatefulSet — the controller-driven
+    realization of the same model component, selectable in the Manifest alongside
+    the synthesis recipe. The recipe emits an InferenceService custom resource
+    whose predictor resolves the model pointer as a storage URI; the controller
+    turns it into a running serving workload and its predictor Service. The model
+    value is a deterministic pointer the controller resolves at reconcile time; the
+    compiler never fetches weights. GPU is requested directly on the predictor as
+    the extended resource nvidia.com/gpu, with an optional runtime class. provides
+    is filled from the predictor Service the controller creates, so a consumer wires
+    to it exactly as it would to the synthesized realization. An attached api_key
+    reaches the predictor as VLLM_API_KEY, taken from the credential's secret by
+    name, so the key never appears in the custom resource. The KServe control
+    plane is a runtime prerequisite: the build halts unless the operator affirms it
+    is installed (infra.control_plane_present), so no custom resource is emitted into
+    a cluster that cannot reconcile it. The InferenceService is written into the
+    namespace the Release, or else the Aggregate, names for this component through the
+    aggrega.ai/namespace annotation, where one is set. Every metrics key is
+    published empty: the port and path of the metrics belong to the serving
+    runtime the cluster registered, which the catalog does not know.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/ai-model/vllm:1.0.0
+  # provides is the predictor Service the KServe controller creates for the
+  # InferenceService: a Service named "<name>-predictor" listening on port 80,
+  # serving the OpenAI-compatible API under /v1. This matches the synthesis
+  # realization's contract key for key, so consumers are realization-agnostic. The
+  # host is the bare in-cluster Service name; a consumer in another namespace
+  # qualifies it on its own side (caller-side routing).
+  #
+  # Every metrics key is published empty. Which server answers behind the
+  # predictor, and so on which port and path its metrics are served, is the
+  # serving runtime the cluster registered for the model format below, not a
+  # fact this Recipe holds, so it publishes no address and nothing to discover.
+  provides:
+    host: "{{ .context.instance_id }}-predictor"
+    port: "80"
+    endpoint: "http://{{ .context.instance_id }}-predictor/v1"
+    model: "{{ default .values.model .values.served_model_name }}"
+    protocol: "http"
+    metrics_endpoint: ""
+    metrics_service: ""
+    metrics_service_port: ""
+    metrics_pod_selector: ""
+    metrics_pod_port: ""
+    metrics_path: ""
+  # The KServe control plane must exist in the target cluster before an
+  # InferenceService can reconcile. The compiler cannot inspect cluster state, so
+  # the prerequisite is declared: an operator affirms it in the Release, and an
+  # unaffirmed build halts here rather than emitting an orphan custom resource.
+  assertions:
+    kserve_control_plane_prerequisite: >-
+      {{- if not .infra.control_plane_present -}}
+      {{- fail "the KServe control plane must be installed in the target cluster before this realization emits its InferenceService; once KServe is present, affirm the prerequisite by setting infra.control_plane_present to true in the Release" -}}
+      {{- end -}}
+  # The KServe InferenceService. Its predictor.model.storageUri is the deterministic
+  # model pointer (an hf:// storage URI resolved by the controller's storage
+  # initializer at reconcile time). modelFormat.name selects the serving runtime the
+  # cluster provides for vLLM; verify it against the ServingRuntimes installed in the
+  # target cluster, as custom-resource schemas evolve independently of the catalog.
+  #
+  # This Recipe reads from infra.overrides:
+  #   model_format - string (predictor.model.modelFormat.name; default "vllm")
+  #   annotations  - map[string]string (added to the InferenceService annotations)
+  #
+  # Both keys exist because the two cluster-dependent choices on this custom
+  # resource are ones the Component's own schema cannot enumerate. The serving
+  # runtime is the first: the default format name resolves to whichever
+  # ServingRuntime the cluster registered for vLLM, and a cluster that registered
+  # it under another name needs that name instead. Annotations are the second:
+  # the controller reads its per-resource switches from them, and which switches
+  # exist belongs to the installed controller version, not to this catalog.
+  #
+  # When the optional api_key slot is attached, the predictor's model carries
+  # VLLM_API_KEY as an environment variable taken from the credential's secret
+  # by name, so the key's value never lands in the custom resource; the slot
+  # therefore takes a credential that publishes a secret's name and key. The
+  # controller merges these variables into the container of the serving runtime
+  # the format resolves to, and VLLM_API_KEY is the variable vLLM's own server
+  # reads, so a runtime that runs that server requires the key of every caller
+  # under /v1. Unattached, nothing is emitted.
+  #
+  # The InferenceService is written into the namespace the Release, or else the Aggregate, names for
+  # this component through the aggrega.ai/namespace annotation, on its boundary
+  # or its own entry, so the predictor Service the controller creates beside it
+  # lands where a caller reads that it runs; the provider does not place an
+  # artifact on its own. Where no namespace is named the field is omitted, and
+  # the resource lands wherever the applying tool puts it.
+  artifacts:
+    inferenceservice.yaml: |
+      apiVersion: serving.kserve.io/v1beta1
+      kind: InferenceService
+      metadata:
+        name: {{ .context.instance_id }}
+        {{- $ns := "" }}
+        {{- if .context.annotations }}
+          {{- $raw := optional (optional (default dict .context.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict .context.annotations) "aggregate" dict) "aggrega.ai/namespace" "") }}
+          {{- if $raw }}{{- $ns = $raw }}{{- end }}
+        {{- end }}
+        {{- with $ns }}
+        namespace: "{{ . }}"
+        {{- end }}
+        {{- if and .infra.overrides .infra.overrides.annotations }}
+        annotations:
+          {{- range $k, $v := .infra.overrides.annotations }}
+          {{ $k }}: "{{ $v }}"
+          {{- end }}
+        {{- end }}
+      spec:
+        predictor:
+          minReplicas: {{ default .infra.replicas .infra.min_replicas }}
+          {{- with .infra.max_replicas }}
+          maxReplicas: {{ . }}
+          {{- end }}
+          {{- with (default dict .infra.gpu).runtime_class }}
+          runtimeClassName: {{ . }}
+          {{- end }}
+          model:
+            modelFormat:
+              {{- if and .infra.overrides .infra.overrides.model_format }}
+              name: {{ .infra.overrides.model_format }}
+              {{- else }}
+              name: vllm
+              {{- end }}
+            storageUri: "hf://{{ .values.model }}"
+            {{- if hasKey (default dict .features) "api_key" }}
+            env:
+              - name: VLLM_API_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: "{{ .features.api_key.provides.name }}"
+                    key: "{{ .features.api_key.provides.key }}"
+            {{- end }}
+            resources:
+              requests:
+                cpu: "{{ .infra.compute.cpu }}"
+                memory: "{{ .infra.compute.memory }}"
+              limits:
+                cpu: "{{ .infra.compute.cpu }}"
+                memory: "{{ .infra.compute.memory }}"
+                {{- if (default dict .infra.gpu).count }}
+                nvidia.com/gpu: "{{ .infra.gpu.count }}"
+                {{- end }}

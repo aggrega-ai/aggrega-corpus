@@ -1,0 +1,233 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: mariadb-cluster
+  version: 1.0.0
+  license: MIT
+  description: >
+    MariaDB realized as a MariaDB custom resource the mariadb-operator control plane
+    reconciles, rather than a directly synthesized StatefulSet — the
+    controller-driven realization of the same MariaDB component, selectable in the
+    Manifest alongside the synthesis recipe. The recipe emits one MariaDB conformant
+    to the k8s.mariadb.com/v1alpha1 API; the controller turns it into a running
+    server, its client Service and its credential Secrets, and creates the initial
+    database and application user from the developer's own values. The MariaDB is
+    written into the namespace the Release, or else the Aggregate, names through
+    the aggrega.ai/namespace annotation, where one is set. provides.host is the
+    client Service the controller creates for the instance and provides.port is
+    the port the custom resource carries, so a consumer wires to it exactly as it
+    would to the synthesized realization. infra.ha turns on replication:
+    infra.ha.read_replicas replicas, automatic failover while infra.ha.enabled,
+    and provides.host then <name>-primary. Credential custody is the operator's
+    choice: infra.credentials generated leaves both passwords with the controller,
+    and the required root_password slot is bound to helm/generated-secret; supplied
+    points it at an existing Secret named in infra.credentials_secret. The control
+    plane is a runtime prerequisite: the build halts unless the operator affirms it
+    is installed (infra.control_plane_present), so no custom resource reaches a
+    cluster that cannot reconcile it. Reach for this realization where the control
+    plane is in place, and for the synthesis recipe where it is not.
+    A core/backup attachment bound to helm/backup-mariadb-operator is realized
+    through a mariadb-operator Backup.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/datastore/mariadb:1.0.0
+  # The controller creates the instance's client Service under the MariaDB custom
+  # resource's own name, with no suffix, listening on the port the custom resource
+  # declares; provides.host is that bare in-cluster name, matching the synthesis
+  # realization's contract so consumers are realization-agnostic. A consumer in
+  # another namespace qualifies the host on its own side (caller-side routing).
+  #
+  # With replication on (see infra.ha below) that Service routes to every
+  # instance, replicas included, and a write reaching a replica never reaches the
+  # primary. The controller then also creates <name>-primary, which follows the
+  # primary through every failover and switchover, and <name>-secondary, which
+  # routes to the replicas alone; it connects its own jobs, the backup's dump
+  # among them, through <name>-primary. So provides.host is <name>-primary while
+  # replication is on. <name>-secondary is not published: the provides contract
+  # is the Component's, shared by every realization, and a key only one
+  # realization can fill is one a consumer cannot depend on.
+  #
+  # Unlike some controllers, this one takes the listen port as a field on the custom
+  # resource, so infra.port is honored here exactly as the synthesis realization
+  # honors it and provides.port reads from the same place. The controller also
+  # creates a headless Service, which no consumer is given.
+  #
+  # The API version the MariaDB below is written at. helm/backup-mariadb-operator
+  # reads this local from its assertions — they see the locals of the component
+  # the attachment is on — and refuses an attachment on any realization that
+  # does not declare it, since only this one emits the MariaDB its Backup refers
+  # to.
+  #
+  # replicated is "true" while infra.ha asks for replication — high availability,
+  # read replicas or both — and empty otherwise: the one place that decision is
+  # made, read by provides.host and by the MariaDB below.
+  locals:
+    mariadb_api_version: "k8s.mariadb.com/v1alpha1"
+    replicated: '{{ if or .infra.ha.enabled (gt (int .infra.ha.read_replicas) 0) }}true{{ end }}'
+  provides:
+    host: "{{ .context.instance_id }}{{ if .locals.replicated }}-primary{{ end }}"
+    port: "{{ .infra.port }}"
+    user: "{{ .values.user }}"
+    database: "{{ .values.database }}"
+    protocol: "mariadb"
+  # Five declared conditions, each halting rather than emitting something that
+  # renders cleanly and does not work.
+  assertions:
+    # The mariadb-operator control plane must exist in the target cluster before a
+    # MariaDB custom resource can reconcile. The compiler cannot inspect cluster
+    # state, so the prerequisite is declared: an operator affirms it in the Release,
+    # and an unaffirmed build halts here rather than emitting an orphan custom
+    # resource.
+    mariadb_operator_prerequisite: >-
+      {{- if not .infra.control_plane_present -}}
+      {{- fail "the mariadb-operator control plane must be installed in the target cluster before this realization emits its MariaDB custom resource; once the control plane is present, affirm the prerequisite by setting infra.control_plane_present to true in the Release" -}}
+      {{- end -}}
+    # The custom resource carries no surface for first-initialization SQL: the
+    # controller bootstraps an instance from its own fields or from a backup, and
+    # runs statements through a separate resource with its own lifecycle. Scripts
+    # set here would be accepted, validated and then reach no emitted byte. Halting
+    # says so instead of dropping them silently.
+    mariadb_controller_init_scripts: >-
+      {{- if and (hasKey (default dict .values) "init_scripts") .values.init_scripts -}}
+      {{- fail "the MariaDB custom resource carries no first-initialization script surface, so values.init_scripts would reach no emitted byte on this realization; select the synthesis recipe in the Manifest, which does honor it, or run the statements against the database once it is ready" -}}
+      {{- end -}}
+    # Supplied credentials need a Secret to read them from. An empty name would
+    # render a custom resource the controller waits on forever.
+    mariadb_supplied_credentials_secret: >-
+      {{- if and (eq .infra.credentials "supplied") (not .infra.credentials_secret) -}}
+      {{- fail "infra.credentials is supplied, so name the existing Secret the controller reads the database credentials from in infra.credentials_secret; leave infra.credentials at generated to have the controller create and own those Secrets instead" -}}
+      {{- end -}}
+    # The controller fails over by promoting a replica, so high availability
+    # with no read replica has nothing to promote; its admission webhook also
+    # refuses replication on a single instance.
+    mariadb_ha_needs_a_replica: >-
+      {{- if and .infra.ha.enabled (eq (int .infra.ha.read_replicas) 0) -}}
+      {{- fail "infra.ha.enabled is true and infra.ha.read_replicas is 0, and this Recipe fails over by promoting a read replica, so there is no replica to fail over to: set infra.ha.read_replicas to at least 1, or set infra.ha.enabled to false" -}}
+      {{- end -}}
+    # The instance count is infra.ha's: one primary plus infra.ha.read_replicas.
+    # infra.overrides.replicas is accepted only as 1 with replication off, which
+    # renders exactly as the key unset; any other value would set a count the
+    # Release's infra.ha does not describe.
+    mariadb_replicas_from_ha: >-
+      {{- $r := optional (optional .infra "overrides" dict) "replicas" "" -}}
+      {{- if and (ne (toString $r) "") (or (ne (toString $r) "1") .locals.replicated) -}}
+      {{- fail (printf "infra.overrides.replicas is %v, and this Recipe takes the instance count from infra.ha: one primary plus infra.ha.read_replicas replicas replicating from it; remove infra.overrides.replicas and set infra.ha.read_replicas to the number of replicas beside the primary, with infra.ha.enabled true for automatic failover" $r) -}}
+      {{- end -}}
+  # This Recipe reads no infra.overrides keys; infra.overrides.replicas is
+  # refused above unless it is 1 with replication off.
+  #
+  # infra.ha is honored through the controller's replication. With both members at
+  # their defaults the MariaDB is the single-instance server. Otherwise
+  # spec.replicas is one primary plus infra.ha.read_replicas, replication is
+  # enabled, and the primary fails over automatically to a replica exactly when
+  # infra.ha.enabled is true; with it false the replicas serve reads and no
+  # replica is promoted when the primary is lost. The controller creates a
+  # PodDisruptionBudget for a replicated MariaDB itself. Pod anti-affinity stays
+  # off, the controller's default, since turning it on needs as many nodes as
+  # instances.
+  #
+  # Backup is a core/backup attachment, realized on this database by
+  # helm/backup-mariadb-operator, the FeatureRecipe the Manifest binds to it, as
+  # described beside the MariaDB below. helm/backup-velero, helm/backup-k8up,
+  # helm/backup-kubestash and helm/backup-kasten each select the workloads a
+  # component renders, and this realization renders a custom resource whose
+  # pods the controller creates, so each refuses the attachment by name.
+  # values.init_scripts is honored by the synthesis realization alone, which is
+  # why it halts above rather than passing quietly.
+  #
+  # The developer's charset and collation are server configuration, and the custom
+  # resource's server-configuration surface is myCnf — so they are written there
+  # rather than as container environment, which this realization does not author.
+  # custom_config is appended after them, verbatim, keeping the Component's own
+  # "injected verbatim" contract; it carries its own group header, so a rendered
+  # file may name the same configuration group twice. The group name follows the
+  # project's own example manifest.
+  #
+  # The storage class is written only when the Release names one. Left out, the
+  # controller names no class on the volume claim it creates, and the cluster's
+  # default storage class provisions it.
+  #
+  # The MariaDB is written into the namespace the Release, or else the Aggregate, names for this
+  # component through the aggrega.ai/namespace annotation, on its boundary or its
+  # own entry, and the controller creates the server, its client Service and its
+  # credential Secrets there, so they land where a consumer reads that the
+  # database runs — the namespace it qualifies host with. A Secret named in
+  # infra.credentials_secret is read from that namespace too. The provider does
+  # not place an artifact on its own. Where no namespace is named the field is
+  # omitted, and the MariaDB lands wherever the applying tool puts it.
+  #
+  # Backup. A core/backup attachment the Manifest binds to
+  # helm/backup-mariadb-operator writes a mariadb-operator Backup beside the
+  # MariaDB, in its namespace, referring to it by its name; the controller runs
+  # it as a CronJob taking a logical dump of the server into the bucket the
+  # attachment's store connection points at or, where the attachment sets
+  # infra.volume instead, onto a claim of that size the controller provisions
+  # in the same namespace. The MariaDB itself is the same with or without the
+  # attachment.
+  artifacts:
+    mariadb.yaml: |
+      apiVersion: {{ .locals.mariadb_api_version }}
+      kind: MariaDB
+      metadata:
+        name: {{ .context.instance_id }}
+        {{- $ns := "" }}
+        {{- if .context.annotations }}
+          {{- $raw := optional (optional (default dict .context.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict .context.annotations) "aggregate" dict) "aggrega.ai/namespace" "") }}
+          {{- if $raw }}{{- $ns = $raw }}{{- end }}
+        {{- end }}
+        {{- with $ns }}
+        namespace: "{{ . }}"
+        {{- end }}
+      spec:
+        {{- if .locals.replicated }}
+        replicas: {{ add1 (int .infra.ha.read_replicas) }}
+        replication:
+          enabled: true
+          primary:
+            autoFailover: {{ .infra.ha.enabled }}
+        {{- else }}
+        replicas: 1
+        {{- end }}
+        image: "mariadb:{{ .infra.engine_version }}"
+        port: {{ .infra.port }}
+        database: "{{ .values.database }}"
+        {{- if .values.user }}
+        username: "{{ .values.user }}"
+        {{- end }}
+        {{- if eq .infra.credentials "supplied" }}
+        rootPasswordSecretKeyRef:
+          name: "{{ .infra.credentials_secret }}"
+          key: root-password
+        {{- if .values.user }}
+        passwordSecretKeyRef:
+          name: "{{ .infra.credentials_secret }}"
+          key: password
+        {{- end }}
+        {{- end }}
+        storage:
+          size: "{{ .infra.storage.size }}"
+          {{- with .infra.storage.type }}
+          storageClassName: "{{ . }}"
+          {{- end }}
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+        service:
+          type: ClusterIP
+        myCnf: |
+          [mariadb]
+          character-set-server={{ .values.charset }}
+          collation-server={{ .values.collation }}
+      {{- if .values.custom_config }}
+      {{ .values.custom_config | indent 4 }}
+      {{- end }}

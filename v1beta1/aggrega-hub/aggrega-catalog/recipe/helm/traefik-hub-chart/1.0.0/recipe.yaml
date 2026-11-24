@@ -1,0 +1,1158 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: traefik-hub-chart
+  version: 1.0.0
+  description: >
+    Traefik Hub on Kubernetes via Traefik's own Helm chart, served from that
+    project's HTTPS chart repository, with the chart's Traefik Hub settings
+    and its AI gateway on. It renders the gateway's Deployment, a ClusterIP
+    Service for its plain HTTP listener, its access control and the chart's
+    custom-resource definitions; the chart's Kubernetes Ingress provider and
+    its IngressClass are off.
+
+    The image is the one infra.image names and no other, and the build halts
+    naming infra.image when it is unset or names no tag. The licence token is
+    read from the Secret the license slot names, under the data key token, and
+    the build halts on any other key. The export of the gateway's error logs
+    to Traefik's platform and its check for a newer release are both off; the
+    token check against api.traefik.io, which Traefik requires, stays.
+
+    Each model wired to the models socket gets a route at
+    /<alias>/v1/chat/completions through Traefik Hub's Chat Completion
+    middleware, written beside the chart as Traefik's own resources. Every
+    route checks the key of each caller infra.callers declares against its
+    hash, read by reference, and removes the key before forwarding.
+
+    The same file writes a core/period-budget, core/prompt-deny-patterns,
+    core/semantic-caching, core/data-masking, core/fallback-chain or
+    core/retry-policy attachment, each FeatureRecipe saying how; the first
+    four halt the build until infra.ai_gateway_entitled affirms the licence's
+    AI gateway. No build observes that the gateway enforces any of them. A
+    budget's store publishing valkey-tls or redis-tls is reached over TLS, checked against
+    the cache connection's server_ca or the system's authorities.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/gateway/traefik-hub:1.0.0
+
+  # The chart Traefik publishes for Traefik Proxy and Traefik Hub alike, the
+  # one Traefik's installation guide for Traefik Hub installs. Its chart
+  # artifact is published under the Apache-2.0 licence; the Traefik Hub image
+  # it runs is the one the Release names.
+  source:
+    kind: helm-https-chart
+    url: https://traefik.github.io/charts
+    chart: traefik
+    # Default chart version. Override via infra.source_version.
+    version: "{{ optional .infra `source_version` \"41.7.1\" }}"
+
+  # provides.host is the Service fronting the gateway — the entry point client
+  # traffic is sent to. The value mapping below pins the chart's
+  # fullnameOverride to the rendered name, the release name the helm provider
+  # gives the chart, which spells the Component's name in the alphabet a
+  # Kubernetes name allows, and the chart names its Service by that name alone,
+  # as a render of the chart shows. The name carries no namespace; a consumer
+  # in another namespace qualifies it on its own side.
+  #
+  # endpoint is the route the gateway serves for the model values.model names,
+  # under that alias in the path, on the Service name and port; model is that
+  # alias. A provides entry cannot read another, so the Service name is spelled
+  # out again and the entries are edited together. With nothing wired to the
+  # models socket values.model is omitted — the component's assertion halts on
+  # any other combination — and both are empty.
+  #
+  # metrics_endpoint is the address the gateway serves its own metrics at while
+  # values.metrics_enabled is true: /metrics on port 9100 of the Service the
+  # chart renders for them, which it names after the rendered name followed by
+  # -metrics. It is empty while the value is false, when the gateway still
+  # serves its metrics on that port of the pod and no Service carries them.
+  provides:
+    host: "{{ .context.rendered_name }}"
+    port: "{{ .infra.port }}"
+    protocol: "http"
+    endpoint: '{{ with optional .values "model" "" }}http://{{ $.context.rendered_name }}:{{ $.infra.port }}/{{ . }}/v1{{ end }}'
+    model: '{{ optional .values "model" "" }}'
+    metrics_endpoint: "{{ if .values.metrics_enabled }}http://{{ .context.rendered_name }}-metrics:9100/metrics{{ end }}"
+
+  # callers is the list infra.callers declares, joined by commas — empty with
+  # none — so the realization of the semantic cache, whose assertions read
+  # this Recipe's locals and not the gateway's infra, can tell whether the
+  # gateway authenticates its callers. It is written with the template
+  # language's own range rather than a helper function, as apisix-chart's
+  # local of the same name is.
+  #
+  # analyzer_entity_types is the list of entity types the Presidio analyzer
+  # that core/security/presidio-analyzer runs reports it recognizes in
+  # English, as a JSON list, which the realization of core/data-masking checks
+  # an attachment's entity types against. Content Guard hands the analyzer
+  # the language en, the one the analyzer's image loads a model for.
+  # DELIBERATE NEAR-DUPLICATE of the local of the same name on
+  # recipe/helm/litellm-gateway: both gateways call the same analyzer, and a
+  # Recipe's local is read by its own attachments alone, so neither can read
+  # the other's. If the analyzer's list changes, change both in the same edit.
+  #
+  # cache_server_ca_path is the directory the cache connection's server_ca
+  # Secret is mounted at in the gateway's container, written once here
+  # because the value mapping mounts it and the quota middleware's
+  # configuration names the file in it. cache_store_server_ca_path is the same
+  # for the cache_store connection's server_ca and the semantic cache.
+  locals:
+    cache_server_ca_path: /etc/traefik/cache-server-ca
+    cache_store_server_ca_path: /etc/traefik/cache-store-server-ca
+    callers: '{{ with optional .infra "callers" "" }}{{ range $i, $caller := . }}{{ if $i }}, {{ end }}{{ $caller }}{{ end }}{{ end }}'
+    analyzer_entity_types: '["CREDIT_CARD", "CRYPTO", "DATE_TIME", "EMAIL_ADDRESS", "IBAN_CODE", "IP_ADDRESS", "LOCATION", "MAC_ADDRESS", "MEDICAL_LICENSE", "NRP", "PERSON", "PHONE_NUMBER", "UK_NHS", "URL", "US_BANK_NUMBER", "US_DRIVER_LICENSE", "US_ITIN", "US_PASSPORT", "US_SSN"]'
+
+  # The catalog names no Traefik Hub image, so the Release names the one it
+  # runs; the chart's own default image is never rendered in its place. An
+  # image the Release does not name at all halts earlier, where the
+  # component's infra is checked against its schema. The image's tag and the
+  # licence's locator are checked where they are read, at the head of the
+  # value mapping. Only the licence Secret's name is written, so no token
+  # material is in the rendered output.
+  assertions:
+    image_supplied: >-
+      {{- if not (optional .infra "image" "") -}}
+      {{- fail "this realization runs the Traefik Hub image the Release supplies, because access to that image is governed by Traefik's terms and the catalog therefore names none: set infra.image to the full reference of the image the operator is entitled to pull, tag included, as in ghcr.io/traefik/traefik-hub:v3.21.2" -}}
+      {{- end -}}
+    # The AI gateway entitlement, affirmed rather than hoped for. The four
+    # Features named here are kept on this gateway through middlewares of
+    # Traefik Hub's AI gateway, an entitlement carried inside the licence the
+    # license slot names, which the build never reads; and Traefik's reference
+    # documents no behaviour for a valid token whose licence lacks the AI
+    # gateway. The compiler runs ahead of time and cannot look, so it asks the
+    # operator to affirm the entitlement and halts when any of the four is
+    # attached and nobody has. The list names every Feature this Recipe keeps
+    # through an AI gateway middleware, and grows with them. core/fallback-chain
+    # and core/retry-policy are kept through Traefik's own failover service and
+    # retry middleware, which are not the AI gateway's, so they are not on it.
+    ai_gateway_entitlement_affirmed: >-
+      {{- $ai := list -}}
+      {{- range $name, $attachment := (default dict .features) -}}
+      {{- $type := first (splitList ":" (toString $attachment.type)) -}}
+      {{- if has $type (list "core/period-budget" "core/prompt-deny-patterns" "core/semantic-caching" "core/data-masking") -}}
+      {{- $ai = append $ai (printf "%s (%s)" $name $type) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- if and $ai (not (optional .infra "ai_gateway_entitled" false)) -}}
+      {{- fail (printf "this gateway carries %s, which Traefik Hub keeps only through middlewares of its AI gateway, an entitlement carried inside the licence where no build can see it; what Traefik Hub does with a valid token whose licence lacks the AI gateway is undocumented, so the build cannot say whether such a middleware would be refused, skipped or enforced. Set infra.ai_gateway_entitled to true on this component in the Release to affirm that the licence the license slot names carries Traefik Hub's AI gateway, or remove the attachment" (join ", " $ai)) -}}
+      {{- end -}}
+
+  # This Recipe reads from infra.overrides:
+  #   service_type - string (service.spec.type; how the gateway is exposed, default ClusterIP)
+  #   requests     - { cpu: string, memory: string } (gateway resource requests)
+  #   nodeSelector - map[string]string (pod scheduling)
+  #   tolerations  - []object (pod scheduling)
+  #
+  # It reads no image override: the image is infra.image and nothing else.
+  #
+  # The chart's own defaults stay in place for what this Recipe does not set,
+  # except two that reach outside the cluster as the gateway runs, which the
+  # value mapping turns off: the export of the gateway's error logs to
+  # Traefik's platform, which the chart's hub.sendlogs documents as on by
+  # default, and the check for a newer release, which the chart's
+  # global.checkNewVersion leaves on: the catalog sends none of a Release's
+  # logs to a third party, and this Recipe reads no override turning either
+  # back on. The gateway still validates its token with Traefik at
+  # api.traefik.io, which Traefik requires.
+  #
+  # The gateway's metrics stay as the chart has them: in the Prometheus
+  # format, on the entry point `metrics`, port 9100 on every interface of the
+  # pod, at /metrics, checking no caller. While values.metrics_enabled is true
+  # the value mapping also asks the chart for its dedicated metrics Service, a
+  # ClusterIP the chart names after the rendered name followed by -metrics,
+  # carrying that port to the gateway's pods whatever type the gateway's own
+  # Service takes, so an operator exposing the gateway outside the cluster
+  # does not expose its metrics with it. The chart refuses that Service, naming
+  # the cause, for a rendered name of 50 characters or more. No entry point is
+  # marked as a default one, so Traefik also serves on `metrics` any route
+  # written without entry points, as on every entry point but its internal
+  # one, each route keeping its own middlewares; the routes this Recipe writes
+  # name the plain HTTP listener.
+  valuesMapping: |
+    {{- /* The models connections, in alias order. */}}
+    {{- $wired := list }}
+    {{- range $alias, $edge := .context.uses }}
+      {{- if eq $edge.socket "models" }}
+        {{- $wired = append $wired $alias }}
+      {{- end }}
+    {{- end }}
+    {{- /* The Secret the license slot's attachment names. Traefik's chart
+           mounts the Secret hub.token names as a directory and Traefik Hub
+           reads its token from the file the data key token becomes, so the
+           attachment has to publish a Secret's name and the data key token,
+           and nothing else is read. The chart also takes a hub.token value of
+           65 characters or more for the token itself and renders it into a
+           Secret of its own, so a Secret name that long would be written into
+           the rendered output as a token; it stops the build here. */}}
+    {{- $license := optional (optional (default dict .features) "license" dict) "provides" dict }}
+    {{- $tokenSecret := optional $license "name" "" }}
+    {{- $tokenKey := optional $license "key" "" }}
+    {{- if not (and $tokenSecret $tokenKey) }}
+    {{- fail (printf "the license slot of %q is bound to an attachment that publishes no Secret name and data key, but this realization hands Traefik Hub the name of the Secret its licence token is read from; bind the slot to core/referenced-secret, whose k8s-existing-secret realization names a Secret that already exists" .context.instance_id) }}
+    {{- end }}
+    {{- if ne $tokenKey "token" }}
+    {{- fail (printf "the license slot of %q is bound to a Secret whose published data key is %q, but Traefik Hub reads its licence token from the data key token alone; publish the key token: declare the attachment in the Aggregate with values.key set to token, since an attachment the Release alone makes publishes the key value" .context.instance_id $tokenKey) }}
+    {{- end }}
+    {{- if ge (len $tokenSecret) 65 }}
+    {{- fail (printf "the license slot of %q names the Secret %q, whose name is %d characters long, but Traefik's chart takes a hub.token value of 65 characters or more for the licence token itself and writes it into a Secret of its own; name a Secret of at most 64 characters" .context.instance_id $tokenSecret (len $tokenSecret)) }}
+    {{- end }}
+    {{- /* The image, split into the registry, repository and tag the chart
+           composes its image from, so the chart's own defaults for each never
+           reach the render: a digest after an @ is kept after the tag, which
+           the chart accepts in image.tag; a reference whose first path
+           segment names no registry host — no dot, no colon, not localhost —
+           is read as Docker Hub's, as a container runtime reads it. The tag is
+           also the gateway's version, which the chart reads for its version
+           checks from versionOverride; a reference with no tag stops the
+           build here. */}}
+    {{- $image := .infra.image }}
+    {{- $ref := regexReplaceAll `@.*$` $image "" }}
+    {{- $digest := "" }}
+    {{- if contains "@" $image }}{{ $digest = regexReplaceAll `^[^@]*@` $image "" }}{{ end }}
+    {{- $last := regexReplaceAll `^.*/` $ref "" }}
+    {{- $tag := "" }}
+    {{- if contains ":" $last }}{{ $tag = regexReplaceAll `^[^:]*:` $last "" }}{{ end }}
+    {{- if not $tag }}
+    {{- fail (printf "infra.image is %q, which names no tag, but Traefik's chart composes the gateway's image from a repository and a tag, and reads the gateway's version from the tag; name the image by its tag, as in ghcr.io/traefik/traefik-hub:v3.21.2, a digest after it where one is pinned" $image) }}
+    {{- end }}
+    {{- /* The semantic cache keeps each caller's replies apart by default from
+           Traefik Hub v3.19.11 and v3.20.6, as Traefik's reference states;
+           before them it shared one collection among every caller of a route,
+           and the chart admits releases from v3.19.3. So a core/semantic-caching
+           attachment stops the build here unless the image's tag names a
+           release at or after those, a tag that is not a plain release
+           version included. */}}
+    {{- range $cacheAttachment, $attachment := (default dict .features) }}
+      {{- if eq (first (splitList ":" (toString $attachment.type))) "core/semantic-caching" }}
+        {{- if not (and (regexMatch `^v?[0-9]+\.[0-9]+\.[0-9]+$` $tag) (semverCompare ">=3.19.11, <3.20.0 || >=3.20.6" $tag)) }}
+        {{- fail (printf "the core/semantic-caching attachment %q on %q needs a Traefik Hub release whose semantic cache keeps each caller's stored replies apart by default, which Traefik's reference states of v3.19.11 and v3.20.6 onward, an earlier release sharing one cache among every caller of a route; but infra.image is %q, whose tag %q names no such release. Name an image of Traefik Hub v3.19.11 or a later 3.19 release, or of v3.20.6 or later" $cacheAttachment $.context.instance_id $image $tag) }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- /* A fallback chain puts each model's middlewares on the service the
+           failover tries, and a retry policy sends a POST again on a reply's
+           status; Traefik Hub ships both with Traefik Proxy 3.7, from v3.20,
+           as its release notes state, and v3.19 ships Traefik Proxy 3.6, whose
+           retry takes neither setting. So either attachment stops the build
+           here unless the image's tag names a release from v3.20.0, a tag that
+           is not a plain release version included; a retry policy of one
+           attempt writes nothing and is not held to it. */}}
+    {{- range $proxyAttachment, $attachment := (default dict .features) }}
+      {{- $proxyType := first (splitList ":" (toString $attachment.type)) }}
+      {{- if or (eq $proxyType "core/fallback-chain") (and (eq $proxyType "core/retry-policy") (gt (int64 (optional (default dict $attachment.values) "max_attempts" 1)) 1)) }}
+        {{- if not (and (regexMatch `^v?[0-9]+\.[0-9]+\.[0-9]+$` $tag) (semverCompare ">=3.20.0" $tag)) }}
+        {{- fail (printf "the %s attachment %q on %q needs a Traefik Hub release that ships Traefik Proxy 3.7, whose failover service takes middlewares on each service it tries and whose retry middleware can send a POST again on a reply's status, which Traefik Hub's release notes state of v3.20 onward; but infra.image is %q, whose tag %q names no such release. Name an image of Traefik Hub v3.20.0 or later" $proxyType $proxyAttachment $.context.instance_id $image $tag) }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- $name := trimSuffix (printf ":%s" $tag) $ref }}
+    {{- $first := regexReplaceAll `/.*$` $name "" }}
+    {{- $registry := "docker.io" }}
+    {{- $repository := $name }}
+    {{- if and (contains "/" $name) (or (contains "." $first) (contains ":" $first) (eq $first "localhost")) }}
+      {{- $registry = $first }}
+      {{- $repository = trimPrefix (printf "%s/" $first) $name }}
+    {{- else if not (contains "/" $name) }}
+      {{- $repository = printf "library/%s" $name }}
+    {{- end }}
+
+    ## ── Pin the chart's resource names to the rendered name ────
+    ## Names the gateway's Service "<rendered_name>", matching provides.host.
+    fullnameOverride: "{{ .context.rendered_name }}"
+
+    ## ── The gateway image ──────────────────────────────────────
+    ## The reference infra.image names, in the three parts the chart composes
+    ## it from, so the chart renders it exactly as the Release wrote it where
+    ## that names its registry.
+    image:
+      registry: "{{ $registry }}"
+      repository: "{{ $repository }}"
+      tag: "{{ $tag }}{{ with $digest }}@{{ . }}{{ end }}"
+    versionOverride: "{{ $tag }}"
+    {{- /* The authority the quota middleware checks a period budget's store
+           against: the Secret the cache connection's server_ca names, mounted
+           whole and read-only into the gateway while a budget is attached, at
+           the path the middleware's store.redis.tls.ca names below. The
+           middleware reads the file from the gateway's own filesystem, and the
+           chart's additional volumes are how a Secret reaches it there. */}}
+    {{- /* The same for the semantic cache's store: the cache_store
+           connection's server_ca, mounted while core/semantic-caching is
+           attached, at the path the cache's vectorDB.redis.tls.ca names. */}}
+    {{- $cacheCA := "" }}
+    {{- $storeCA := "" }}
+    {{- $budgetAttached := false }}
+    {{- $cacheAttached := false }}
+    {{- range $budgetName, $attachment := (default dict .features) }}
+      {{- if eq (first (splitList ":" (toString $attachment.type))) "core/period-budget" }}{{ $budgetAttached = true }}{{ end }}
+      {{- if eq (first (splitList ":" (toString $attachment.type))) "core/semantic-caching" }}{{ $cacheAttached = true }}{{ end }}
+    {{- end }}
+    {{- range $alias, $edge := .context.uses }}
+      {{- $caProvides := optional (optional (default dict $edge.features) "server_ca" dict) "provides" dict }}
+      {{- if and $budgetAttached (eq $edge.socket "cache") (kindIs "map" $caProvides) }}{{ $cacheCA = toString (optional $caProvides "name" "") }}{{ end }}
+      {{- if and $cacheAttached (eq $edge.socket "cache_store") (kindIs "map" $caProvides) }}{{ $storeCA = toString (optional $caProvides "name" "") }}{{ end }}
+    {{- end }}
+    {{- if or .infra.image_pull_secret $cacheCA $storeCA }}
+    deployment:
+      {{- with .infra.image_pull_secret }}
+      imagePullSecrets:
+        - name: "{{ . }}"
+      {{- end }}
+      {{- if or $cacheCA $storeCA }}
+      additionalVolumes:
+      {{- end }}
+      {{- with $cacheCA }}
+        - name: cache-server-ca
+          secret:
+            secretName: "{{ . }}"
+      {{- end }}
+      {{- with $storeCA }}
+        - name: cache-store-server-ca
+          secret:
+            secretName: "{{ . }}"
+      {{- end }}
+    {{- end }}
+    {{- if or $cacheCA $storeCA }}
+    additionalVolumeMounts:
+    {{- end }}
+    {{- with $cacheCA }}
+      - name: cache-server-ca
+        mountPath: "{{ $.locals.cache_server_ca_path }}"
+        readOnly: true
+    {{- end }}
+    {{- with $storeCA }}
+      - name: cache-store-server-ca
+        mountPath: "{{ $.locals.cache_store_server_ca_path }}"
+        readOnly: true
+    {{- end }}
+
+    ## ── Traefik Hub and its AI gateway ─────────────────────────
+    ## The chart installs Traefik Hub's distribution, mounts the Secret the
+    ## license slot names and passes Traefik Hub the path of its token file,
+    ## and turns the AI gateway on. The chart writes the AI gateway's flag only
+    ## while hub.token is set, which the required license slot makes so. The
+    ## export of error logs to Traefik's platform is off.
+    hub:
+      enabled: true
+      token: "{{ $tokenSecret }}"
+      sendlogs: false
+      aigateway:
+        enabled: true
+
+    ## ── No check for a newer release ───────────────────────────
+    global:
+      checkNewVersion: false
+
+    ## ── Providers this Component does not describe ─────────────
+    ## The chart's Kubernetes Ingress provider and its IngressClass, which
+    ## would make this gateway the cluster's default class for every Ingress
+    ## naming none, are off. Its provider for Traefik's own route resources
+    ## stays on with the chart's defaults: it is the one that serves the model
+    ## routes written below. While a model is wired, it may reach a Service of
+    ## type ExternalName, which is how each model route reaches its model.
+    ingressClass:
+      enabled: false
+    providers:
+      kubernetesIngress:
+        enabled: false
+      {{- if $wired }}
+      kubernetesCRD:
+        allowExternalNameServices: true
+      {{- end }}
+
+    ## ── Listeners ──────────────────────────────────────────────
+    ## The plain HTTP listener takes infra.port as both the container port and
+    ## the Service port, so the published address and the listener move
+    ## together. The chart's TLS listener is left out of the Service, matching
+    ## the "http" this Recipe publishes; TLS is terminated outside the cluster.
+    ports:
+      web:
+        port: {{ .infra.port }}
+        exposedPort: {{ .infra.port }}
+      websecure:
+        expose:
+          default: false
+    service:
+      spec:
+        {{- if and .infra.overrides .infra.overrides.service_type }}
+        type: "{{ .infra.overrides.service_type }}"
+        {{- else }}
+        type: ClusterIP
+        {{- end }}
+    {{- if .values.metrics_enabled }}
+    metrics:
+      prometheus:
+        service:
+          enabled: true
+    {{- end }}
+
+    ## ── Gateway resources ──────────────────────────────────────
+    resources:
+      limits:
+        cpu: "{{ .infra.compute.cpu }}"
+        memory: "{{ .infra.compute.memory }}"
+      {{- if and .infra.overrides .infra.overrides.requests }}
+      requests:
+        cpu: "{{ .infra.overrides.requests.cpu }}"
+        memory: "{{ .infra.overrides.requests.memory }}"
+      {{- end }}
+
+    ## ── Scheduling overrides ───────────────────────────────────
+    {{- if .infra.overrides }}
+    {{- if .infra.overrides.nodeSelector }}
+    nodeSelector: {{ toJson .infra.overrides.nodeSelector }}
+    {{- end }}
+    {{- if .infra.overrides.tolerations }}
+    tolerations: {{ toJson .infra.overrides.tolerations }}
+    {{- end }}
+    {{- end }}
+
+  # The models the gateway serves, as Traefik's own route resources, all in the
+  # gateway's namespace — the one the Release, or else the Aggregate, declares for the component, or
+  # `default` — written into models.yaml. With nothing wired to the models
+  # socket the template writes nothing.
+  #
+  # One IngressRoute, named after the gateway with -models appended, on the
+  # chart's plain HTTP listener, holds a route per connection in alias order:
+  # a request to /<alias>/v1/chat/completions passes the connection's two
+  # Middlewares and goes to its Service. The first Middleware replaces the
+  # request's path with the endpoint's own path followed by
+  # /chat/completions, so the request reaches the model under the path it
+  # publishes. The second is Traefik Hub's Chat Completion middleware, which
+  # writes the model name the model publishes into every request in place of
+  # whatever model the request names, and, where the connection carries a
+  # credential, names the Secret the credential publishes and the data key in
+  # it in the reference form Traefik Hub reads, urn:k8s:secret:<name>:<key>,
+  # so the key is in no rendered file. A credential publishing no Secret name
+  # and data key stops the build, naming the connection.
+  #
+  # The Service, of type ExternalName, names the host of the endpoint the
+  # model publishes, and the route sends to the port the endpoint names, or
+  # the one its scheme implies, over that scheme, with the Service's host as
+  # the request's Host. A host carrying no dot is a Service name published
+  # without a namespace, which the gateway in its own namespace could not
+  # resolve, so it is qualified, as a consumer in another namespace does, with
+  # the namespace the Release, or else the Aggregate, places the model in, or `default` where it
+  # declares none: `<host>.<namespace>.svc.cluster.local`. A host carrying a
+  # dot, a managed API's included, is written as published. An endpoint that
+  # is not an absolute http or https URL, or whose host is an address, which
+  # an ExternalName Service cannot name, stops the build, naming the
+  # connection.
+  #
+  # Each connection's resources are named after the gateway and the alias, in
+  # lowercase with every underscore as a hyphen, the characters a Kubernetes
+  # name allows; an alias ending in a hyphen or an underscore, two aliases
+  # giving one name, or a name longer than the 63 characters a Service name
+  # takes stop the build, naming the connections.
+  #
+  # With callers declared in infra.callers, every route is headed by two
+  # Middlewares every connection shares. The first, named after the gateway
+  # with -callers appended, is Traefik Hub's API Key middleware: it reads the
+  # key a request presents in its Authorization header after the Bearer
+  # scheme, as an OpenAI client sends it, and matches it against one entry per
+  # caller, in the order the Release lists them, each a reference
+  # urn:k8s:secret:<Secret>:<caller> to the htpasswd hash the caller_keys
+  # Secret holds under the caller's name, which Traefik Hub reads from that
+  # Secret in the gateway's namespace, so no hash is in a rendered file. A
+  # request matching no entry is refused before anything else runs. The
+  # second, -callers-strip, is a Headers middleware setting Authorization to
+  # an empty value, which removes the header, so a caller's key never reaches
+  # a model; the Chat Completion middleware then presents the connection's own
+  # credential, where it carries one. The key check identifies the caller to
+  # the semantic cache by the SHA-256 hash of the entry it matched. With no
+  # caller declared nothing of this is written.
+  #
+  # A core/prompt-deny-patterns attachment, which
+  # prompt-deny-patterns-traefik-hub realizes and checks, is written as a
+  # Content Guard Middleware named after the gateway and the attachment with
+  # -guard appended, shared by every route and placed after the Chat
+  # Completion middleware, or, on a route a fallback chain walks, ahead of the
+  # services the walk tries, where each model's Chat Completion middleware
+  # sits: its regular-expression engine reads the request as
+  # a chat completion and refuses one a deny pattern matches, each pattern a
+  # JSON string holding exactly what the attachment wrote. It reads requests
+  # only, so a streamed reply passes as it streams. Several such attachments
+  # are written as several guards, in the order of their names.
+  #
+  # A core/semantic-caching attachment, which semantic-caching-traefik-hub
+  # realizes and checks, is written on each route as a Semantic Cache
+  # Middleware of its own, after the guards, named after the connection and
+  # the attachment with -cache appended. It keeps its replies in a collection
+  # named after the connection and the attachment, in the store on the
+  # cache_store connection, so no model is answered with a reply stored for
+  # another, and it is private — cacheControl.public false — so Traefik Hub
+  # keeps each caller's replies apart by the caller the key check identified.
+  # It embeds a request through the models connection embedding_model names:
+  # that connection's published endpoint and model, and its credential by
+  # reference where it carries one. similarity_threshold is written as
+  # maxDistance, one minus the threshold, which is the cosine distance:
+  # Traefik's reference gives the bound's direction, lower requiring closer
+  # prompts, and not its measure. ttl_seconds is the entries' lifetime. Only a
+  # store publishing vector_search is accepted on cache_store, one connection;
+  # its published host and port are the store's address, a host with no dot
+  # qualified with the store's namespace, and its credential, where it
+  # carries one, is named by reference. A store publishing valkey-tls or
+  # redis-tls is reached over TLS through the cache's vectorDB.redis.tls: its
+  # certificate is checked against the cache_store connection's server_ca,
+  # mounted into the gateway and named by tls.ca, or, with none, against the
+  # system's authorities. Traefik's reference for the cache says its Redis
+  # settings inherit the Redis client configuration, the one whose tls the
+  # quota middleware's reference documents, and which this Recipe already
+  # relies on for the cache's password; no build observes the cache's TLS.
+  # Another value served over TLS stops the build, as do a server_ca publishing
+  # no Secret name and one on a store served without TLS.
+  #
+  # A core/period-budget attachment, which period-budget-traefik-hub realizes
+  # and checks, is written as Traefik Hub's quota middleware, after the cache,
+  # so a reply the cache serves counts nothing. It counts in the store on the
+  # cache connection — one connection speaking the Redis protocol, its
+  # published host and port, its credential by reference — and reads the
+  # request as a chat completion. A store publishing valkey-tls or redis-tls is reached
+  # over TLS through the middleware's store.redis.tls: its certificate is
+  # checked against the cache connection's server_ca, mounted into the gateway
+  # and named by tls.ca, or, with none, against the system's authorities, the
+  # middleware's default. Another value served over TLS stops the build, as do
+  # a server_ca publishing no Secret name and one on a store served without
+  # TLS. Read from Traefik's published reference for the middleware. It
+  # counts the tokens a reply reports, a
+  # streamed reply's included, or prices them in US dollars from the list it
+  # ships with, as unit names. It keeps its count per value of a request
+  # header named after the attachment, X-Period-Budget- followed by the
+  # attachment's name, which a Headers Middleware placed before it, with
+  # -quota-key appended to its name, sets on every request over any value the
+  # caller sent: under scope gateway one value and one quota for the gateway,
+  # under scope model one of each per connection. The period is written in
+  # hours or days, the spellings Traefik's reference shows: hours and days as
+  # written, minutes or seconds converted where they make whole hours, and
+  # any other stops the build, as period-budget-traefik-hub refuses it first;
+  # the two are edited together.
+  #
+  # A core/data-masking attachment, which data-masking-traefik-hub realizes
+  # and checks, is written as a Content Guard Middleware named after the
+  # gateway and the attachment with -mask appended, shared by every route and
+  # placed after the deny-pattern guards, so a guard reads a request before
+  # anything of it is masked. It reads the request and the reply as a chat
+  # completion, with one rule per direction the attachment's scope names: its
+  # regular-expression engine for patterns, each a JSON string holding exactly
+  # what the attachment wrote, or its Presidio engine for entities, calling
+  # the analyzer on the pii_analyzer connection at the address it publishes,
+  # a host with no dot qualified with the analyzer's namespace, in the
+  # language en. action redact writes a mask of the character *, so a match
+  # becomes a run of that character as long as the match; refuse writes a
+  # block, which answers HTTP 403 in place of the request or the reply. One
+  # engine is written per attachment and one masking attachment per gateway,
+  # as data-masking-traefik-hub holds.
+  #
+  # A core/fallback-chain attachment, which fallback-chain-traefik-hub
+  # realizes and checks, turns the route of each alias an entry names into a
+  # walk: the alias, then its entry's fallbacks in order, each counting one
+  # fallback; a fallback's own entry is followed, before the rest of the list
+  # it came from, only while fewer than max_hops have been counted, and every
+  # alias one entry lists is placed whatever the count. An alias reached twice
+  # stops the build. The route then sends to a TraefikService named after the
+  # connection with -fallback-0 appended: a failover whose service is the
+  # walk's first model and whose fallback is the next such TraefikService, the
+  # last one's fallback being the walk's last model. Each model of a walk is
+  # tried with its own Middlewares on its service — its upstream path, its
+  # Chat Completion middleware, its quotas and the retry — so each is sent
+  # its own model name and credential, and the route keeps the key check, the
+  # guards, the masking and the cache. A reply of 429 or of 500 to 504 moves
+  # the request on; a request body larger than 1 MiB, the most the AI gateway
+  # reads of a request by default, is refused with HTTP 413. An alias no
+  # entry names keeps its route as it is.
+  #
+  # DELIBERATE NEAR-DUPLICATE of the walk computed in
+  # artifactlibrary/kong-model-routes for core/gateway/kong-enterprise: the
+  # Feature's walk is one rule, but each gateway writes it into resources of
+  # its own and a template is a string no library kind both can read holds.
+  # If the walk changes, change both in the same edit.
+  #
+  # A core/retry-policy attachment, which retry-policy-traefik-hub realizes
+  # and checks, is written as Traefik's retry middleware, named after the
+  # gateway and the attachment with -retry appended: attempts is max_attempts,
+  # since the middleware counts the first send among its attempts; it sends
+  # a request again at once after a connection that sent nothing and after a
+  # reply of 429 or of 500 to 504, a POST included. It is the last Middleware
+  # of a model route, or of each service a walk tries, so only a reply from
+  # the model is sent again, never one the gateway forms itself. max_attempts
+  # 1 writes nothing.
+  artifacts:
+    models.yaml: |
+      {{- $ns := optional (optional (default dict .context.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict .context.annotations) "aggregate" dict) "aggrega.ai/namespace" "") | default "default" }}
+      {{- $wired := list }}
+      {{- $names := dict }}
+      {{- $hosts := dict }}
+      {{- $ports := dict }}
+      {{- $schemes := dict }}
+      {{- $paths := dict }}
+      {{- range $alias, $edge := .context.uses }}
+      {{- if eq $edge.socket "models" }}
+      {{- $wired = append $wired $alias }}
+      {{- $name := printf "%s-%s" $.context.rendered_name (lower (replace "_" "-" $alias)) }}
+      {{- if hasSuffix "-" $name }}{{ fail (printf "the models connection %s of %q gives its resources the name %q, which ends in a hyphen and so is no Kubernetes name; rename the connection so its alias ends in a letter or a digit" $alias $.context.instance_id $name) }}{{ end }}
+      {{- if gt (len $name) 63 }}{{ fail (printf "the models connection %s of %q gives its Service the name %q, %d characters long, but a Service name takes at most 63; shorten the connection's alias or the component's name" $alias $.context.instance_id $name (len $name)) }}{{ end }}
+      {{- range $other, $taken := $names }}{{ if eq $taken $name }}{{ fail (printf "the models connections %s and %s of %q would each name their resources %q, because the gateway names a connection's resources after its alias in lowercase with every underscore as a hyphen; rename one of the two connections" $other $alias $.context.instance_id $name) }}{{ end }}{{ end }}
+      {{- $_ := set $names $alias $name }}
+      {{- $u := urlParse $edge.provides.endpoint }}
+      {{- if not (and (has $u.scheme (list "http" "https")) $u.host) }}{{ fail (printf "the models connection %s of %q reaches %q, whose published endpoint %q is not an absolute http or https URL, so the gateway cannot write the route it forwards to" $alias $.context.instance_id $edge.target $edge.provides.endpoint) }}{{ end }}
+      {{- $hostport := $u.host }}
+      {{- $port := ternary "443" "80" (eq $u.scheme "https") }}
+      {{- with regexFind ":[0-9]+$" $hostport }}{{ $port = trimPrefix ":" . }}{{ $hostport = trimSuffix . $hostport }}{{ end }}
+      {{- $hostname := lower (trimSuffix "]" (trimPrefix "[" $hostport)) }}
+      {{- if or (regexMatch "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$" $hostname) (contains ":" $hostname) }}{{ fail (printf "the models connection %s of %q reaches %q, whose published endpoint %q names an address, but the gateway reaches a wired model through a Service of type ExternalName, which names a host; publish an endpoint naming the server's host" $alias $.context.instance_id $edge.target $edge.provides.endpoint) }}{{ end }}
+      {{- if not (contains "." $hostname) }}
+      {{- $hostname = printf "%s.%s.svc.cluster.local" $hostname (optional (optional (default dict $edge.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict $edge.annotations) "aggregate" dict) "aggrega.ai/namespace" "") | default "default") }}
+      {{- end }}
+      {{- $_ := set $hosts $alias $hostname }}
+      {{- $_ := set $ports $alias $port }}
+      {{- $_ := set $schemes $alias $u.scheme }}
+      {{- $_ := set $paths $alias (printf "%s/chat/completions" (trimSuffix "/" $u.path)) }}
+      {{- end }}
+      {{- end }}
+      {{- /* The callers, and the AI controls attached, each in the order of
+             its attachment's name. */}}
+      {{- $callers := optional .infra "callers" list }}
+      {{- $callerSecret := "" }}
+      {{- if $callers }}
+      {{- $callerSecret = optional (optional (optional (default dict .features) "caller_keys" dict) "provides" dict) "name" "" }}
+      {{- if not $callerSecret }}{{ fail (printf "the credential attached to the caller_keys slot of %q publishes no Secret name, so the gateway's key check could not be given a reference to read its callers' key hashes from; attach core/referenced-secret-set, which publishes one" .context.instance_id) }}{{ end }}
+      {{- end }}
+      {{- $guards := list }}
+      {{- $budgets := list }}
+      {{- $cacheName := "" }}
+      {{- $masks := list }}
+      {{- $chain := dict }}
+      {{- $retryName := "" }}
+      {{- range $attachmentName, $attachment := (default dict .features) }}
+      {{- $type := first (splitList ":" (toString $attachment.type)) }}
+      {{- if eq $type "core/prompt-deny-patterns" }}{{ $guards = append $guards $attachmentName }}{{ end }}
+      {{- if eq $type "core/period-budget" }}{{ $budgets = append $budgets $attachmentName }}{{ end }}
+      {{- if eq $type "core/semantic-caching" }}{{ $cacheName = $attachmentName }}{{ end }}
+      {{- if eq $type "core/data-masking" }}{{ $masks = append $masks $attachmentName }}{{ end }}
+      {{- if eq $type "core/fallback-chain" }}{{ $chain = $attachment }}{{ end }}
+      {{- if and (eq $type "core/retry-policy") (gt (int64 $attachment.values.max_attempts) 1) }}{{ $retryName = $attachmentName }}{{ end }}
+      {{- end }}
+      {{- $retry := "" }}
+      {{- with $retryName }}{{ $retry = printf "%s-%s-retry" $.context.rendered_name (lower (replace "_" "-" .)) }}{{ end }}
+      {{- /* The analyzer a masking attachment listing entities calls: the one
+             pii_analyzer connection's published endpoint, a host with no dot
+             qualified with the namespace the Release, or else the Aggregate, places the analyzer in. */}}
+      {{- $analyzerAddress := "" }}
+      {{- $entityMasking := false }}
+      {{- range $maskName := $masks }}{{ if optional (default dict (get $.features $maskName).values) "entities" list }}{{ $entityMasking = true }}{{ end }}{{ end }}
+      {{- if $entityMasking }}
+      {{- $analyzers := list }}
+      {{- range $alias, $edge := .context.uses }}{{ if eq $edge.socket "pii_analyzer" }}{{ $analyzers = append $analyzers $edge }}{{ end }}{{ end }}
+      {{- if ne (len $analyzers) 1 }}{{ fail (printf "the pii_analyzer socket of %q holds %d connections, but the Content Guard a core/data-masking attachment listing entities is written as calls one Presidio analyzer; wire one core/security/presidio-analyzer to the pii_analyzer socket" .context.instance_id (len $analyzers)) }}{{ end }}
+      {{- $edge := first $analyzers }}
+      {{- $u := urlParse (toString $edge.provides.endpoint) }}
+      {{- if not (and (has $u.scheme (list "http" "https")) $u.host) }}{{ fail (printf "the pii_analyzer connection of %q reaches %q, whose published endpoint %q is not an absolute http or https URL, so the Content Guard could not be given the analyzer's address" .context.instance_id $edge.target (toString $edge.provides.endpoint)) }}{{ end }}
+      {{- $analyzerHost := $u.host }}
+      {{- $analyzerPort := "" }}
+      {{- with regexFind ":[0-9]+$" $analyzerHost }}{{ $analyzerPort = . }}{{ $analyzerHost = trimSuffix . $analyzerHost }}{{ end }}
+      {{- if not (contains "." $analyzerHost) }}
+      {{- $analyzerHost = printf "%s.%s.svc.cluster.local" $analyzerHost (optional (optional (default dict $edge.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict $edge.annotations) "aggregate" dict) "aggrega.ai/namespace" "") | default "default") }}
+      {{- end }}
+      {{- $analyzerAddress = printf "%s://%s%s" $u.scheme $analyzerHost $analyzerPort }}
+      {{- end }}
+      {{- /* The stores, read only while an attachment needs them. */}}
+      {{- $counterStores := list }}
+      {{- $cacheStores := list }}
+      {{- range $alias, $edge := .context.uses }}
+      {{- if eq $edge.socket "cache" }}{{ $counterStores = append $counterStores (list $alias $edge) }}{{ end }}
+      {{- if eq $edge.socket "cache_store" }}{{ $cacheStores = append $cacheStores (list $alias $edge) }}{{ end }}
+      {{- end }}
+      {{- $counterAddress := "" }}
+      {{- $counterPassword := "" }}
+      {{- $counterTLS := false }}
+      {{- $counterCA := false }}
+      {{- if $budgets }}
+      {{- if gt (len $counterStores) 1 }}{{ fail (printf "the cache socket of %q holds %d connections, but Traefik Hub's quota middleware keeps a period budget's count in one store; keep one connection on the cache socket" .context.instance_id (len $counterStores)) }}{{ end }}
+      {{- with $counterStores }}
+      {{- $alias := index (first .) 0 }}
+      {{- $edge := index (first .) 1 }}
+      {{- $protocol := toString (optional (default dict $edge.provides) "protocol" "") }}
+      {{- $counterTLS = has $protocol (list "valkey-tls" "redis-tls") }}
+      {{- if and (not $counterTLS) (hasSuffix "-tls" $protocol) }}{{ fail (printf "the cache connection %s of %q reaches %q, which publishes protocol %s, a store served over TLS that Traefik Hub's quota middleware is not taught to reach: it speaks the Redis protocol, over TLS to a store publishing valkey-tls or redis-tls; wire a Redis-protocol store to the cache socket" $alias $.context.instance_id $edge.target $protocol) }}{{ end }}
+      {{- if not (or $counterTLS (has $protocol (list "redis" "valkey"))) }}{{ fail (printf "the cache socket of %q is wired to %q, whose published protocol is %q, but Traefik Hub's quota middleware keeps a period budget's count in a store speaking the Redis protocol, which a store publishes as redis or valkey; wire a core/datastore/redis to the cache socket instead" $.context.instance_id $edge.target $protocol) }}{{ end }}
+      {{- if hasKey (default dict $edge.features) "server_ca" }}
+      {{- $caProvides := optional (optional (default dict $edge.features) "server_ca" dict) "provides" dict }}
+      {{- if not (and (kindIs "map" $caProvides) (optional $caProvides "name" "")) }}{{ fail (printf "the server_ca on the cache connection %s of %q publishes no Secret name, so no Secret could be mounted into the gateway: attach a server_ca publishing one, such as core/referenced-secret" $alias $.context.instance_id) }}{{ end }}
+      {{- if not $counterTLS }}{{ fail (printf "the cache connection %s of %q holds a server_ca, but the store it reaches, %q, publishes protocol %s, served without TLS, so no TLS handshake takes place to check a certificate in: turn client_tls on for that store, or remove the server_ca" $alias $.context.instance_id $edge.target (default "none" $protocol)) }}{{ end }}
+      {{- $counterCA = true }}
+      {{- end }}
+      {{- $host := lower (toString $edge.provides.host) }}
+      {{- if not (or (contains "." $host) (contains ":" $host)) }}
+      {{- $host = printf "%s.%s.svc.cluster.local" $host (optional (optional (default dict $edge.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict $edge.annotations) "aggregate" dict) "aggrega.ai/namespace" "") | default "default") }}
+      {{- end }}
+      {{- $counterAddress = printf "%s:%v" $host $edge.provides.port }}
+      {{- with optional (default dict $edge.features) "credential" dict }}
+      {{- $locator := optional . "provides" dict }}
+      {{- if not (and (optional $locator "name" "") (optional $locator "key" "")) }}{{ fail (printf "the credential on the cache connection %s of %q publishes no Secret name and data key, so Traefik Hub's quota middleware could not be given a reference to read the store's password from; attach a credential publishing both, such as core/referenced-secret" $alias $.context.instance_id) }}{{ end }}
+      {{- $counterPassword = printf "urn:k8s:secret:%s:%s" $locator.name $locator.key }}
+      {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- $storeAddress := "" }}
+      {{- $storePassword := "" }}
+      {{- $storeTLS := false }}
+      {{- $storeCA := false }}
+      {{- if $cacheName }}
+      {{- if gt (len $cacheStores) 1 }}{{ fail (printf "the cache_store socket of %q holds %d connections, but Traefik Hub's semantic cache keeps its replies in one store; keep one connection on the cache_store socket" .context.instance_id (len $cacheStores)) }}{{ end }}
+      {{- with $cacheStores }}
+      {{- $alias := index (first .) 0 }}
+      {{- $edge := index (first .) 1 }}
+      {{- if not (toString (optional (default dict $edge.provides) "vector_search" "")) }}{{ fail (printf "the cache_store socket of %q is wired to %q, a %s publishing no vector_search, but Traefik Hub's semantic cache stores and searches its replies with the vector search of the Redis query engine; a store without it would cache nothing while every request still succeeds. Wire a store publishing vector_search to cache_store: a core/datastore/redis on an infra.engine_version from 8.0.0 on, or one whose infra.overrides.image names an image serving that search, with infra.image_serves_vector_search: true set on it in the Release" $.context.instance_id $edge.target (first (splitList ":" (toString $edge.component)))) }}{{ end }}
+      {{- $protocol := toString (optional (default dict $edge.provides) "protocol" "") }}
+      {{- $storeTLS = has $protocol (list "valkey-tls" "redis-tls") }}
+      {{- if and (not $storeTLS) (hasSuffix "-tls" $protocol) }}{{ fail (printf "the cache_store connection %s of %q reaches %q, which publishes protocol %s, a store served over TLS that Traefik Hub's semantic cache is not taught to reach: it speaks the Redis protocol, over TLS to a store publishing valkey-tls or redis-tls; wire a Redis-protocol store to the cache_store socket" $alias $.context.instance_id $edge.target $protocol) }}{{ end }}
+      {{- if hasKey (default dict $edge.features) "server_ca" }}
+      {{- $caProvides := optional (optional (default dict $edge.features) "server_ca" dict) "provides" dict }}
+      {{- if not (and (kindIs "map" $caProvides) (optional $caProvides "name" "")) }}{{ fail (printf "the server_ca on the cache_store connection %s of %q publishes no Secret name, so no Secret could be mounted into the gateway: attach a server_ca publishing one, such as core/referenced-secret" $alias $.context.instance_id) }}{{ end }}
+      {{- if not $storeTLS }}{{ fail (printf "the cache_store connection %s of %q holds a server_ca, but the store it reaches, %q, publishes protocol %s, served without TLS, so no TLS handshake takes place to check a certificate in: turn client_tls on for that store, or remove the server_ca" $alias $.context.instance_id $edge.target (default "none" $protocol)) }}{{ end }}
+      {{- $storeCA = true }}
+      {{- end }}
+      {{- $host := lower (toString $edge.provides.host) }}
+      {{- if not (or (contains "." $host) (contains ":" $host)) }}
+      {{- $host = printf "%s.%s.svc.cluster.local" $host (optional (optional (default dict $edge.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict $edge.annotations) "aggregate" dict) "aggrega.ai/namespace" "") | default "default") }}
+      {{- end }}
+      {{- $storeAddress = printf "%s:%v" $host $edge.provides.port }}
+      {{- with optional (default dict $edge.features) "credential" dict }}
+      {{- $locator := optional . "provides" dict }}
+      {{- if not (and (optional $locator "name" "") (optional $locator "key" "")) }}{{ fail (printf "the credential on the cache_store connection %s of %q publishes no Secret name and data key, so Traefik Hub's semantic cache could not be given a reference to read the store's password from; attach a credential publishing both, such as core/referenced-secret" $alias $.context.instance_id) }}{{ end }}
+      {{- $storePassword = printf "urn:k8s:secret:%s:%s" $locator.name $locator.key }}
+      {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- /* Each budget's quotas: one for the gateway under scope gateway, one
+             per connection under scope model, each with the header it is
+             counted by and the Middleware setting it. */}}
+      {{- $quotas := list }}
+      {{- $quotasOf := dict }}
+      {{- range $alias := $wired }}{{ $_ := set $quotasOf $alias list }}{{ end }}
+      {{- range $budgetName := $budgets }}
+      {{- $budget := get $.features $budgetName }}
+      {{- $part := lower (replace "_" "-" $budgetName) }}
+      {{- $unit := toString $budget.values.unit }}
+      {{- $limitKey := get (dict "total_tokens" "totalTokenLimit" "prompt_tokens" "inputTokenLimit" "completion_tokens" "outputTokenLimit" "usd" "costLimit") $unit }}
+      {{- $limit := float64 $budget.infra.limit }}
+      {{- $limitText := ternary (toString (int64 $limit)) (toString $limit) (eq $limit (floor $limit)) }}
+      {{- $periodAuthored := toString $budget.infra.period }}
+      {{- $count := atoi (regexFind "^[0-9]+" $periodAuthored) }}
+      {{- $suffix := regexFind "[a-z]+$" $periodAuthored }}
+      {{- $period := "" }}
+      {{- if has $suffix (list "h" "d") }}{{ $period = $periodAuthored }}
+      {{- else if and (eq $suffix "m") (eq (mod $count 60) 0) }}{{ $period = printf "%dh" (div $count 60) }}
+      {{- else if and (eq $suffix "s") (eq (mod $count 3600) 0) }}{{ $period = printf "%dh" (div $count 3600) }}
+      {{- else }}{{ fail (printf "the core/period-budget attachment %q on %q asks for a period of %s, which this realization writes in hours or days, the spellings Traefik's reference shows for the quota's period, and %s makes no whole number of either; set period to a number of hours or days" $budgetName $.context.instance_id $periodAuthored $periodAuthored) }}
+      {{- end }}
+      {{- $bases := list }}
+      {{- if eq (toString $budget.values.scope) "model" }}
+      {{- range $alias := $wired }}{{ $bases = append $bases (list $alias (get $names $alias)) }}{{ end }}
+      {{- else }}
+      {{- $bases = append $bases (list "" $.context.rendered_name) }}
+      {{- end }}
+      {{- range $pair := $bases }}
+      {{- $base := index $pair 1 }}
+      {{- $quota := dict "name" (printf "%s-%s-quota" $base $part) "key" (printf "%s-%s-quota-key" $base $part) "header" (printf "X-Period-Budget-%s" $part) "bucket" (printf "%s-%s" $base $part) "limitKey" $limitKey "limit" $limitText "period" $period }}
+      {{- $quotas = append $quotas $quota }}
+      {{- if index $pair 0 }}
+      {{- $_ := set $quotasOf (index $pair 0) (append (get $quotasOf (index $pair 0)) $quota) }}
+      {{- else }}
+      {{- range $alias := $wired }}{{ $_ := set $quotasOf $alias (append (get $quotasOf $alias) $quota) }}{{ end }}
+      {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- /* The walk of each alias a core/fallback-chain entry names: the alias, then its entry's fallbacks in order,
+             each counting one fallback; a fallback's own entry is followed, before the rest of the list it came from,
+             only while fewer than max_hops have been counted, and every alias one entry lists is placed whatever the
+             count. A walk reaching an alias a second time would send the request again to a model that has already
+             failed it, which is a retry rather than a fallback, so it stops the build. Each step either places an
+             alias or finishes a list, so the walk ends within twice the number of fallbacks listed, plus two. */}}
+      {{- $walks := dict }}
+      {{- with $chain }}
+      {{- $entries := dict }}
+      {{- $listed := 0 }}
+      {{- range $entry := .values.chains }}{{ $_ := set $entries (toString $entry.alias) $entry.fallbacks }}{{ $listed = add $listed (len $entry.fallbacks) }}{{ end }}
+      {{- $maxHops := int64 .values.max_hops }}
+      {{- range $entry := .values.chains }}
+      {{- $start := toString $entry.alias }}
+      {{- if not (has $start $wired) }}{{ fail (printf "the fallback chain of %q gives an entry to %q, which names no connection on its models socket; give entries only to aliases the models socket carries: %s" $.context.instance_id $start (join ", " $wired)) }}{{ end }}
+      {{- $walk := list $start }}
+      {{- $count := 0 }}
+      {{- $stack := list $entry.fallbacks }}
+      {{- $done := false }}
+      {{- range $step := until (int (add (mul 2 $listed) 2)) }}
+      {{- if not $done }}
+      {{- if not $stack }}{{ $done = true }}
+      {{- else }}
+      {{- $top := last $stack }}
+      {{- if not $top }}{{ $stack = initial $stack }}
+      {{- else }}
+      {{- $next := toString (first $top) }}
+      {{- $stack = append (initial $stack) (rest $top) }}
+      {{- if has $next $walk }}{{ fail (printf "the fallback chain of %q has a walk from %q that reaches %q a second time, which would send the request again to a model that has already failed it, where a fallback is another model; remove %q from one of the lists leading to it" $.context.instance_id $start $next $next) }}{{ end }}
+      {{- if not (has $next $wired) }}{{ fail (printf "the fallback chain of %q has a walk from %q that reaches %q, which names no connection on its models socket; list only aliases the models socket carries: %s" $.context.instance_id $start $next (join ", " $wired)) }}{{ end }}
+      {{- $walk = append $walk $next }}
+      {{- $count = add $count 1 }}
+      {{- if and (lt $count $maxHops) (hasKey $entries $next) }}{{ $stack = append $stack (get $entries $next) }}{{ end }}
+      {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- if not $done }}{{ fail (printf "the fallback chain of %q did not finish the walk from %q" $.context.instance_id $start) }}{{ end }}
+      {{- $_ := set $walks $start $walk }}
+      {{- end }}
+      {{- end }}
+      {{- if $wired -}}
+      apiVersion: traefik.io/v1alpha1
+      kind: IngressRoute
+      metadata:
+        name: {{ .context.rendered_name }}-models
+        namespace: "{{ $ns }}"
+      spec:
+        entryPoints:
+          - web
+        routes:
+      {{- range $alias := $wired }}
+      {{- $walk := get $walks $alias }}
+          - kind: Rule
+            match: Path(`/{{ $alias }}/v1/chat/completions`)
+      {{- if or (not $walk) $callers $guards $masks $cacheName }}
+            middlewares:
+      {{- end }}
+      {{- if $callers }}
+              - name: {{ $.context.rendered_name }}-callers
+              - name: {{ $.context.rendered_name }}-callers-strip
+      {{- end }}
+      {{- if not $walk }}
+              - name: {{ get $names $alias }}-upstream-path
+              - name: {{ get $names $alias }}-chat-completion
+      {{- end }}
+      {{- range $guardName := $guards }}
+              - name: {{ $.context.rendered_name }}-{{ lower (replace "_" "-" $guardName) }}-guard
+      {{- end }}
+      {{- range $maskName := $masks }}
+              - name: {{ $.context.rendered_name }}-{{ lower (replace "_" "-" $maskName) }}-mask
+      {{- end }}
+      {{- with $cacheName }}
+              - name: {{ get $names $alias }}-{{ lower (replace "_" "-" .) }}-cache
+      {{- end }}
+      {{- if $walk }}
+            services:
+              - name: {{ get $names $alias }}-fallback-0
+                kind: TraefikService
+      {{- else }}
+      {{- range $quota := get $quotasOf $alias }}
+              - name: {{ $quota.key }}
+              - name: {{ $quota.name }}
+      {{- end }}
+      {{- with $retry }}
+              - name: {{ . }}
+      {{- end }}
+            services:
+              - name: {{ get $names $alias }}
+                port: {{ get $ports $alias }}
+                scheme: {{ get $schemes $alias }}
+                passHostHeader: false
+      {{- end }}
+      {{- end }}
+      {{- if $callers }}
+      ---
+      apiVersion: traefik.io/v1alpha1
+      kind: Middleware
+      metadata:
+        name: {{ .context.rendered_name }}-callers
+        namespace: "{{ $ns }}"
+      spec:
+        plugin:
+          apiKey:
+            keySource:
+              header: Authorization
+              headerAuthScheme: Bearer
+            secretNonBase64Encoded: true
+            secretValues:
+      {{- range $caller := $callers }}
+              - {{ printf "urn:k8s:secret:%s:%s" $callerSecret $caller | toJson }}
+      {{- end }}
+      ---
+      apiVersion: traefik.io/v1alpha1
+      kind: Middleware
+      metadata:
+        name: {{ .context.rendered_name }}-callers-strip
+        namespace: "{{ $ns }}"
+      spec:
+        headers:
+          customRequestHeaders:
+            Authorization: ""
+      {{- end }}
+      {{- range $guardName := $guards }}
+      {{- $guard := get $.features $guardName }}
+      ---
+      apiVersion: traefik.io/v1alpha1
+      kind: Middleware
+      metadata:
+        name: {{ $.context.rendered_name }}-{{ lower (replace "_" "-" $guardName) }}-guard
+        namespace: "{{ $ns }}"
+      spec:
+        plugin:
+          content-guard:
+            clientRequestFormat: ccr
+            engine:
+              regex: {}
+            request:
+              rules:
+                - block: true
+                  entities:
+      {{- range $pattern := $guard.values.deny_patterns }}
+                    - {{ $pattern | toJson }}
+      {{- end }}
+      {{- end }}
+      {{- range $maskName := $masks }}
+      {{- $mask := default dict (get $.features $maskName).values }}
+      {{- $scope := toString (optional $mask "scope" "request") }}
+      {{- $refuse := eq (toString (optional $mask "action" "redact")) "refuse" }}
+      {{- $entities := optional $mask "entities" list }}
+      ---
+      apiVersion: traefik.io/v1alpha1
+      kind: Middleware
+      metadata:
+        name: {{ $.context.rendered_name }}-{{ lower (replace "_" "-" $maskName) }}-mask
+        namespace: "{{ $ns }}"
+      spec:
+        plugin:
+          content-guard:
+            clientRequestFormat: ccr
+            engine:
+      {{- if $entities }}
+              presidio:
+                host: {{ $analyzerAddress | toJson }}
+                language: en
+      {{- else }}
+              regex: {}
+      {{- end }}
+      {{- range $direction := list "request" "response" }}
+      {{- if or (eq $scope $direction) (eq $scope "both") }}
+            {{ $direction }}:
+              rules:
+      {{- if $refuse }}
+                - block: true
+      {{- else }}
+                - mask:
+                    char: "*"
+      {{- end }}
+                  entities:
+      {{- if $entities }}
+      {{- range $entity := $entities }}
+                    - {{ $entity | toJson }}
+      {{- end }}
+      {{- else }}
+      {{- range $pattern := optional $mask "patterns" list }}
+                    - {{ $pattern.regex | toJson }}
+      {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- with $retryName }}
+      {{- $retryAttachment := get $.features . }}
+      ---
+      apiVersion: traefik.io/v1alpha1
+      kind: Middleware
+      metadata:
+        name: {{ $retry }}
+        namespace: "{{ $ns }}"
+      spec:
+        retry:
+          attempts: {{ int64 $retryAttachment.values.max_attempts }}
+          retryNonIdempotentMethod: true
+          status:
+            - "429"
+            - "500-504"
+      {{- end }}
+      {{- range $alias := $wired }}
+      {{- $walk := get $walks $alias }}
+      {{- if $walk }}
+      {{- $base := get $names $alias }}
+      {{- $last := sub (len $walk) 1 }}
+      {{- range $i, $step := $walk }}
+      {{- if lt $i $last }}
+      ---
+      apiVersion: traefik.io/v1alpha1
+      kind: TraefikService
+      metadata:
+        name: {{ $base }}-fallback-{{ $i }}
+        namespace: "{{ $ns }}"
+      spec:
+        failover:
+          service:
+            name: {{ get $names $step }}
+            port: {{ get $ports $step }}
+            scheme: {{ get $schemes $step }}
+            passHostHeader: false
+            middlewares:
+              - name: {{ get $names $step }}-upstream-path
+              - name: {{ get $names $step }}-chat-completion
+      {{- range $quota := get $quotasOf $step }}
+              - name: {{ $quota.key }}
+              - name: {{ $quota.name }}
+      {{- end }}
+      {{- with $retry }}
+              - name: {{ . }}
+      {{- end }}
+          fallback:
+      {{- if lt (add $i 1) $last }}
+            name: {{ $base }}-fallback-{{ add $i 1 }}
+            kind: TraefikService
+      {{- else }}
+      {{- $final := index $walk $last }}
+            name: {{ get $names $final }}
+            port: {{ get $ports $final }}
+            scheme: {{ get $schemes $final }}
+            passHostHeader: false
+            middlewares:
+              - name: {{ get $names $final }}-upstream-path
+              - name: {{ get $names $final }}-chat-completion
+      {{- range $quota := get $quotasOf $final }}
+              - name: {{ $quota.key }}
+              - name: {{ $quota.name }}
+      {{- end }}
+      {{- with $retry }}
+              - name: {{ . }}
+      {{- end }}
+      {{- end }}
+          errors:
+            status:
+              - "429"
+              - "500-504"
+            maxRequestBodyBytes: 1048576
+      {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- range $alias := $wired }}
+      {{- $edge := get $.context.uses $alias }}
+      {{- $name := get $names $alias }}
+      ---
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: {{ $name }}
+        namespace: "{{ $ns }}"
+      spec:
+        type: ExternalName
+        externalName: {{ get $hosts $alias | toJson }}
+        ports:
+          - port: {{ get $ports $alias }}
+      ---
+      apiVersion: traefik.io/v1alpha1
+      kind: Middleware
+      metadata:
+        name: {{ $name }}-upstream-path
+        namespace: "{{ $ns }}"
+      spec:
+        replacePath:
+          path: {{ get $paths $alias | toJson }}
+      ---
+      apiVersion: traefik.io/v1alpha1
+      kind: Middleware
+      metadata:
+        name: {{ $name }}-chat-completion
+        namespace: "{{ $ns }}"
+      spec:
+        plugin:
+          chat-completion:
+            model: {{ $edge.provides.model | toJson }}
+            allowModelOverride: false
+      {{- with optional (default dict $edge.features) "credential" dict }}
+      {{- $locator := optional . "provides" dict }}
+      {{- if not (and (optional $locator "name" "") (optional $locator "key" "")) }}{{ fail (printf "the models connection %s of %q carries a credential publishing no Secret name and data key, so the gateway could not be given a reference to read the key from; attach a credential publishing both, such as core/referenced-secret" $alias $.context.instance_id) }}{{ end }}
+            token: {{ printf "urn:k8s:secret:%s:%s" $locator.name $locator.key | toJson }}
+      {{- end }}
+      {{- with $cacheName }}
+      {{- $cache := get $.features . }}
+      {{- $part := lower (replace "_" "-" .) }}
+      {{- $embedding := get $.context.uses (toString $cache.values.embedding_model) }}
+      ---
+      apiVersion: traefik.io/v1alpha1
+      kind: Middleware
+      metadata:
+        name: {{ $name }}-{{ $part }}-cache
+        namespace: "{{ $ns }}"
+      spec:
+        plugin:
+          semantic-cache:
+            clientRequestFormat: ccr
+            cacheControl:
+              public: false
+            vectorizer:
+              openai:
+                baseURL: {{ trimSuffix "/" $embedding.provides.endpoint | toJson }}
+                model: {{ $embedding.provides.model | toJson }}
+      {{- with optional (default dict $embedding.features) "credential" dict }}
+                token: {{ printf "urn:k8s:secret:%s:%s" .provides.name .provides.key | toJson }}
+      {{- end }}
+            vectorDB:
+              redis:
+                endpoints:
+                  - {{ $storeAddress | toJson }}
+      {{- with $storePassword }}
+                password: {{ . | toJson }}
+      {{- end }}
+      {{- if $storeCA }}
+                tls:
+                  ca: {{ printf "%s/ca.crt" $.locals.cache_store_server_ca_path | toJson }}
+      {{- else if $storeTLS }}
+                tls: {}
+      {{- end }}
+                collectionName: {{ printf "%s-%s" $name $part | toJson }}
+                maxDistance: {{ round (subf 1.0 (float64 $cache.values.similarity_threshold)) 6 }}
+                ttl: {{ int64 $cache.values.ttl_seconds }}
+      {{- end }}
+      {{- end }}
+      {{- range $quota := $quotas }}
+      ---
+      apiVersion: traefik.io/v1alpha1
+      kind: Middleware
+      metadata:
+        name: {{ $quota.key }}
+        namespace: "{{ $ns }}"
+      spec:
+        headers:
+          customRequestHeaders:
+            {{ $quota.header }}: {{ $quota.bucket | toJson }}
+      ---
+      apiVersion: traefik.io/v1alpha1
+      kind: Middleware
+      metadata:
+        name: {{ $quota.name }}
+        namespace: "{{ $ns }}"
+      spec:
+        plugin:
+          ai-quota:
+            clientRequestFormat: ccr
+            store:
+              redis:
+                endpoints:
+                  - {{ $counterAddress | toJson }}
+      {{- with $counterPassword }}
+                password: {{ . | toJson }}
+      {{- end }}
+      {{- if $counterCA }}
+                tls:
+                  ca: {{ printf "%s/ca.crt" $.locals.cache_server_ca_path | toJson }}
+      {{- else if $counterTLS }}
+                tls: {}
+      {{- end }}
+            {{ $quota.limitKey }}:
+              limit: {{ $quota.limit }}
+              period: {{ $quota.period | toJson }}
+            sourceCriterion:
+              requestHeaderName: {{ $quota.header | toJson }}
+      {{- end }}
+      {{- end }}

@@ -1,0 +1,217 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: tempo-chart
+  version: 1.0.0
+  # The packaged Tempo server is AGPL-3.0.
+  license: AGPL-3.0
+  description: >
+    Grafana Tempo distributed-tracing server on Kubernetes via the
+    community-maintained Tempo Helm chart, served from that project's HTTPS chart
+    repository, in the single-binary shape this Component describes. It renders a
+    StatefulSet with a per-replica trace volume, a ClusterIP Service carrying the
+    OpenTelemetry receivers and the HTTP query API, the Headless Service the
+    StatefulSet needs, the server configuration and a ServiceAccount; the chart's
+    ingress, route, network-policy, monitoring and legacy trace-browsing UI parts
+    are left switched off. The server image and the chart version are pinned.
+    The server's own metrics, in the Prometheus format at /metrics on the HTTP
+    port 3200, which that ClusterIP Service carries, are published as
+    provides.metrics_endpoint.
+
+    What it carries that a hand-assembled workload does not is the server's
+    configuration assembled by the chart from named settings rather than a
+    hand-written file, so a key moving in a new Tempo release arrives with the
+    chart, and receivers for the Jaeger and Zipkin wire formats beside
+    OpenTelemetry, which the workload-synthesis realization does not carry.
+
+    Reach for this realization where a chart repository is reachable at build
+    time; reach for `tempo`, the workload-synthesis realization, where the build
+    must complete with nothing fetched.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/observability/tempo:1.0.0
+
+  # The chart packages Tempo in exactly the single-binary shape this Component
+  # describes — every subsystem in one process behind one Service — so the
+  # value mapping below is a configuration of that shape rather than a
+  # reduction of a larger one.
+  #
+  # What it carries that a hand-assembled workload does not is the server's
+  # whole configuration surface expressed as settings rather than as a
+  # hand-written file: retention, receivers, storage layout, query and
+  # compaction tuning are assembled by the chart from named values, so a
+  # configuration key moving in a new Tempo release arrives with the chart
+  # instead of having to be re-derived here. It also accepts spans in the
+  # Jaeger and Zipkin wire formats alongside OpenTelemetry, which the
+  # Component's own contract describes and the workload-synthesis realization
+  # does not carry; both realizations probe the server's own readiness
+  # endpoint.
+  #
+  # The server image is pinned to a resolvable release tag for reproducible
+  # renders.
+  source:
+    kind: helm-https-chart
+    url: https://grafana-community.github.io/helm-charts
+    chart: tempo
+    # Default chart version. Override via infra.source_version.
+    version: "{{ optional .infra `source_version` \"3.0.0\" }}"
+
+  # provides.host is the span-ingestion Service name, which is what the
+  # Component's provides contract promises. The valuesMapping below pins the
+  # chart's naming knobs to the rendered name, the release name the helm provider
+  # gives the chart, which spells the Component's name in the alphabet a
+  # Kubernetes name allows. This chart names that Service by the pinned name with
+  # no suffix — read from a render of the chart, not assumed, because several
+  # charts in this catalog suffix it instead. The Headless Service the
+  # StatefulSet needs for its stable network identity is the one name that does
+  # carry a suffix, and it is not the address published here.
+  #
+  # port is the OpenTelemetry gRPC receiver port. The chart derives that Service
+  # port from the receiver endpoint it writes into the server configuration, and
+  # both sides of this realization leave that endpoint at the receiver's
+  # conventional port, so the published port and the listener cannot drift apart.
+  # The Component exposes no port knob, and the workload-synthesis realization
+  # publishes the same fixed value for the same reason.
+  #
+  # A same-namespace consumer reaches the receiver under this name directly; a
+  # cross-namespace consumer qualifies it caller-side. The name carries no
+  # namespace, so the Recipe is independent of where it is deployed.
+  #
+  # metrics_endpoint is the address the server serves its own metrics at, in
+  # the Prometheus format: /metrics on its HTTP port, always on, with no
+  # credential configured for it. That port is 3200: the chart has the server
+  # listen there and puts it on the same Service as the receivers, under the
+  # port name tempo-prom-metrics, as a fixed port this mapping leaves alone, so
+  # the address is not the published host and port. It is spelled out in full
+  # on purpose: a provides entry cannot read another.
+  provides:
+    host: "{{ .context.rendered_name }}"
+    port: "4317"
+    protocol: "grpc"
+    metrics_endpoint: "http://{{ .context.rendered_name }}:3200/metrics"
+
+  # Under this configuration the chart renders a StatefulSet with a
+  # per-replica trace volume, a ClusterIP Service carrying the OpenTelemetry
+  # receivers alongside the HTTP query API, a Headless Service supplying the
+  # StatefulSet's stable network identity, a ConfigMap holding the server
+  # configuration, and the ServiceAccount the pod runs under. The chart's
+  # Ingress, gateway route, network policy and Prometheus-operator monitor are
+  # left switched off, because the Component describes none of them, and so
+  # is the chart's optional second container serving a legacy trace-browsing
+  # UI.
+  #
+  # This Recipe reads from infra.overrides:
+  #   image          - map[string]string (the chart's tempo.* image fields; overrides the tag pin)
+  #   service_type   - string (service.type; how the endpoint is exposed, default ClusterIP)
+  #   storage_class  - string (persistence.storageClassName for the trace volume)
+  #   requests       - { cpu: string, memory: string } (server resource requests)
+  #   nodeSelector   - map[string]string (pod scheduling)
+  #   tolerations    - []object (pod scheduling)
+  valuesMapping: |
+    ## ── Pin the chart's resource names to the rendered name ────
+    ## 🔴 TWO KNOBS, NOT ONE, AND THE SECOND IS THE ONE THAT IS EASY TO MISS.
+    ## fullnameOverride names the StatefulSet, both Services and the
+    ## ServiceAccount, and it is what makes provides.host resolve. But the
+    ## configuration ConfigMap is named from the chart's SHORT name instead, so
+    ## with fullnameOverride alone that one object renders as the literal chart
+    ## name — identical for every instance, and two instances in one namespace
+    ## then overwrite each other's server configuration. Read from a render of
+    ## the chart, where the ConfigMap came out named after the chart until
+    ## nameOverride was set too. The short name also feeds the
+    ## app.kubernetes.io/name label the Services select pods by, and the pods
+    ## carry the same label from the same knob, so the two agree. Both are bound
+    ## to the same rendered name, so every rendered object is named in the
+    ## alphabet a Kubernetes name allows.
+    nameOverride: "{{ .context.rendered_name }}"
+    fullnameOverride: "{{ .context.rendered_name }}"
+
+    tempo:
+      ## ── Server image pin ─────────────────────────────────────
+      ## The chart's own default tag is its application version, so leaving it
+      ## unset makes the render move whenever the chart moves. Pin it explicitly.
+      ## The registry and repository are the chart's own defaults, so the image
+      ## this realization runs is the one its chart is tested against, and it is
+      ## why the Component's engine_version says the chart-backed realization
+      ## pins its own tag. Override the whole block via infra.overrides.image,
+      ## whose keys are the chart's own image fields (registry, repository, tag,
+      ## digest, pullPolicy).
+      {{- if and .infra.overrides .infra.overrides.image }}
+      {{- range $k, $v := .infra.overrides.image }}
+      {{ $k }}: "{{ $v }}"
+      {{- end }}
+      {{- else }}
+      registry: docker.io
+      repository: grafana/tempo
+      tag: "3.0.3"
+      {{- end }}
+
+      ## ── Trace retention ──────────────────────────────────────
+      ## The developer's retention_period, which the chart renders into the
+      ## server's own block-retention setting. Stored trace blocks are deleted
+      ## once they age past it.
+      retention: "{{ .values.retention_period }}"
+
+      ## ── Server resources ─────────────────────────────────────
+      resources:
+        limits:
+          cpu: "{{ .infra.compute.cpu }}"
+          memory: "{{ .infra.compute.memory }}"
+        {{- if and .infra.overrides .infra.overrides.requests }}
+        requests:
+          cpu: "{{ .infra.overrides.requests.cpu }}"
+          memory: "{{ .infra.overrides.requests.memory }}"
+        {{- end }}
+
+    ## ── The trace store's own volume ───────────────────────────
+    ## Trace blocks and the write-ahead log live here. The chart leaves
+    ## persistence off by default, which would put the local trace store on the
+    ## pod's own filesystem; the Component describes a server backed by a
+    ## persistent volume and declares its size, so it is switched on and sized
+    ## from infra.storage. Left unset, the claim takes the cluster's default
+    ## storage class.
+    persistence:
+      enabled: true
+      size: "{{ if .infra.storage }}{{ .infra.storage.size | default "10Gi" }}{{ else }}10Gi{{ end }}"
+      {{- if and .infra.overrides .infra.overrides.storage_class }}
+      storageClassName: "{{ .infra.overrides.storage_class }}"
+      {{- end }}
+
+    ## ── Span-ingestion and query Service ───────────────────────
+    ## The Component exposes no port knob: the chart derives each Service port
+    ## from the receiver endpoint written into the server configuration, and both
+    ## are left at the receivers' conventional ports, which is what provides.port
+    ## publishes. The chart's receiver set is left at its own defaults, so this
+    ## realization additionally accepts the Jaeger and Zipkin wire formats the
+    ## Component's description names — the workload-synthesis realization carries
+    ## the OpenTelemetry receivers only.
+    service:
+      {{- if and .infra.overrides .infra.overrides.service_type }}
+      type: "{{ .infra.overrides.service_type }}"
+      {{- else }}
+      type: ClusterIP
+      {{- end }}
+
+    ## ── Chart extras this Component does not describe ──────────
+    ## The chart can also deploy an Ingress and a gateway route in front of the
+    ## query API, a network policy, a Prometheus-operator monitor, a metrics
+    ## generator writing to a remote store, and a second container serving a
+    ## legacy trace-browsing UI. The Component describes one tracing server and
+    ## none of those, so each is left at the chart's own off-by-default setting.
+    ## Leaving the second container off also keeps this realization at one image,
+    ## which is the one it pins above.
+
+    ## ── Scheduling overrides ───────────────────────────────────
+    {{- if .infra.overrides }}
+    {{- if .infra.overrides.nodeSelector }}
+    nodeSelector: {{ toJson .infra.overrides.nodeSelector }}
+    {{- end }}
+    {{- if .infra.overrides.tolerations }}
+    tolerations: {{ toJson .infra.overrides.tolerations }}
+    {{- end }}
+    {{- end }}

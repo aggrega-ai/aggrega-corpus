@@ -1,0 +1,198 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/ai-agent/agenta-web
+  version: 1.0.0
+  # metadata.license is deliberately absent, for the reason stated on
+  # core/ai-agent/agenta-api: the platform is published open-core, no single
+  # SPDX identifier covers it, and the class is carried on the
+  # component.aggrega.ai/upstream-licensing label below while the licence of the
+  # pinned artifact is named on this component's Recipe.
+  description: >
+    The browser console of an agent workspace — the front end a team builds its
+    agents on. It is where an agent is described in chat, its tools and skills
+    are connected, its permissions are set, its version history is compared, and
+    the trace of a finished run is read.
+
+    It is a server-rendered front end and holds no state. Each page it renders
+    is assembled from the control-plane API wired through the `api` socket and
+    the model-facing service wired through `services`, and the two are separate
+    sockets because they are separate services with separate addresses: agent
+    definitions and traces come from the first, a playground completion from the
+    second. Sign-in runs against the authentication core wired through
+    `auth_core`, which the front end addresses by that core's own base URL.
+
+    Wire here for the human surface. It carries no data of its
+    own, so it is the one tier of the platform that can be scaled or restarted
+    without consequence, and an Aggregate that only needs the API — automation
+    driving the platform from outside — can leave it out.
+
+    Exports its host, port, endpoint and protocol to consumers via the uses
+    topology, which is what the ingress tier routes the browser path to.
+
+    Realized on Kubernetes via its Helm Recipe, which synthesizes the front end
+    as a stateless Deployment behind a ClusterIP Service on its HTTP port. Two
+    kinds of address are emitted separately and deliberately: the in-cluster
+    Service names it calls while rendering a page, and the external base URL the
+    browser itself calls, which the operator supplies because a Service name
+    does not resolve outside the cluster.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: ai-agent
+    component.aggrega.ai/hosting: self-hosted
+    component.aggrega.ai/upstream-licensing: open-core
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  inject: [env]
+
+  usesSchema:
+    # The control-plane API every agent definition, finished run and trace is read
+    # from. Required: a console with nothing wired here renders no data at all.
+    api:
+      selector: "component.aggrega.ai/category=ai-agent"
+      inject: [env]
+      required: true
+    # The model-facing service the playground's completions and chat turns go
+    # to. Required: without it the console can edit an agent and cannot try it.
+    services:
+      selector: "component.aggrega.ai/category=ai-agent"
+      inject: [env]
+      required: true
+    # The authentication core sign-in runs against. The front end calls the
+    # core's own base URL, so the edge carries that endpoint rather than a host
+    # and port to assemble.
+    auth_core:
+      selector: "component.aggrega.ai/category=security"
+      inject: [env]
+      required: true
+      # A statement about this connection's target, authored on the connection:
+      # the authentication core it reaches takes no credential. It changes
+      # nothing this component renders.
+      valueSchema:
+        unauthenticated:
+          type: boolean
+          default: false
+          description: Declares that the authentication core this connection reaches takes no credential, so a connection carrying none is intended rather than an omission. It changes nothing this component renders.
+      # Where the authentication core's key comes from core/random-password,
+      # generated in the cluster, present it on this connection by
+      # core/referenced-secret; unattached, none is sent.
+      featuresSchema:
+        credential:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [env]
+          description: "API key presented to the authentication core this connection reaches. Where a key is attached to the core, the same one is attached here. Unattached, no key is sent."
+
+  featuresSchema:
+    # Required, with no default. A key the cluster generates is attached through
+    # core/random-password, and slots sharing it take it by core/referenced-secret.
+    auth_key:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      required: true
+      description: "Required key the platform signs its own internal tokens with. It carries the same value as the control-plane API's slot, because the tokens this front end presents are the ones that service verifies. There is no default: the build halts when nothing fills this slot."
+    # Required, with no default. A key the cluster generates is attached through
+    # core/random-password, and slots sharing it take it by core/referenced-secret.
+    crypt_key:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      required: true
+      description: "Required key stored credentials are encrypted under. It carries the same value as the control-plane API's slot. There is no default: the build halts when nothing fills this slot."
+
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      mobile_redirect_enabled:
+        type: boolean
+        default: false
+        description: Send a visitor arriving on a small screen to the mobile front end instead of rendering the full console. Turn it on only where core/ai-agent/agenta-web-mobile is also deployed and routed, since the console cannot tell whether it is.
+      allow_embedding:
+        type: boolean
+        default: false
+        description: Allow this console to be rendered inside a frame on another site. Left off, a browser refuses to frame it.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 3000
+        description: Port the front end serves on; the ingress tier connects here. Most operators should omit this and let the Recipe assign the default (3000).
+      external_base_url:
+        type: string
+        description: >
+          Externally reachable base URL of the whole platform, as a browser
+          reaches it through the ingress tier — for example
+          https://agenta.example.com. The browser calls this rather than any
+          in-cluster Service name, which does not resolve outside the cluster.
+          The compiler cannot know a cluster's external hostname, so this
+          carries no default and the Kubernetes realization halts at build until
+          it is set.
+      engine_version:
+        type: string
+        default: "v0.114.1"
+        description: Console container image tag. It tracks the same release as the rest of the platform, so a Release moves them together.
+      compute:
+        cpu:
+          type: string
+          default: 250m
+        memory:
+          type: string
+          default: 512Mi
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name of the Service serving the browser console. The
+          ingress tier points its upstream at this name rather than at any of
+          the platform's API tiers.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port that Service serves the console on. It follows the port an
+          operator set in the Release, so the ingress tier reads it rather
+          than assuming a default.
+      endpoint:
+        type: string
+        required: true
+        description: >
+          Full in-cluster base URL of the console, with the host and the port
+          already composed. It is the upstream a gateway forwards browser
+          traffic to, not the address a browser types.
+      protocol:
+        type: string
+        description: URL scheme to reach `host` and `port` over, for a consumer composing its own address rather than reading `endpoint`.
+
+  # A connection to a target its catalog labels a managed service
+  # (component.aggrega.ai/hosting: managed) carries a credential, or says on the
+  # connection that its target takes none. The rule reads the target's labels,
+  # the connection's unauthenticated value and its credential slot, all known
+  # before a Recipe binds, so it holds whichever Recipe renders this component;
+  # a self-hosted target draws nothing. The list names every socket of this
+  # component that declares unauthenticated.
+  assertions:
+    managed_target_needs_a_credential: >-
+      {{- range $socket := list "auth_core" -}}
+      {{- range $alias, $connection := (optional $.uses $socket dict) -}}
+      {{- $managed := eq (optional $connection.labels "component.aggrega.ai/hosting" "") "managed" -}}
+      {{- $optedOut := optional $connection.values "unauthenticated" false -}}
+      {{- if and $managed (not (hasKey $connection.features "credential")) (not $optedOut) -}}
+      {{- fail (printf "the %s connection %s of %q reaches %q, whose component.aggrega.ai/hosting label is managed, with no credential: attach one under credential on that connection, or set unauthenticated: true in its values" $socket $alias $.metadata.instance_id $connection.target) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- end -}}

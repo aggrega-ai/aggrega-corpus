@@ -1,0 +1,174 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: mariadb-bitnami
+  version: 1.0.0
+  description: >
+    MariaDB via Bitnami Helm chart (bitnami/mariadb).
+    Default chart version in source.version: Override via infra.source_version.
+    The synthesized helm Recipe (helm/mariadb), which runs the official upstream
+    mariadb image directly with no external chart, is the preferred path for
+    this database. Choose this sourced Recipe where what the chart adds is
+    wanted: read replicas through infra.ha, a metrics exporter, and image,
+    resource-request, scheduling and Service-type overrides through
+    infra.overrides. Unlike the synthesized Recipe, it needs the chart's OCI
+    registry to be reachable to fetch the chart.
+  maintainers:
+    - name: "Massimiliano Ferrero"
+      email: "m.ferrero@cognitio.it"
+spec:
+  capability: helm
+  implements: core/datastore/mariadb:1.0.0
+
+  source:
+    kind: helm-oci-chart
+    url: oci://registry-1.docker.io/bitnamicharts/mariadb
+    # Default chart version. Override via infra.source_version.
+    version: "{{ optional .infra `source_version` \"25.0.8\" }}"
+
+  locals:
+    primary_compute: "mariadb"
+    # Black-Box: the credential filling the root_password slot generates a
+    # K8s Secret and publishes its name. The Bitnami chart reads that name
+    # via auth.existingSecret below — the recipe references the producer's
+    # published name rather than re-deriving it, so the two never drift.
+
+  # host is the chart's primary Service. The valuesMapping pins the chart's
+  # fullnameOverride to the rendered name — the release name the helm provider
+  # gives the chart, which spells the Component's name in the alphabet a
+  # Kubernetes name allows — followed by the chart's own "-mariadb" suffix, so
+  # the primary Service is "<rendered_name>-mariadb" and host is built from the
+  # same key and suffix.
+  provides:
+    host: "{{ .context.rendered_name }}-mariadb"
+    port: "{{ .infra.port }}"
+    # user and database are part of core/datastore/mariadb's declared
+    # schema.provides contract, so this realizer publishes them from the
+    # developer's own values — the same keys the standard-library mariadb
+    # Recipe publishes. A realizer that omits a declared key halts.
+    user: "{{ .values.user }}"
+    database: "{{ .values.database }}"
+    protocol: "mariadb"
+
+  valuesMapping: |
+    ## ── Pin the chart's resource names to the rendered name ────
+    ## Names the primary Service "<rendered_name>-mariadb", matching
+    ## provides.host. Every object the chart emits derives its name from this
+    ## key, read from a render rather than assumed.
+    fullnameOverride: "{{ .context.rendered_name }}-mariadb"
+
+    ## ── Image overrides ────────────────────────────────────────
+    {{- if .infra.overrides }}
+    {{- if .infra.overrides.image }}
+    image:
+      {{- range $k, $v := .infra.overrides.image }}
+      {{ $k }}: "{{ $v }}"
+      {{- end }}
+    {{- end }}
+    {{- if .infra.overrides.volume_permissions_image }}
+    volumePermissions:
+      image:
+        {{- range $k, $v := .infra.overrides.volume_permissions_image }}
+        {{ $k }}: "{{ $v }}"
+        {{- end }}
+    {{- end }}
+    {{- if .infra.overrides.global_storage_class }}
+    global:
+      storageClass: "{{ .infra.overrides.global_storage_class }}"
+    {{- end }}
+    {{- end }}
+
+    ## ── Authentication (Black-Box) ─────────────────────────────
+    auth:
+      database: "{{ .values.database }}"
+      {{- if hasKey (default dict (default dict (default dict .features).root_password).provides) "name" }}
+      existingSecret: "{{ .features.root_password.provides.name }}"
+      {{- end }}
+      {{- if .values.user }}
+      username: "{{ .values.user }}"
+      usePasswordFiles: true
+      {{- end }}
+
+    ## ── Primary ────────────────────────────────────────────────
+    primary:
+      {{- if .values.custom_config }}
+      configuration: |-
+        {{ .values.custom_config | nindent 8 }}
+      {{- end }}
+
+      resources:
+        limits:
+          cpu: "{{ .infra.compute.cpu }}"
+          memory: "{{ .infra.compute.memory }}"
+        {{- if .infra.overrides }}
+        {{- if .infra.overrides.requests }}
+        requests:
+          cpu: "{{ .infra.overrides.requests.cpu }}"
+          memory: "{{ .infra.overrides.requests.memory }}"
+        {{- end }}
+        {{- end }}
+
+      persistence:
+        enabled: true
+        size: "{{ .infra.storage.size }}"
+        storageClass: "{{ .infra.storage.type }}"
+        accessModes:
+          - ReadWriteOnce
+
+      {{- if .infra.overrides }}
+      {{- if .infra.overrides.nodeSelector }}
+      nodeSelector: {{ toJson .infra.overrides.nodeSelector }}
+      {{- end }}
+      {{- if .infra.overrides.tolerations }}
+      tolerations: {{ toJson .infra.overrides.tolerations }}
+      {{- end }}
+      {{- if .infra.overrides.affinity }}
+      affinity: {{ toJson .infra.overrides.affinity }}
+      {{- end }}
+      {{- if .infra.overrides.service_type }}
+      service:
+        type: "{{ .infra.overrides.service_type }}"
+      {{- end }}
+      {{- end }}
+
+    ## ── Init scripts ───────────────────────────────────────────
+    {{- if .values.init_scripts }}
+    initdbScripts:
+      {{- range $name, $sql := .values.init_scripts }}
+      {{ $name }}: |
+        {{ $sql | nindent 8 }}
+      {{- end }}
+    {{- end }}
+
+    ## ── Secondary (HA) ─────────────────────────────────────────
+    secondary:
+      {{- if and .infra.ha.enabled (gt (int .infra.ha.read_replicas) 0) }}
+      replicaCount: {{ .infra.ha.read_replicas }}
+      resources:
+        limits:
+          cpu: "{{ .infra.compute.cpu }}"
+          memory: "{{ .infra.compute.memory }}"
+      persistence:
+        enabled: true
+        size: "{{ .infra.storage.size }}"
+        storageClass: "{{ .infra.storage.type }}"
+      {{- else }}
+      replicaCount: 0
+      {{- end }}
+
+    ## ── Metrics ────────────────────────────────────────────────
+    {{- if .infra.overrides }}
+    {{- if .infra.overrides.metrics }}
+    metrics:
+      enabled: true
+      {{- if .infra.overrides.metrics.image }}
+      image:
+        {{- range $k, $v := .infra.overrides.metrics.image }}
+        {{ $k }}: "{{ $v }}"
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- end }}

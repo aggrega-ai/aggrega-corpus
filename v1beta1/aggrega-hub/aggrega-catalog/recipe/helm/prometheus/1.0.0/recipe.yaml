@@ -1,0 +1,479 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: prometheus
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    Prometheus metrics server on Kubernetes via the helm provider's Workload
+    synthesis, running the official prom/prometheus image with no external
+    chart. It renders a StatefulSet with a data volume for the time-series
+    database, a Headless Service, and a ClusterIP Service for queries. Each
+    connection on the `scrape_target` uses-socket becomes one job in a minimal
+    prometheus.yml the container writes at start-up, its label and cadence set
+    by the connection's own `values`. A target publishing `metrics_endpoint`
+    is scraped at that address, its host qualified with the target's
+    namespace where that differs from Prometheus's. A target publishing
+    `metrics_service` or `metrics_pod_selector` is discovered from the
+    cluster instead, in the namespace its connection's `aggrega.ai/namespace`
+    annotation names, or in every namespace for KEDA and Knative Serving;
+    while one is, the server runs under a ServiceAccount of its own, granted
+    read access where it discovers, and the build halts when Prometheus
+    declares no namespace. A target publishing none halts the build.
+
+    A connection's `credential` is mounted as a file, by reference, and its
+    job presents it as a bearer token. With `infra.external_base_url` set,
+    the server takes it as its external URL and is kept serving at its root.
+    With `values.otlp_receiver` true, it also runs the OTLP receiver and
+    publishes its address as provides.otlp_http_endpoint. Reach for this
+    realization where the build must complete with nothing fetched; reach for
+    `prometheus-chart` where the server is also expected to scrape whatever
+    the cluster advertises through scrape annotations.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/observability/prometheus:1.0.0
+  # This Recipe reads no infra.overrides keys.
+  #
+  # provides.host is the bare Service name "<rendered_name>-default" — the helm
+  # provider names the synthesized ClusterIP Service "<rendered_name>-<service-key>"
+  # (here "<rendered_name>-default"), with no namespace segment. A same-namespace
+  # consumer reaches it under this name directly; a cross-namespace consumer
+  # qualifies it with the target namespace caller-side.
+  #
+  # otlp_http_endpoint is the OTLP receiver's base address on that Service and
+  # port while values.otlp_receiver is true — the server serves its receiver
+  # at /api/v1/otlp/v1/metrics, and an OTLP exporter appends /v1/metrics to
+  # this base itself — and empty while it is false, when the server serves no
+  # receiver. The address is spelled out in full on purpose: a provides entry
+  # cannot read another.
+  #
+  # metrics_endpoint is where the server serves its own metrics: /metrics on
+  # that Service and port, always on, asking no credential.
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ .infra.port }}"
+    protocol: "http"
+    otlp_http_endpoint: "{{ if .values.otlp_receiver }}http://{{ .context.rendered_name }}-default:{{ .infra.port }}/api/v1/otlp{{ end }}"
+    metrics_endpoint: "http://{{ .context.rendered_name }}-default:{{ .infra.port }}/metrics"
+  # ── Where each target is scraped ────────────────────────────────────────
+  # A connection's target publishes where its metrics are in one of three
+  # ways, and the job its connection becomes follows what it publishes:
+  #   - metrics_endpoint, the full address: a static job on its scheme, its
+  #     path, and its host and port as the target. A host carrying no dot is
+  #     a Service in the target's own namespace, so where the connection's
+  #     aggrega.ai/namespace annotation names one other than Prometheus's the
+  #     host is qualified with it, caller-side, as
+  #     <host>.<namespace>.svc.cluster.local; a host already carrying its
+  #     namespace, and one whose target declares none, is used as published;
+  #   - metrics_service, metrics_service_port and metrics_path: metrics served
+  #     by every pod behind a Service the product already has (a server above
+  #     one replica, among others). The job takes the endpointslice role and
+  #     keeps the endpoints of the Services named — a comma-separated list,
+  #     written as an alternation — on the Service port named;
+  #   - metrics_pod_selector, metrics_pod_port and metrics_path: metrics on
+  #     pods no Service carries. The job takes the pod role with the selector
+  #     passed to the cluster as written, keeps the container port named, and
+  #     keeps only pods that are running.
+  # The build halts, naming the target, where it publishes none of the three;
+  # an address beside a discovery fact, or both discovery kinds; a discovery
+  # fact without its port name or its path; or an address that is not an http
+  # or https URL naming a host, or that carries a query string, a fragment or
+  # a user name. Every job keeps the connection's job_name (the alias when it
+  # sets none) and scrape_interval and requests the path the target publishes;
+  # a discovery job labels each series with the namespace and pod it came
+  # from.
+  #
+  # A connection carrying a credential is scraped with it: the attachments on
+  # the main container mount the Secret it publishes as a file, numbered from
+  # 0 in the alphabetical order of the aliases, under
+  # /etc/prometheus/scrape-credentials/<n>/, and the connection's job reads
+  # it through authorization's credentials_file, as a Bearer credential —
+  # static and discovered jobs alike. The configuration names only the file.
+  # A credential publishing no Secret name and data key halts the build, and
+  # so does a connection carrying none to a target publishing
+  # metrics_credential_required true, each naming what it names. A connection
+  # to OpenBao (core/security/openbao) also sends the request parameter
+  # format=prometheus, which OpenBao reads to answer in the Prometheus format.
+  #
+  # The namespace a job discovers in is the one the connection's target is
+  # placed in: its aggrega.ai/namespace annotation, read on the connection
+  # (caller-side, the way a cross-namespace consumer qualifies a host). Two
+  # products run once per cluster in a namespace of their own choosing, which
+  # the annotation does not move: KEDA (core/compute/keda) and Knative Serving
+  # (core/compute/knative-serving). Their connections are recognised by the
+  # Component the target is, and their jobs discover in every namespace, which
+  # the product's own fixed labels and Service names keep unambiguous.
+  #
+  # Discovery reads the cluster's API, so while at least one job discovers the
+  # server runs under a ServiceAccount of its own, and discovery-rbac.yaml
+  # below grants it get, list and watch on pods, services, endpoints and
+  # endpointslices: a Role and RoleBinding in each namespace a job discovers
+  # in, and a ClusterRole and ClusterRoleBinding only while KEDA or Knative
+  # Serving is discovered. A binding names the ServiceAccount together with
+  # Prometheus's own namespace, so the build halts when Prometheus declares
+  # none; and a target declaring no namespace while Prometheus declares one
+  # leaves the job nowhere to look, so it halts too, naming both. With no
+  # target discovered, none of this is rendered: no ServiceAccount, no grant.
+  # The workload below and that artifact each read the published facts on
+  # their own, since one template cannot read what another computed; the
+  # halts live in the workload alone.
+  workload: |
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # form: stateful selects a StatefulSet on the helm provider; the
+    # persistentTemplate volume below is a companion of this form (rendered as a
+    # volumeClaimTemplate), and the Headless service supplies the StatefulSet's
+    # stable network identity.
+    form: stateful
+    replicas: 1
+    {{- $promNs := optional (optional (default dict .context.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict .context.annotations) "aggregate" dict) "aggrega.ai/namespace" "") }}
+    {{- $discovered := "" }}
+    {{- $credentials := list }}
+    {{- range $alias, $edge := .context.uses }}
+    {{- if eq $edge.socket "scrape_target" }}
+    {{- $p := default dict $edge.provides }}
+    {{- if and (not $discovered) (or (optional $p "metrics_service" "") (optional $p "metrics_pod_selector" "")) }}
+    {{- $discovered = $edge.target }}
+    {{- end }}
+    {{- if hasKey (default dict $edge.features) "credential" }}
+    {{- $credentials = append $credentials $alias }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- if $discovered }}
+    {{- if not $promNs }}
+    {{- fail (printf "%q discovers the metrics of %q from the cluster, under a ServiceAccount of its own granted read access there, and that grant names the ServiceAccount together with Prometheus's namespace, but %q declares no namespace; declare the annotation aggrega.ai/namespace on %q in the Release" .context.instance_id $discovered .context.instance_id .context.instance_id) }}
+    {{- end }}
+    # Runs under the ServiceAccount discovery-rbac.yaml declares and grants.
+    serviceAccount: "{{ .context.rendered_name }}"
+    {{- end }}
+    containers:
+      main:
+        image: "prom/prometheus:{{ .infra.engine_version }}"
+        # Every component wired on the `scrape_target` socket becomes one scrape
+        # job, on the label and cadence the connection sets: a static job on the
+        # metrics_endpoint the target publishes, or, where it publishes a
+        # discovery fact, a job discovering its endpoints or pods from the
+        # cluster, as the comment above this workload describes. A connection
+        # carrying a credential adds the bearer credential its job reads from
+        # the file the attachments below mount. The rendered prometheus.yml is
+        # written at start-up, then Prometheus is exec'd against it with the
+        # time-series database on the data volume.
+        # With infra.external_base_url set, --web.external-url carries it, the
+        # base of every link the server writes back to itself. The server would
+        # otherwise also move every endpoint under that address's path, so
+        # --web.route-prefix=/ keeps it serving at its root: the probes below
+        # and every consumer composing its address from provides reach it
+        # there. Unset, neither flag is emitted.
+        # With values.otlp_receiver true, --web.enable-otlp-receiver turns on the
+        # receiver for metrics pushed over OTLP, at /api/v1/otlp/v1/metrics on
+        # the same port; it checks no caller. False, the flag is not emitted.
+        command:
+          - /bin/sh
+          - -c
+          - |-
+            cat > /tmp/prometheus.yml <<'EOF'
+            global: {}
+            scrape_configs:
+            {{- range $alias, $edge := .context.uses }}
+            {{- if eq $edge.socket "scrape_target" }}
+            {{- $v := default (dict) $edge.values }}
+            {{- /* job_name keeps a template fallback because its default is the
+                   edge alias — per-edge context, which no static value in the
+                   socket's valueSchema can express. Leave it here.
+                   scrape_interval takes its default from that valueSchema, so
+                   it reads the edge value directly and this template holds no
+                   second copy of it. */}}
+            {{- $p := default (dict) $edge.provides }}
+            {{- $svc := optional $p "metrics_service" "" }}
+            {{- $sel := optional $p "metrics_pod_selector" "" }}
+            {{- $endpoint := toString (optional $p "metrics_endpoint" "") }}
+            {{- if and $svc $sel }}
+            {{- fail (printf "%q is wired to %q on its scrape_target socket and publishes both metrics_service (%q) and metrics_pod_selector (%q); Prometheus discovers a target either through its Service or through its pods, so the target's Recipe publishes one of the two and leaves the other empty" $edge.target $.context.instance_id $svc $sel) }}
+            {{- end }}
+            {{- if and (or $svc $sel) $endpoint }}
+            {{- fail (printf "%q is wired to %q on its scrape_target socket and publishes both metrics_endpoint (%q) and a fact Prometheus discovers it by (%q); a target says where it serves metrics in one of the two ways, so the target's Recipe publishes one and leaves the other empty" $edge.target $.context.instance_id $endpoint (default $sel $svc)) }}
+            {{- end }}
+            {{- if not (or $svc $sel $endpoint) }}
+            {{- fail (printf "%q is wired to %q on its scrape_target socket but publishes none of metrics_endpoint, metrics_service and metrics_pod_selector, so there is nowhere to scrape it: a target publishes where it serves metrics only while it serves them, some only while a value such as metrics_enabled turns them on; turn its metrics on, or remove the connection" $edge.target $.context.instance_id) }}
+            {{- end }}
+            {{- /* A target answering its metrics only to a scrape presenting a
+                   credential says so; the connection then carries one, which
+                   the attachments below mount and the job reads as a file. */}}
+            {{- $features := default dict $edge.features }}
+            {{- if and (eq (toString (optional $p "metrics_credential_required" false)) "true") (not (hasKey $features "credential")) }}
+            {{- fail (printf "%q is wired to %q on its scrape_target socket and publishes metrics_credential_required true, so it answers its metrics only to a scrape presenting a credential, but the connection carries none; attach one under credential on that connection" $edge.target $.context.instance_id) }}
+            {{- end }}
+            {{- $credentialFile := "" }}
+            {{- with optional $features "credential" dict }}
+            {{- $locator := optional . "provides" dict }}
+            {{- if not (and (optional $locator "name" "") (optional $locator "key" "")) }}
+            {{- fail (printf "the credential on the scrape_target connection %s of %q publishes no Secret name and data key, so there is no Secret to mount as the file the scrape job reads; attach a credential publishing both, such as core/referenced-secret" $alias $.context.instance_id) }}
+            {{- end }}
+            {{- $n := 0 }}
+            {{- range $i, $a := $credentials }}{{ if eq $a $alias }}{{ $n = $i }}{{ end }}{{ end }}
+            {{- $credentialFile = printf "/etc/prometheus/scrape-credentials/%d/%s" $n $locator.key }}
+            {{- end }}
+            {{- if or $svc $sel }}
+            {{- $fact := "metrics_pod_selector" }}{{ $portFact := "metrics_pod_port" }}{{ $found := $sel }}
+            {{- if $svc }}{{ $fact = "metrics_service" }}{{ $portFact = "metrics_service_port" }}{{ $found = $svc }}{{ end }}
+            {{- $port := optional $p $portFact "" }}
+            {{- $path := optional $p "metrics_path" "" }}
+            {{- if not (and $port $path) }}
+            {{- fail (printf "%q is wired to %q on its scrape_target socket and publishes %s %q, but its %s is %q and its metrics_path %q; Prometheus keeps what it discovers on that port name and requests that path, so the target's Recipe publishes all three" $edge.target $.context.instance_id $fact $found $portFact $port $path) }}
+            {{- end }}
+            {{- $everywhere := has $edge.component (list "core/compute/keda" "core/compute/knative-serving") }}
+            {{- $ns := optional (optional (default dict $edge.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict $edge.annotations) "aggregate" dict) "aggrega.ai/namespace" "") }}
+            {{- if and (not $everywhere) (not $ns) }}
+            {{- fail (printf "%q is placed in namespace %q and discovers the metrics of %q from the cluster, but %q declares no namespace, so there is no namespace to discover it in; declare the annotation aggrega.ai/namespace on %q in the Release" $.context.instance_id $promNs $edge.target $edge.target $edge.target) }}
+            {{- end }}
+              - job_name: {{ default $alias (get $v "job_name") }}
+                scrape_interval: {{ get $v "scrape_interval" }}
+                metrics_path: {{ $path | toJson }}
+            {{- with $credentialFile }}
+                authorization:
+                  type: Bearer
+                  credentials_file: {{ . | toJson }}
+            {{- end }}
+            {{- if eq $edge.component "core/security/openbao" }}
+                params:
+                  format: [prometheus]
+            {{- end }}
+                kubernetes_sd_configs:
+                  - role: {{ if $svc }}endpointslice{{ else }}pod{{ end }}
+            {{- if not $everywhere }}
+                    namespaces:
+                      names:
+                        - {{ $ns | toJson }}
+            {{- end }}
+            {{- if $sel }}
+                    selectors:
+                      - role: pod
+                        label: {{ $sel | toJson }}
+            {{- end }}
+                relabel_configs:
+            {{- if $svc }}
+            {{- $names := list }}
+            {{- range splitList "," $svc }}{{ $names = append $names (trim .) }}{{ end }}
+                  - source_labels: [__meta_kubernetes_service_name]
+                    regex: {{ join "|" $names | toJson }}
+                    action: keep
+                  - source_labels: [__meta_kubernetes_endpointslice_port_name]
+                    regex: {{ $port | toJson }}
+                    action: keep
+            {{- else }}
+                  - source_labels: [__meta_kubernetes_pod_container_port_name]
+                    regex: {{ $port | toJson }}
+                    action: keep
+                  - source_labels: [__meta_kubernetes_pod_phase]
+                    regex: Running
+                    action: keep
+            {{- end }}
+                  - source_labels: [__meta_kubernetes_namespace]
+                    target_label: namespace
+                  - source_labels: [__meta_kubernetes_pod_name]
+                    target_label: pod
+            {{- else }}
+            {{- $u := urlParse $endpoint }}
+            {{- if or $u.query $u.fragment $u.userinfo }}
+            {{- fail (printf "%q is wired to %q on its scrape_target socket and publishes a metrics_endpoint carrying a query string, a fragment or a user name, which a scrape job takes from no address: Prometheus requests a path and sends its parameters apart from it, and a credential reaches it on the connection's credential slot; the target's Recipe publishes the scheme, host, port and path alone" $edge.target $.context.instance_id) }}
+            {{- end }}
+            {{- if not (and (has $u.scheme (list "http" "https")) $u.host) }}
+            {{- fail (printf "%q is wired to %q on its scrape_target socket and publishes metrics_endpoint %q, which is not an http or https URL naming a host, so Prometheus has no address to scrape; the target's Recipe publishes the full address, such as http://<host>:<port>/metrics" $edge.target $.context.instance_id $endpoint) }}
+            {{- end }}
+            {{- /* The host as published, its port split off. On Kubernetes a host
+                   carrying no dot (and no colon, as an address would) names a
+                   Service in the target's own namespace, so it is qualified
+                   caller-side with the namespace the connection's
+                   aggrega.ai/namespace annotation names, where that differs from
+                   Prometheus's own; a host already carrying its namespace is
+                   left as published, and so is one whose target declares no
+                   namespace. */}}
+            {{- $host := $u.host }}
+            {{- $portSuffix := "" }}
+            {{- with regexFind ":[0-9]+$" $host }}{{ $portSuffix = . }}{{ $host = trimSuffix . $host }}{{ end }}
+            {{- $ns := optional (optional (default dict $edge.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict $edge.annotations) "aggregate" dict) "aggrega.ai/namespace" "") }}
+            {{- if and $ns (ne $ns $promNs) (not (contains "." $host)) (not (contains ":" $host)) }}
+            {{- $host = printf "%s.%s.svc.cluster.local" $host $ns }}
+            {{- end }}
+              - job_name: {{ default $alias (get $v "job_name") }}
+                scrape_interval: {{ get $v "scrape_interval" }}
+                scheme: {{ $u.scheme }}
+                metrics_path: {{ default "/" $u.path | toJson }}
+            {{- with $credentialFile }}
+                authorization:
+                  type: Bearer
+                  credentials_file: {{ . | toJson }}
+            {{- end }}
+            {{- if eq $edge.component "core/security/openbao" }}
+                params:
+                  format: [prometheus]
+            {{- end }}
+                static_configs:
+                  - targets:
+                      - {{ printf "%s%s" $host $portSuffix | toJson }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            EOF
+            exec /bin/prometheus --config.file=/tmp/prometheus.yml --storage.tsdb.path=/prometheus --web.listen-address=0.0.0.0:{{ .infra.port }}{{ if .values.otlp_receiver }} --web.enable-otlp-receiver{{ end }}{{ with .infra.external_base_url }} '--web.external-url={{ . }}' --web.route-prefix=/{{ end }}
+        ports:
+          http: {{ .infra.port }}
+        # Prometheus reports readiness at /-/ready, which answers once the
+        # server can respond to queries, and health at /-/healthy, which always
+        # answers while the server runs. The timings are the ones the product's
+        # own chart gives these probes.
+        health:
+          ready:
+            http: /-/ready
+            initialDelaySeconds: 30
+            periodSeconds: 5
+            timeoutSeconds: 4
+            failureThreshold: 3
+          live:
+            http: /-/healthy
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+        volumeMounts:
+          - name: data
+            path: /prometheus
+        {{- /* One file mount per connection carrying a credential, numbered
+               from 0 in the alphabetical order of the aliases, as each scrape
+               job above numbers its file. The whole Secret the credential
+               publishes is mounted, so the file is named by the data key it
+               publishes and Kubernetes keeps it current; the scrape job reads
+               it on every scrape. */}}
+        {{- if $credentials }}
+        attachments:
+        {{- range $n, $alias := $credentials }}
+          scrape-credential-{{ $n }}:
+            connection: {{ $alias | toJson }}
+            from: credential
+            as: file
+            path: /etc/prometheus/scrape-credentials/{{ $n }}
+        {{- end }}
+        {{- end }}
+    volumes:
+      data:
+        persistentTemplate:
+          size: "{{ if .infra.storage }}{{ .infra.storage.size | default "8Gi" }}{{ else }}8Gi{{ end }}"
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          http: {{ .infra.port }}
+      headless:
+        type: Headless
+        ports:
+          http: {{ .infra.port }}
+  # The identity and the read access discovery runs under, rendered only while
+  # at least one connection's target is discovered; with none the body is empty
+  # and no file is emitted. The provider places no artifact in a namespace, so
+  # every document writes its own: the ServiceAccount in Prometheus's
+  # namespace, each Role and RoleBinding in the namespace a job discovers in.
+  #
+  # The grants are named "<rendered_name>-<Prometheus's namespace>". The
+  # rendered name keeps two Prometheus components of one Release apart, as the
+  # rest of this Recipe's objects are kept; the namespace keeps apart two
+  # installations of one Aggregate placed in two namespaces of one cluster,
+  # which share every rendered name and would otherwise write one ClusterRole,
+  # or one Role in a namespace both discover in, over the other's.
+  artifacts:
+    discovery-rbac.yaml: |
+      {{- $promNs := optional (optional (default dict .context.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict .context.annotations) "aggregate" dict) "aggrega.ai/namespace" "") }}
+      {{- $discovers := false }}
+      {{- $everywhere := false }}
+      {{- $namespaces := list }}
+      {{- range $alias, $edge := .context.uses }}
+      {{- if eq $edge.socket "scrape_target" }}
+      {{- $p := default dict $edge.provides }}
+      {{- if or (optional $p "metrics_service" "") (optional $p "metrics_pod_selector" "") }}
+      {{- $discovers = true }}
+      {{- if has $edge.component (list "core/compute/keda" "core/compute/knative-serving") }}
+      {{- $everywhere = true }}
+      {{- else }}
+      {{- $ns := optional (optional (default dict $edge.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict $edge.annotations) "aggregate" dict) "aggrega.ai/namespace" "") }}
+      {{- if $ns }}{{ $namespaces = append $namespaces $ns }}{{ end }}
+      {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- if and $discovers $promNs }}
+      {{- $name := printf "%s-%s" .context.rendered_name $promNs -}}
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: {{ .context.rendered_name }}
+        namespace: {{ $promNs }}
+      {{- range $ns := $namespaces | uniq | sortAlpha }}
+      ---
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: {{ $name }}
+        namespace: {{ $ns }}
+      rules:
+        - apiGroups: [""]
+          resources: [pods, services, endpoints]
+          verbs: [get, list, watch]
+        - apiGroups: [discovery.k8s.io]
+          resources: [endpointslices]
+          verbs: [get, list, watch]
+      ---
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: {{ $name }}
+        namespace: {{ $ns }}
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: Role
+        name: {{ $name }}
+      subjects:
+        - kind: ServiceAccount
+          name: {{ $.context.rendered_name }}
+          namespace: {{ $promNs }}
+      {{- end }}
+      {{- if $everywhere }}
+      ---
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: {{ $name }}
+      rules:
+        - apiGroups: [""]
+          resources: [pods, services, endpoints]
+          verbs: [get, list, watch]
+        - apiGroups: [discovery.k8s.io]
+          resources: [endpointslices]
+          verbs: [get, list, watch]
+      ---
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: {{ $name }}
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: {{ $name }}
+      subjects:
+        - kind: ServiceAccount
+          name: {{ .context.rendered_name }}
+          namespace: {{ $promNs }}
+      {{- end }}
+      {{- end }}

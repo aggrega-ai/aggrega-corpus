@@ -1,0 +1,185 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/datastore/mysql
+  version: 1.0.0
+  description: >
+    A MySQL relational database. Provider-agnostic: the same component
+    is implemented by Helm Recipes (Workload synthesis to native Kubernetes resources),
+    Terraform Recipes (AWS RDS, Google Cloud SQL), CloudFormation Recipes,
+    and Compose Recipes (local development).
+
+    On AWS RDS through Terraform, reach for
+    terraform/mysql-rds-terraform-aws-modules, which vendors the
+    terraform-aws-modules project's published RDS module, where the pull may
+    fetch it from its git repository; reach for terraform/mysql-rds, which
+    authors its own body, or terraform/mysql-rds-module, which vendors a
+    module kept beside it, where nothing may be fetched, and for
+    terraform/mysql-rds where read replicas are needed.
+
+    On Google Cloud SQL, reach for terraform/mysql-cloud-sql, which vendors the
+    terraform-google-modules project's published Cloud SQL module, where the
+    database runs in a Google Cloud project whose VPC network already has
+    private services access to Cloud SQL; the instance gets a private address
+    in that network and no public one.
+
+    Backup is the core/backup attachment, written in the Release. The managed
+    Recipes configure the service's own automated backups from it, bound to
+    terraform/backup-native or cloudformation/backup-native, and keep them for
+    7 days with none attached. The Helm Recipe is backed up by the backup
+    product the Manifest binds; the Compose Recipe has none, so an attachment
+    halts there.
+  labels:
+    component.aggrega.ai/type: stateful-server
+    component.aggrega.ai/category: datastore
+    # This component is realized self-hosted (helm, compose) and managed (RDS
+    # on Terraform and CloudFormation, Cloud SQL on Terraform), so no single
+    # hosting posture is its identity. `mixed` is the honest selector-only
+    # value for such a unified, multi-posture component; the actual posture of
+    # a Release follows the Recipe the Manifest selects. Selector-only: never
+    # stamped onto output.
+    component.aggrega.ai/hosting: mixed
+    component.aggrega.ai/upstream-licensing: osi-approved
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # Self-inject allowlist: the component may inject its own provides
+  # keys into env or file delivery mechanisms.
+  inject: [env, file]
+
+  # Credential slots. inject: [] = blackbox (Recipe controls delivery).
+  # inject: [env, file] = transparent (developer may dictate delivery).
+  # required: false is the default (omitted = optional).
+  featuresSchema:
+    root_password:
+      required: true
+      sensitive: true
+      inject: []
+      description: Root database password. Recipe controls delivery (Black-Box). On the RDS Recipes RDS generates the password of the master user, admin, and keeps it in AWS Secrets Manager, so the slot takes core/generated-secret there, and any other credential halts the build. terraform/mysql-cloud-sql takes core/random-password alone, since Cloud SQL creates root with no password, and halts on any other credential.
+    user_password:
+      sensitive: true
+      inject: [env, file]
+      description: Application user password. Unattached, helm/mysql sets it to the development literal `apppass`, which this catalog publishes, so every Release built with that Recipe that leaves the slot unattached shares that password. The RDS Recipes create only the master user, admin, and halt the build when this slot is filled. terraform/mysql-cloud-sql takes core/random-password here, has the module it sources draw one with nothing attached, and halts on any other credential, or on an attachment while values.user is unset.
+
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      database:
+        type: string
+        required: true
+        description: Logical database name created on startup.
+      user:
+        type: string
+        description: Application-level database user (non-root). Omit for root-only access. RDS creates only its master user, admin, which the RDS Recipes publish as provides.user, so each of them halts the build when this is set; terraform/mysql-cloud-sql creates this user beside root and publishes it, or root where it is unset.
+      # charset and collation carry defaults, so a managed Recipe that cannot set
+      # them cannot tell the default from a value written explicitly; their
+      # descriptions name which Recipes do not read them instead.
+      charset:
+        type: string
+        default: utf8mb4
+        description: Default character set. terraform/mysql-rds-terraform-aws-modules sets it in the parameter group it creates, and terraform/mysql-cloud-sql on the database it creates; the other managed Recipes do not read it, and the instance takes its parameter group's.
+      collation:
+        type: string
+        default: utf8mb4_general_ci
+        description: Default collation. terraform/mysql-rds-terraform-aws-modules sets it in the parameter group it creates, and terraform/mysql-cloud-sql on the database it creates; the other managed Recipes do not read it, and the instance takes its parameter group's.
+      init_scripts:
+        type: object
+        valuesType: string
+        description: SQL scripts executed on first database initialization. Each key is a filename, each value is the SQL content. Scripts run in alphabetical key order.
+      custom_config:
+        type: string
+        description: Raw server configuration block (my.cnf format). Injected verbatim into the server configuration file.
+
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer never sees this.
+      port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 3306
+        description: Server listen port. Most operators should omit this and let the Recipe assign the default (3306). Cloud SQL serves MySQL on 3306 alone, so terraform/mysql-cloud-sql halts the build on any other value.
+      engine_version:
+        type: string
+        default: "8.4"
+        description: Server binary version. Selects the container image tag on container targets and the database engine version on managed targets.
+      # The managed Recipes size the instance by its instance class or tier, and
+      # a Recipe cannot tell these defaults from a value a Release wrote, so
+      # they are not read there rather than refused, and each description says
+      # so.
+      compute:
+        cpu:
+          type: string
+          default: 250m
+          description: CPU the database server is given. The managed Recipes do not read it; the RDS Recipes size the instance by infra.overrides.instance_class (DBInstanceClass on CloudFormation), and terraform/mysql-cloud-sql by infra.overrides.tier.
+        memory:
+          type: string
+          default: 512Mi
+          description: Memory the database server is given. The managed Recipes do not read it; the RDS Recipes size the instance by infra.overrides.instance_class (DBInstanceClass on CloudFormation), and terraform/mysql-cloud-sql by infra.overrides.tier.
+      storage:
+        type: object
+        properties:
+          size:
+            type: string
+            default: 10Gi
+          type:
+            type: string
+            description: >
+              On Kubernetes, the storage class the database volume is
+              provisioned from: leave it unset to take the cluster's default
+              storage class, or name another class the cluster offers. On a
+              managed database, the provider's volume type instead, such as
+              `gp3` or `io1` on AWS RDS: left unset, the RDS Recipes provision
+              `gp3`. On Cloud SQL it is the data disk type, `PD_SSD`, `PD_HDD`
+              or `HYPERDISK_BALANCED`, and left unset terraform/mysql-cloud-sql
+              provisions `PD_SSD`. The Compose Recipe names no class.
+      ha:
+        enabled:
+          type: boolean
+          default: false
+        read_replicas:
+          type: integer
+          min: 0
+          default: 0
+          description: Number of read replicas to deploy. terraform/mysql-rds and terraform/mysql-cloud-sql provision them beside the primary; the other managed Recipes provision one instance and halt the build on a count above zero.
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      host:
+        type: string
+        required: true
+        description: >
+          Address a client opens its database connection to. On the in-cluster
+          realizations it is the Service's DNS name; on a managed one it is a
+          pointer string the provisioning tool resolves to the instance's
+          address once the infrastructure has been applied, or the DNS name
+          the Release sets in infra.overrides.host, so a consumer on another
+          target receives an address it can resolve.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port the server accepts connections on. It follows the port an
+          operator set, so a consumer reads it rather than assuming 3306.
+      user:
+        type: string
+        description: >
+          Name of the login role a consumer authenticates as. The matching
+          password arrives through the credential attached to the component,
+          never through this contract.
+      database:
+        type: string
+        description: >
+          Name of the logical database created at startup. A consumer names it
+          in its connection string to land in the right database rather than
+          the server's default.
+      protocol:
+        type: string
+        description: Wire protocol the published address speaks — `mysql`, which is what a consumer selects a driver for.

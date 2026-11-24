@@ -1,0 +1,127 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Aggregate
+metadata:
+  name: ai-gateway-semantic-cache
+  version: "1.0.0"
+  description: >
+    A support assistant's AI gateway that answers a question from the reply it
+    gave an earlier, similarly worded one, keeping one cache per end user. This
+    file, the Manifest and the Release are the whole of what anyone authors
+    here: every Component, Feature and Recipe named below ships in the
+    standard-library catalog.
+spec:
+  # ── Parameter hoisting ──────────────────────────────────────────────────
+  # The store's password, which both ends of the cache_store connection read:
+  # the store requires it and the gateway's cache presents it. One parameter,
+  # so the two cannot be written apart; the Release fulfils it.
+  parameters:
+    cache_password:
+      type: string
+      description: >
+        The password the store requires and the gateway's semantic cache
+        presents to it. Both ends read this parameter.
+    # The key the gateway presents to OpenAI, on both of its model
+    # connections. One parameter, so the two connections present one key.
+    openai_key:
+      type: string
+      description: >
+        The key the gateway presents to OpenAI's API, on the connection to the
+        chat model and on the one to the embedding model.
+  components:
+    # ── The gateway ─────────────────────────────────────────────────────────
+    # Two aliases, each served from a model wired to the gateway's models
+    # socket: the chat model callers ask for, and an embedding model the cache
+    # turns each prompt into a vector with. values.model names the alias the
+    # gateway publishes as its model, which a gateway serving two has to say.
+    router:
+      type: core/gateway/litellm
+      values:
+        model: assistant
+      features:
+        # The administrative key, which LiteLLM calls its master key. The cache's
+        # realization halts the build without it: the gateway checks a caller's
+        # key only once it has one, and a cache bucket is made of the key it
+        # checked, which a request cannot name for itself.
+        api_key:
+          type: core/referenced-secret
+          values:
+            key: master-key
+            origin: dev-gateway-admin-key-change-me
+        # The semantic cache. A stored reply is served for a prompt at least 0.9
+        # alike to the one it answered, as the embedder alias compares them, and
+        # the store removes it an hour after it was stored. scope is left out, so
+        # it takes the default, end_user: each end user a request names has a
+        # cache of their own.
+        answers:
+          type: core/semantic-caching
+          values:
+            embedding_model: embedder
+            similarity_threshold: 0.9
+            ttl_seconds: 3600
+      uses:
+        # The two models the gateway serves. A request asks for the alias a
+        # connection is written under, and the gateway's entry for it is written
+        # from the endpoint and the model name the model publishes: pointers the
+        # compiler pipes through and the running gateway resolves when it serves
+        # a request. Each connection holds the key the gateway presents to its
+        # model, so callers never hold it.
+        models:
+          assistant:
+            target: chat
+            features:
+              credential:
+                type: core/referenced-secret
+                values:
+                  key: api-key
+                  origin: "{{ .parameters.openai_key }}"
+          embedder:
+            target: embeddings
+            features:
+              credential:
+                type: core/referenced-secret
+                values:
+                  key: api-key
+                  origin: "{{ .parameters.openai_key }}"
+        # Where the cache keeps its replies. The gateway's Recipe reads the
+        # store's published host and port off this edge and delivers them into
+        # the gateway's environment.
+        cache_store:
+          replies:
+            target: cache
+            features:
+              # The password the cache presents to the store, held on the
+              # connection it is presented on.
+              credential:
+                type: core/referenced-secret
+                values:
+                  key: password
+                  origin: "{{ .parameters.cache_password }}"
+
+    # ── The models ──────────────────────────────────────────────────────────
+    # OpenAI's managed chat and embeddings APIs, each reached as an external
+    # reference: nothing runs for either in the cluster.
+    chat:
+      type: core/ai-model/openai
+      values:
+        model: gpt-4o
+    embeddings:
+      type: core/ai-model/openai-embedding
+      values:
+        model: text-embedding-3-small
+
+    # ── The store ───────────────────────────────────────────────────────────
+    # Redis, whose image loads the query engine whose vector search the cache
+    # searches its replies with. The credential on its password slot
+    # turns on password authentication, with the same password the gateway's
+    # connection presents.
+    cache:
+      type: core/datastore/redis
+      features:
+        password:
+          type: core/referenced-secret
+          values:
+            key: password
+            origin: "{{ .parameters.cache_password }}"

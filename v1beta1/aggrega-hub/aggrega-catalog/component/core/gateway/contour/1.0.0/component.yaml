@@ -1,0 +1,131 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/gateway/contour
+  version: 1.0.0
+  description: >
+    A Contour ingress gateway. Contour is a Kubernetes-native ingress
+    controller: its control plane watches the cluster's Ingress and HTTPProxy
+    resources and programs an Envoy data plane, which terminates client HTTP and
+    HTTPS traffic and load-balances it to the backing services those resources
+    name. Because its routing input is the cluster's own Ingress objects rather
+    than a wired upstream, the gateway takes no `uses` edge; applications reach
+    it by declaring Ingress resources against its ingress class. Contour is
+    realized on Kubernetes through a Helm Recipe; it has no
+    standalone local-container form, so no Compose Recipe is provided. Exports
+    the Envoy data-plane host and listen port to consumers via the provides
+    contract.
+
+    Each Envoy pod serves its own metrics on a port no Service carries, so it
+    also publishes the pod label selecting those pods, the name of their
+    metrics port and the path, for a scraper that discovers them directly. The
+    control plane's own metrics are not published.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: gateway
+    component.aggrega.ai/upstream-licensing: osi-approved
+    # Data-path capability labels. Each states what this gateway is able to do,
+    # never what a given Release has switched on — the two read alike to a
+    # developer and only the first is a property of the product.
+    #
+    # Request mirroring: a route may copy a matching request to a second
+    # service and discard that service's response, and the share of requests
+    # copied is itself settable, so this component offers the sampled fidelity
+    # rather than only the whole stream.
+    dataplane.aggrega.ai/request-mirroring: sampled
+    # Caller identity: the gateway can pass the details of the client's own TLS
+    # certificate — its subject, the certificate itself, the chain, and the
+    # names it carries — to the service behind the route. The identity that
+    # travels is the client's certificate rather than a header the gateway
+    # composes after authenticating, which is a different fidelity and is why
+    # this axis carries the mechanism in the value.
+    dataplane.aggrega.ai/caller-identity: client-certificate
+    # Upstream TLS: a route may require the service it forwards to present a
+    # certificate chaining to a trust anchor the Release supplies. The
+    # capability is what the label asserts; whether a given route turns it on
+    # is that route's own configuration.
+    dataplane.aggrega.ai/upstream-tls: trust-anchor
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      ingress_class_name:
+        type: string
+        default: "contour"
+        description: Name of the IngressClass this controller reconciles. Applications route to the gateway by referencing this class in their Ingress or HTTPProxy resources.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      port:
+        type: integer
+        min: 1
+        max: 65535
+        default: 80
+        description: HTTP port the Envoy data-plane service listens on. Most operators should omit this and let the Recipe assign the default (80).
+      source_version:
+        type: string
+        description: Source artifact version (Helm chart). Overrides the Recipe's default source version. Changing from default does not guarantee value mapping compatibility.
+      compute:
+        cpu:
+          type: string
+          default: 100m
+        memory:
+          type: string
+          default: 128Mi
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via the provides contract.
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name of the Service fronting the Envoy data plane. A
+          consumer sends its client traffic here and the gateway load-balances
+          it onward.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port that data plane accepts traffic on. It follows the port an
+          operator set in the Release, so a consumer reads it rather than
+          assuming a default.
+      protocol:
+        type: string
+        description: How the published address is spoken to — `http`, so a consumer composes an address on that scheme.
+      # Where Prometheus finds the Envoy data plane's metrics. Every Envoy pod
+      # serves them at /stats/prometheus on a container port named metrics,
+      # 8002, in plain HTTP with no caller check. Contour programs that port as
+      # a listener answering a GET of /ready, /stats and /stats/prometheus and
+      # nothing else, each forwarded to Envoy's administration interface, which
+      # listens on a socket inside the pod rather than on a port. The pods sit
+      # behind the data-plane Service, which does not carry that port, and each
+      # serves only its own counters, so a scraper discovers the pods directly.
+      # The control plane serves metrics of its own on another port and path;
+      # they are not published, since a target publishes one set of facts, its
+      # data plane's.
+      # None of the keys carries a namespace: a scraper reads where the target
+      # runs from its own connection.
+      metrics_pod_selector:
+        type: string
+        description: >
+          Kubernetes label selector matching the Envoy data-plane pods, for a
+          scraper that discovers those pods directly rather than scraping one
+          address. Published beside `metrics_pod_port` and `metrics_path`.
+      metrics_pod_port:
+        type: string
+        description: >
+          Name of the container port on those pods that carries the metrics,
+          `metrics`.
+      metrics_path:
+        type: string
+        description: >
+          Path the metrics are served at on that port, `/stats/prometheus`.

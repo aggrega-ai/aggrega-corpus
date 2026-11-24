@@ -1,0 +1,112 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/messaging/nats
+  version: 1.0.0
+  description: >
+    A NATS messaging server for pub-sub, request-reply, and queueing. In this
+    lean shape NATS routes subjects in memory with no durable persistence
+    (JetStream file storage is not enabled), so the component renders as a
+    stateless workload rather than a stateful one and declares no storage.
+    Authentication is off by default; when a credential is attached
+    to the optional password slot, each Recipe enables user/password
+    authentication and wires the credential through the credential subsystem.
+    Provider-agnostic: the same component is implemented by a Helm Recipe
+    (Workload synthesis to native Kubernetes resources) and a Compose Recipe (local development).
+    Exports its host and client port to consumers via the uses topology.
+
+    On Kubernetes there are two realizations and the Manifest chooses between
+    them. `nats` synthesizes the server as a workload and fetches nothing, so it
+    is the one to reach for where the build must complete with no chart
+    repository reachable. `nats-chart` renders the product's own Helm chart,
+    which additionally carries a sidecar that reloads the server configuration in
+    place, start-up, readiness and liveness probes against the monitoring
+    endpoint, and a drain-then-shut-down sequence that lets connected clients
+    move off before the pod goes away — and it is the realization that honours
+    `monitoring_port`, so reach for it where a chart repository is reachable at
+    build time.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: messaging
+    component.aggrega.ai/upstream-licensing: osi-approved
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # Self-inject allowlist: the component may inject its own provides keys into
+  # the env delivery mechanism.
+  inject: [env]
+  featuresSchema:
+    # Optional password credential slot. NATS authentication is off by default;
+    # when a credential is attached here, the Recipe enables
+    # user/password authentication and wires the password through the
+    # credential subsystem. When unattached, the server runs without
+    # authentication, byte-identically to a Recipe with no slot at all.
+    # `required` omitted → optional, so a bare `bus: {}` still loads.
+    # Transparent (inject: [env]) so the injected value reaches the Recipe on
+    # the env pipe; the selector is secret-kind-pinned but family-agnostic so
+    # either an inject-value or a referenceable credential may fill it.
+    password:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      description: "Optional server authentication credential. When attached, enables NATS user/password authentication and supplies the password; unattached, the server runs without authentication."
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      user:
+        type: string
+        default: "nats_client"
+        description: Client user provisioned for authenticated connections. Used only when a password credential is attached to the optional password slot; ignored when the server runs without authentication.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 4222
+        description: Client listen port. Most operators should omit this and let the Recipe assign the default (4222).
+      monitoring_port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 8222
+        description: HTTP monitoring endpoint port. Most operators should omit this and let the Recipe assign the default (8222). Read by the chart-backed realization, which serves the endpoint and aims its probes at it; the workload-synthesis and Compose realizations expose no monitoring endpoint and ignore it.
+      engine_version:
+        type: string
+        default: "2.11-alpine"
+        description: NATS container image tag. Selects the image tag on container targets; the chart-backed realization pins its own image tag.
+      source_version:
+        type: string
+        description: Version of the Helm chart the chart-backed realization pulls. Read only by that realization; the workload-synthesis and Compose realizations pull no source artifact and ignore it. Changing it away from the Recipe's default does not guarantee value-mapping compatibility with the new chart.
+      compute:
+        cpu:
+          type: string
+          default: 100m
+        memory:
+          type: string
+          default: 128Mi
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name of the Service fronting the server. A publisher
+          or subscriber puts this name in its client's server list together
+          with `port`.
+      port:
+        type: integer
+        required: true
+        description: TCP port the server accepts client connections on. It carries the client port an operator set, never the monitoring port.
+      protocol:
+        type: string
+        description: Wire protocol the published address speaks — `nats`, which is what a consumer selects a client library for.

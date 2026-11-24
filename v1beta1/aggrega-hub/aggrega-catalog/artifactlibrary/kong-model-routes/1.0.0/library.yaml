@@ -1,0 +1,544 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: ArtifactLibrary
+metadata:
+  name: KongModelRoutes
+  version: 1.0.0
+  description: >
+    The routes a Kong gateway serves for the models wired to it, written as
+    Kong's own declarative configuration, as one bundle every Recipe running
+    that gateway imports, so the configuration and the rules it is written by
+    live here once.
+
+    ModelRoutes writes, for each connection on the importing Component's
+    models socket, a service named model-<alias> addressed at the endpoint the
+    model publishes, with a chat route at /<alias>/v1/chat/completions and a
+    completion route at /<alias>/v1/completions, each through Kong's request
+    transformer and AI proxy. A connection carrying a credential has its
+    routes present it as a bearer token read through Kong's environment vault,
+    which names the variable and never the value. With nothing wired to the
+    models socket it writes nothing.
+
+    The importing Recipe picks the delivery with the local
+    model_routes_delivery — config_map, one ConfigMap for a Kubernetes target,
+    or compose_configs, one compose config — and declares as locals the names
+    and the variable parts it shares with the bundle, which stops the build
+    when one is missing or differs. The bundle is authored against Kong 3.9.3.
+
+    On the open-source edition it writes Kong's AI Prompt Guard on every route
+    while the importing component carries core/prompt-deny-patterns. A Recipe
+    running Kong Gateway Enterprise declares model_routes_edition: enterprise,
+    and the bundle then writes what the importing component's
+    core/fallback-chain, core/period-budget and core/data-masking attachments
+    ask for: AI Proxy Advanced on a chained alias's routes, AI Rate Limiting
+    Advanced for the whole gateway or on each wired model's service, and the
+    AI PII Sanitizer on each wired model's routes.
+spec:
+  artifacts:
+    # The routes a Kong gateway serves for the models wired to it, as one
+    # bundle every Recipe running that gateway imports. The configuration and
+    # the rules it is written by — the address a route forwards to, the path a
+    # client reaches it at, the variable its credential is read from — are the
+    # same whichever target the gateway runs on, so they live here once rather
+    # than as a copy in each Recipe that a later edit could leave behind.
+    #
+    # ModelRoutes writes Kong's declarative configuration. Each connection on
+    # the importing Component's models socket, in alias order, becomes one
+    # service named model-<alias>, whose address is the endpoint the model
+    # publishes, with two routes: model-<alias>-chat at
+    # /<alias>/v1/chat/completions and model-<alias>-completions at
+    # /<alias>/v1/completions, the paths an OpenAI client composes from the
+    # endpoint the gateway publishes for that alias. Each route carries two
+    # plugins. Kong's AI proxy sends the request to the model's endpoint with
+    # the operation's own path appended, asking for the model name the model
+    # publishes, for the OpenAI API — which the importing Component's assertion
+    # has checked the model speaks. The proxy refuses a request naming a model
+    # other than the one it was written for, so the request transformer, which
+    # runs first, removes the model name from the request body: the path
+    # chooses the model, and the proxy writes its own name back into what it
+    # forwards. Strings the model publishes are piped through, never resolved.
+    # The proxy dials port 443 for an address naming no port, whatever its
+    # scheme, so an http endpoint naming none is written with port 80, and an
+    # endpoint that is not an absolute URL stops the build, naming the
+    # connection.
+    #
+    # A connection carrying a credential gives its routes an Authorization
+    # header whose value is a reference to a variable in Kong's environment
+    # vault, which Kong reads when it serves a request, so the configuration
+    # names the variable and never the value. Kong reads a reference only when
+    # it is the whole header value, so the variable holds the whole bearer
+    # token: the importing Recipe delivers the credential as
+    # AI_PROXY_<ALIAS>_API_KEY and composes AI_PROXY_<ALIAS>_AUTHORIZATION from
+    # it, which the routes name. <ALIAS> is the connection's alias in capitals
+    # with every character other than a letter or a digit as an underscore. A
+    # connection carrying no credential presents none.
+    #
+    # With nothing wired to the models socket the template writes nothing, and
+    # no file is emitted.
+    #
+    # The prompt guard, on the open-source edition. While the importing
+    # component carries a core/prompt-deny-patterns attachment, at most one,
+    # every route of each wired model also carries Kong's AI Prompt Guard,
+    # which runs after the request transformer and before the AI proxy. It is
+    # written with the attachment's deny_patterns and, where it lists any, its
+    # allow_patterns, and with the widest reading of a request Kong 3.9.3
+    # offers: match_all_roles on and allow_all_conversation_history off, so
+    # the guard reads every message of every role across the whole
+    # conversation, newest first, joined into one text with a space after
+    # each message, and a completion's prompt. The body size it reads stays
+    # its default, the AI proxy's own. Kong's schema takes at most 10
+    # expressions in a list, each at most 500 bytes, and an import holding
+    # more fails, so the bundle stops the build there; the realization,
+    # prompt-deny-patterns-kong, refuses the same by name. An attachment
+    # reaching a Recipe that declares model_routes_edition stops the build:
+    # the guard is realized on the open-source gateway alone.
+    #
+    # Kong Gateway Enterprise. A Recipe running it declares the local
+    # model_routes_edition as enterprise; with no such local the bundle reads
+    # no attachment but the prompt guard's and writes the routes above as they
+    # are. With it, the bundle reads the importing component's attachments, at
+    # most one each:
+    # - core/fallback-chain: each alias an entry names gets a walk — the alias,
+    #   then its entry's fallbacks in order, a fallback's own entry followed
+    #   while fewer than max_hops fallbacks have been counted — and its two
+    #   routes carry AI Proxy Advanced in place of the AI proxy, with the
+    #   walk's models as targets in priority order and one fewer retries than
+    #   targets. A walk reaching an alias twice stops the build. An alias with
+    #   no entry keeps the AI proxy.
+    # - core/period-budget: AI Rate Limiting Advanced in its policy form, one
+    #   limit of limit tokens over period in seconds in a fixed window, with
+    #   its count in the Kong data store: for the whole gateway, matching the
+    #   OpenAI-API provider every route here proxies to, under scope gateway;
+    #   on each wired model's service, under scope model.
+    # - core/data-masking: the AI PII Sanitizer on each wired model's two
+    #   routes, given the scheme, host and port the importing component's one
+    #   pii_sanitizer connection publishes, the entity types listed as Kong's
+    #   categories, the patterns as its custom patterns, each with a score of
+    #   1, a numbered placeholder for each match, nothing restored and the
+    #   request failed when the PII service cannot be reached; under action
+    #   refuse, with scope request alone, block_if_detected as well, which
+    #   refuses a request carrying a match; while the scope reaches replies,
+    #   the setting naming what it masks is written and the AI proxy refuses a
+    #   request asking for a streamed reply. Kong runs a route's plugins by
+    #   priority rather than by their order here, so the sanitizer reads a
+    #   request after the request transformer and before the AI proxy.
+    # Each attachment's realization refuses what this bundle cannot write; the
+    # bundle stops the build on any value it cannot map all the same.
+    #
+    # How the configuration reaches the workload. The importing Recipe chooses
+    # through the local model_routes_delivery. With config_map the bundle emits
+    # one ConfigMap carrying the configuration as a file, for a Kubernetes
+    # target. With compose_configs it emits one compose config, for the compose
+    # target, which delivers a config as one file at the path it is mounted at.
+    # Compose reads a $ in a config's content as the start of a variable of its
+    # own, so there each $ in a string a model publishes, and in an expression
+    # the prompt guard carries, is written as $$, the compose file's spelling of
+    # a literal $; an alias carries no $, the characters an alias may hold
+    # being letters, digits, - and _. Either way
+    # the workload receives the same configuration. Any other value, or none,
+    # stops the build.
+    #
+    # What the importing Recipe declares. The importing Recipe mounts the
+    # configuration into a step that imports it into the gateway's database
+    # before the gateway starts, and delivers each credential and composes its
+    # bearer token. Those are its own workload, which a bundle cannot write, so
+    # it declares as locals the values they share with this bundle, and the
+    # bundle stops the build, naming the local, when one is missing or differs
+    # from its own. Every importing Recipe declares connection_variable_prefix
+    # (AI_PROXY_), credential_variable_suffix (_API_KEY) and
+    # header_variable_suffix (_AUTHORIZATION), the fixed parts of the two
+    # variables. With config_map it also declares model_routes_file
+    # (model-routes.yaml), the file the ConfigMap carries the configuration as,
+    # and model_routes_config_map_suffix (-model-routes): the ConfigMap is named
+    # after the name the Recipe's provider gives the component, followed by
+    # that suffix, and since a local cannot read that name, the Recipe's
+    # workload composes the two where it mounts the ConfigMap. With
+    # compose_configs it declares model_routes_config_name instead, the
+    # config's name (the instance name followed by -model-routes); the file it
+    # is mounted as is the Recipe's own.
+    #
+    # The template reads the importing Recipe's context: .context.uses for the
+    # models connections, .context.instance_id, .context.rendered_name with
+    # config_map, .features, and the locals listed above. It checks every
+    # local before it writes anything, because a local the importing Recipe
+    # does not declare reads as empty here rather than stopping the build, and
+    # a name or a variable that differs on the two sides would leave an import
+    # step reading a file that is not there, or a route naming a variable the
+    # gateway is not given.
+    ModelRoutes:
+      model-routes.yaml: |
+        {{- /* The values this bundle shares with the Recipe importing it. Each has its home here, and the importing
+          Recipe restates it as a local because its own workload, which this bundle cannot write, reads it too. A local
+          the Recipe does not declare reads as empty here, so each is checked before anything is written: absent, or
+          not the value below, and the build stops naming it. */}}
+        {{- $bundle := "KongModelRoutes#/artifacts/ModelRoutes" }}
+        {{- $file := "model-routes.yaml" }}
+        {{- $nameSuffix := "-model-routes" }}
+        {{- $configName := printf "%s%s" .context.instance_id $nameSuffix }}
+        {{- $prefix := "AI_PROXY_" }}
+        {{- $credentialSuffix := "_API_KEY" }}
+        {{- $headerSuffix := "_AUTHORIZATION" }}
+        {{- $have := "" }}
+        {{- /* How the configuration reaches the importing Recipe's workload, which that Recipe chooses because its
+          workload mounts it: "config_map", one ConfigMap carrying it as a file, for a Kubernetes target; or
+          "compose_configs", one compose config, for the compose target, which delivers a config as one file at the
+          path it is mounted at. Any other value stops the build. */}}
+        {{- $have = optional .locals "model_routes_delivery" "" }}
+        {{- if not $have }}
+        {{- fail (printf "the Recipe importing %s does not declare the local model_routes_delivery, which takes \"config_map\" or \"compose_configs\": whether this bundle delivers the gateway's model routes as a ConfigMap, for a Kubernetes target, or as a compose config, for the compose target; declare it as one of the two" $bundle) }}
+        {{- else if not (has $have (list "config_map" "compose_configs")) }}
+        {{- fail (printf "the Recipe importing %s declares the local model_routes_delivery as %q, but it takes \"config_map\" or \"compose_configs\": whether this bundle delivers the gateway's model routes as a ConfigMap, for a Kubernetes target, or as a compose config, for the compose target; declare it as one of the two" $bundle $have) }}
+        {{- end }}
+        {{- $compose := eq $have "compose_configs" }}
+        {{- /* Which edition of Kong the importing Recipe's gateway runs. Absent, the open-source edition: the routes
+          carry Kong's AI proxy alone and no attachment is read. "enterprise" is declared by a Recipe running Kong
+          Gateway Enterprise, whose AI plugins this bundle writes where the importing component carries the
+          attachment asking for one. Any other value stops the build. */}}
+        {{- $have = optional .locals "model_routes_edition" "" }}
+        {{- if and $have (ne $have "enterprise") }}
+        {{- fail (printf "the Recipe importing %s declares the local model_routes_edition as %q, but it takes \"enterprise\", declared by a Recipe running Kong Gateway Enterprise, or no value at all for the open-source edition; declare it as \"enterprise\" or remove it" $bundle $have) }}
+        {{- end }}
+        {{- $enterprise := eq $have "enterprise" }}
+        {{- /* The fixed parts of the two variables a models connection's credential reaches the gateway under, around
+          the connection's alias in capitals with every character other than a letter or a digit as an underscore: the
+          variable the credential is delivered as, and the bearer token the importing Recipe composes from it, which
+          the routes below name. */}}
+        {{- $have = optional .locals "connection_variable_prefix" "" }}
+        {{- if not $have }}
+        {{- fail (printf "the Recipe importing %s does not declare the local connection_variable_prefix, which opens the names of the variables a models connection's credential reaches the gateway under, and which this bundle names the bearer token variable with; declare it as %q" $bundle $prefix) }}
+        {{- else if ne $have $prefix }}
+        {{- fail (printf "the Recipe importing %s declares the local connection_variable_prefix as %q, but that local opens the names of the variables a models connection's credential reaches the gateway under, and this bundle's side of it is %q; declare it as %q" $bundle $have $prefix $prefix) }}
+        {{- end }}
+        {{- $have = optional .locals "credential_variable_suffix" "" }}
+        {{- if not $have }}
+        {{- fail (printf "the Recipe importing %s does not declare the local credential_variable_suffix, which closes the name of the variable a models connection's credential is delivered as, the one the bearer token is composed from; declare it as %q" $bundle $credentialSuffix) }}
+        {{- else if ne $have $credentialSuffix }}
+        {{- fail (printf "the Recipe importing %s declares the local credential_variable_suffix as %q, but that local closes the name of the variable a models connection's credential is delivered as, the one the bearer token is composed from, and this bundle's side of it is %q; declare it as %q" $bundle $have $credentialSuffix $credentialSuffix) }}
+        {{- end }}
+        {{- $have = optional .locals "header_variable_suffix" "" }}
+        {{- if not $have }}
+        {{- fail (printf "the Recipe importing %s does not declare the local header_variable_suffix, which closes the name of the bearer token variable the gateway is given and this bundle's routes name; declare it as %q" $bundle $headerSuffix) }}
+        {{- else if ne $have $headerSuffix }}
+        {{- fail (printf "the Recipe importing %s declares the local header_variable_suffix as %q, but that local closes the name of the bearer token variable the gateway is given and this bundle's routes name, and this bundle's side of it is %q; declare it as %q" $bundle $have $headerSuffix $headerSuffix) }}
+        {{- end }}
+        {{- /* The names the importing Recipe's workload mounts what this bundle emits by: the compose config's, or the
+          ConfigMap's and the file it carries. The ConfigMap is named after the name the Recipe's provider gives the
+          component, which a local cannot read, so the Recipe declares the part after it and composes the two where it
+          mounts the ConfigMap. */}}
+        {{- if $compose }}
+        {{- $have = optional .locals "model_routes_config_name" "" }}
+        {{- if not $have }}
+        {{- fail (printf "the Recipe importing %s does not declare the local model_routes_config_name, which is the name of the compose config its workload mounts the gateway's model routes from, which this bundle emits; declare it as %q" $bundle $configName) }}
+        {{- else if ne $have $configName }}
+        {{- fail (printf "the Recipe importing %s declares the local model_routes_config_name as %q, but that local is the name of the compose config its workload mounts the gateway's model routes from, which this bundle emits, and this bundle's side of it is %q; declare it as %q" $bundle $have $configName $configName) }}
+        {{- end }}
+        {{- else }}
+        {{- $have = optional .locals "model_routes_file" "" }}
+        {{- if not $have }}
+        {{- fail (printf "the Recipe importing %s does not declare the local model_routes_file, which is the file its import step reads the gateway's model routes from and this bundle's ConfigMap carries them as; declare it as %q" $bundle $file) }}
+        {{- else if ne $have $file }}
+        {{- fail (printf "the Recipe importing %s declares the local model_routes_file as %q, but that local is the file its import step reads the gateway's model routes from and this bundle's ConfigMap carries them as, and this bundle's side of it is %q; declare it as %q" $bundle $have $file $file) }}
+        {{- end }}
+        {{- $have = optional .locals "model_routes_config_map_suffix" "" }}
+        {{- if not $have }}
+        {{- fail (printf "the Recipe importing %s does not declare the local model_routes_config_map_suffix, which follows the component's rendered name in the name of the ConfigMap its workload mounts, which this bundle emits; declare it as %q" $bundle $nameSuffix) }}
+        {{- else if ne $have $nameSuffix }}
+        {{- fail (printf "the Recipe importing %s declares the local model_routes_config_map_suffix as %q, but that local follows the component's rendered name in the name of the ConfigMap its workload mounts, which this bundle emits, and this bundle's side of it is %q; declare it as %q" $bundle $have $nameSuffix $nameSuffix) }}
+        {{- end }}
+        {{- if not .context.rendered_name }}
+        {{- fail (printf "the Recipe importing %s declares the local model_routes_delivery as \"config_map\", but its provider reports no rendered name for %q, and the ConfigMap is named after it; declare \"compose_configs\" on the compose target, or import this bundle from a Recipe whose provider names the component" $bundle .context.instance_id) }}
+        {{- end }}
+        {{- end }}
+        {{- /* How a literal dollar sign is written in the configuration. Compose reads a $ anywhere in the file it is
+          given, a config's content included, as the start of a variable of its own, and a compose file spells a
+          literal $ as $$, while a ConfigMap carries its data as written. So each string a model publishes, and the
+          prompt guard's configuration, is written through $dollar, which is $ in a ConfigMap and $$ in a compose
+          config, and the workload receives the same configuration on either delivery. An alias carries no $. */}}
+        {{- $dollar := "$" }}
+        {{- if $compose }}{{ $dollar = "$$" }}{{ end }}
+        {{- /* The models connections. With none, nothing below is written, and no file is emitted. */}}
+        {{- $wired := list }}
+        {{- range $alias, $edge := .context.uses }}{{ if eq $edge.socket "models" }}{{ $wired = append $wired $alias }}{{ end }}{{ end }}
+        {{- /* Each connection's address and the variable its bearer token is read from, computed once: the service a
+          connection becomes forwards to its address, and a route falling back to the connection's model names both. The
+          proxy dials port 443 for an address naming no port, whatever its scheme, so an http endpoint naming none is
+          written with port 80. */}}
+        {{- $bases := dict }}
+        {{- $headers := dict }}
+        {{- range $alias, $edge := .context.uses }}
+        {{- if eq $edge.socket "models" }}
+        {{- $u := urlParse $edge.provides.endpoint }}
+        {{- if not (and $u.scheme $u.host) }}{{ fail (printf "the models connection %s of %q reaches %q, whose published endpoint %q is not an absolute URL, so the gateway cannot write the address its route forwards to" $alias $.context.instance_id $edge.target $edge.provides.endpoint) }}{{ end }}
+        {{- $address := $u.host }}
+        {{- if not (regexMatch ":[0-9]+$" $address) }}{{ $address = printf "%s:%s" $address (ternary "443" "80" (eq $u.scheme "https")) }}{{ end }}
+        {{- $_ := set $bases $alias (printf "%s://%s%s" $u.scheme $address (trimSuffix "/" $u.path)) }}
+        {{- $_ := set $headers $alias (printf "%s%s%s" $prefix (regexReplaceAll "[^A-Z0-9]" (upper $alias) "_") $headerSuffix) }}
+        {{- end }}
+        {{- end }}
+        {{- /* The attachments this bundle writes on Kong Gateway Enterprise, read only for that edition: at most one
+          core/fallback-chain, one core/period-budget and one core/data-masking, each with its own realization holding
+          the refusals. A value this template cannot map stops the build here rather than being written as a guess. */}}
+        {{- $chain := dict }}
+        {{- $budget := dict }}
+        {{- $masking := dict }}
+        {{- if $enterprise }}
+        {{- range $name, $attachment := (default dict .features) }}
+        {{- $type := first (splitList ":" (toString $attachment.type)) }}
+        {{- if eq $type "core/fallback-chain" }}{{ if $chain }}{{ fail (printf "%s writes one fallback chain for %q, and core/fallback-chain is attached more than once; keep one attachment" $bundle $.context.instance_id) }}{{ end }}{{ $chain = $attachment }}{{ end }}
+        {{- if eq $type "core/period-budget" }}{{ if $budget }}{{ fail (printf "%s writes one period budget for %q, and core/period-budget is attached more than once; keep one attachment" $bundle $.context.instance_id) }}{{ end }}{{ $budget = $attachment }}{{ end }}
+        {{- if eq $type "core/data-masking" }}{{ if $masking }}{{ fail (printf "%s writes one AI PII Sanitizer on each route of %q, and core/data-masking is attached more than once; keep one attachment" $bundle $.context.instance_id) }}{{ end }}{{ $masking = $attachment }}{{ end }}
+        {{- end }}
+        {{- end }}
+        {{- /* The prompt guard, read on the open-source edition: at most one core/prompt-deny-patterns attachment, its
+          realization holding the refusals. Its configuration is written once, as one JSON object, on every route of
+          each wired model: the deny list, the allow list where it holds any expression, and every message of every
+          role read across the whole conversation. A list longer than Kong's schema takes, or an expression longer,
+          stops the build here, since an import holding it would fail and leave the gateway unstarted. */}}
+        {{- $guard := dict }}
+        {{- range $name, $attachment := (default dict .features) }}
+        {{- if eq (first (splitList ":" (toString $attachment.type))) "core/prompt-deny-patterns" }}
+        {{- if $enterprise }}{{ fail (printf "%s writes Kong's AI Prompt Guard on the open-source gateway alone, and the core/prompt-deny-patterns attachment %q on %q reaches a Recipe running Kong Gateway Enterprise, where it is not realized; remove the attachment" $bundle $name $.context.instance_id) }}{{ end }}
+        {{- if $guard }}{{ fail (printf "%s writes one AI Prompt Guard on each route of %q, and core/prompt-deny-patterns is attached more than once; keep one attachment" $bundle $.context.instance_id) }}{{ end }}
+        {{- $guard = $attachment }}
+        {{- end }}
+        {{- end }}
+        {{- $guardConfig := "" }}
+        {{- with $guard }}
+        {{- $config := dict "match_all_roles" true "allow_all_conversation_history" false }}
+        {{- range $list := list "deny_patterns" "allow_patterns" }}
+        {{- $patterns := list }}
+        {{- range $p := (optional (default dict $guard.values) $list list) }}{{ $patterns = append $patterns (toString $p) }}{{ end }}
+        {{- if gt (len $patterns) 10 }}{{ fail (printf "%s writes the prompt guard of %q, whose %s lists %d expressions, and Kong's AI Prompt Guard takes at most 10" $bundle $.context.instance_id $list (len $patterns)) }}{{ end }}
+        {{- range $p := $patterns }}{{ if gt (len $p) 500 }}{{ fail (printf "%s writes the prompt guard of %q, whose %s holds an expression of %d bytes, and Kong's AI Prompt Guard takes at most 500" $bundle $.context.instance_id $list (len $p)) }}{{ end }}{{ end }}
+        {{- if $patterns }}{{ $_ := set $config $list $patterns }}{{ end }}
+        {{- end }}
+        {{- $guardConfig = toJson $config }}
+        {{- end }}
+        {{- /* The walk of each alias a core/fallback-chain entry names: the alias, then its entry's fallbacks in order,
+          each counting one fallback; a fallback's own entry is followed, before the rest of the list it came from,
+          only while fewer than max_hops have been counted, and every alias one entry lists is placed whatever the
+          count. The walk becomes the targets of one balancer in this order, and a balancer is not shown to try one
+          model twice, so a walk reaching an alias a second time stops the build. Each step either places an alias or
+          finishes a list, so the walk ends within twice the number of fallbacks listed, plus two. */}}
+        {{- $walks := dict }}
+        {{- with $chain }}
+        {{- $entries := dict }}
+        {{- $listed := 0 }}
+        {{- range $entry := .values.chains }}{{ $_ := set $entries (toString $entry.alias) $entry.fallbacks }}{{ $listed = add $listed (len $entry.fallbacks) }}{{ end }}
+        {{- $maxHops := int64 .values.max_hops }}
+        {{- range $entry := .values.chains }}
+        {{- $start := toString $entry.alias }}
+        {{- if ne (toString (optional (optional $.context.uses $start dict) "socket" "")) "models" }}{{ fail (printf "%s writes the fallback chain of %q, whose entry for %q names no connection on its models socket; give entries only to aliases the models socket carries" $bundle $.context.instance_id $start) }}{{ end }}
+        {{- $walk := list $start }}
+        {{- $count := 0 }}
+        {{- $stack := list $entry.fallbacks }}
+        {{- $done := false }}
+        {{- range $step := until (int (add (mul 2 $listed) 2)) }}
+        {{- if not $done }}
+        {{- if not $stack }}{{ $done = true }}
+        {{- else }}
+        {{- $top := last $stack }}
+        {{- if not $top }}{{ $stack = initial $stack }}
+        {{- else }}
+        {{- $next := toString (first $top) }}
+        {{- $stack = append (initial $stack) (rest $top) }}
+        {{- if has $next $walk }}{{ fail (printf "%s writes the fallback chain of %q, whose walk from %q reaches %q a second time, but the walk becomes the targets of one balancer, which is not shown to send a request to one model twice; remove %q from one of the lists leading to it" $bundle $.context.instance_id $start $next $next) }}{{ end }}
+        {{- if ne (toString (optional (optional $.context.uses $next dict) "socket" "")) "models" }}{{ fail (printf "%s writes the fallback chain of %q, whose walk from %q reaches %q, which names no connection on its models socket; list only aliases the models socket carries" $bundle $.context.instance_id $start $next) }}{{ end }}
+        {{- $walk = append $walk $next }}
+        {{- $count = add $count 1 }}
+        {{- if and (lt $count $maxHops) (hasKey $entries $next) }}{{ $stack = append $stack (get $entries $next) }}{{ end }}
+        {{- end }}
+        {{- end }}
+        {{- end }}
+        {{- end }}
+        {{- if not $done }}{{ fail (printf "%s did not finish the walk of %q from %q" $bundle $.context.instance_id $start) }}{{ end }}
+        {{- $_ := set $walks $start $walk }}
+        {{- end }}
+        {{- end }}
+        {{- /* The period budget's one policy, read only for that edition: limit tokens of the count unit names, over a
+          window of period in seconds, counted in a fixed window. The placement differs by scope: one plugin for the
+          whole gateway whose policy matches every request its AI proxy sends to an OpenAI-API model, partitioned by
+          that one provider, under scope gateway; one plugin on each wired model's service, whose policy matches all
+          of that service's requests, under scope model. Either keeps its count in the Kong data store, read and
+          written on every request, under a namespace of its own. */}}
+        {{- $budgetScope := "" }}
+        {{- $budgetPolicy := dict }}
+        {{- with $budget }}
+        {{- $budgetScope = toString .values.scope }}
+        {{- $unit := toString .values.unit }}
+        {{- $period := toString .infra.period }}
+        {{- $suffix := regexFind "[a-z]+$" $period }}
+        {{- if not (has $unit (list "total_tokens" "prompt_tokens" "completion_tokens")) }}{{ fail (printf "%s writes the period budget of %q, which asks for unit %s, and Kong's token rate limit counts total_tokens, prompt_tokens or completion_tokens" $bundle $.context.instance_id $unit) }}{{ end }}
+        {{- if not (has $budgetScope (list "gateway" "model")) }}{{ fail (printf "%s writes the period budget of %q, which asks for scope %s, and it writes scope gateway or model" $bundle $.context.instance_id $budgetScope) }}{{ end }}
+        {{- if not (has $suffix (list "s" "m" "h" "d")) }}{{ fail (printf "%s writes the period budget of %q, which asks for a period of %s, and Kong's token rate limit takes a window of a number of seconds" $bundle $.context.instance_id $period) }}{{ end }}
+        {{- $seconds := mul (atoi (regexFind "^[0-9]+" $period)) (get (dict "s" 1 "m" 60 "h" 3600 "d" 86400) $suffix) }}
+        {{- $budgetPolicy = dict "window_type" "fixed" "limits" (list (dict "limit" .infra.limit "window_size" $seconds "tokens_count_strategy" $unit)) }}
+        {{- end }}
+        {{- /* The data masking's one AI PII Sanitizer configuration, read only for that edition, written onto each wired
+          model's two routes. The PII service is the one connection on the importing component's pii_sanitizer
+          socket, at the protocol, host and port it publishes, since the sanitizer sends it every text it masks, the
+          patterns included. The entity types are Kong's own categories, each listed once, and the patterns go as its
+          custom patterns, each with a score of 1, the highest Kong takes, a regular expression's match being certain,
+          and add the category custom. Each match is replaced by a numbered placeholder and nothing is restored, and a
+          PII service that cannot be reached fails the request. Under action refuse, block_if_detected is written as
+          well, which refuses a request in which the PII service finds a match; Kong's reference shows it refusing
+          requests and not replies, so refuse is written with scope request alone. The setting naming what is masked
+          is written only for a scope reaching replies, the gateways older than 3.12 that mask requests alone taking no
+          such setting; the AI proxy then refuses a request asking for a streamed reply. */}}
+        {{- $sanitizer := "" }}
+        {{- $denyStreaming := false }}
+        {{- with $masking }}
+        {{- $scope := toString (optional .values "scope" "request") }}
+        {{- $action := toString (optional .values "action" "redact") }}
+        {{- if not (has $action (list "redact" "refuse")) }}{{ fail (printf "%s writes the data masking of %q, which asks for action %s, and it writes action redact or refuse, Kong's sanitizer restoring nothing here" $bundle $.context.instance_id $action) }}{{ end }}
+        {{- if not (has $scope (list "request" "response" "both")) }}{{ fail (printf "%s writes the data masking of %q, which asks for scope %s, and it writes scope request, response or both" $bundle $.context.instance_id $scope) }}{{ end }}
+        {{- if and (eq $action "refuse") (ne $scope "request") }}{{ fail (printf "%s writes the data masking of %q, which asks for action refuse with scope %s, and it writes refuse with scope request alone, Kong's block_if_detected refusing requests" $bundle $.context.instance_id $scope) }}{{ end }}
+        {{- $categories := list "bank" "credentials" "creditcard" "crypto" "date" "driverlicense" "email" "general" "ip" "medical" "nationalid" "nrp" "passport" "phone" "ssn" "url" }}
+        {{- $anonymize := list }}
+        {{- range $e := (optional .values "entities" list) }}
+        {{- if not (has (toString $e) $categories) }}{{ fail (printf "%s writes the data masking of %q, which lists the entity type %s, and Kong's sanitizer takes the categories %s" $bundle $.context.instance_id (toString $e) (join ", " $categories)) }}{{ end }}
+        {{- if not (has (toString $e) $anonymize) }}{{ $anonymize = append $anonymize (toString $e) }}{{ end }}
+        {{- end }}
+        {{- $custom := list }}
+        {{- $patternNames := list }}
+        {{- range $p := (optional .values "patterns" list) }}
+        {{- if has (toString $p.name) $patternNames }}{{ fail (printf "%s writes the data masking of %q, which lists two patterns named %s, and Kong's sanitizer takes each custom pattern under a name of its own" $bundle $.context.instance_id (toString $p.name)) }}{{ end }}
+        {{- $patternNames = append $patternNames (toString $p.name) }}
+        {{- $custom = append $custom (dict "name" (toString $p.name) "regex" (toString $p.regex) "score" 1) }}
+        {{- end }}
+        {{- if $custom }}{{ $anonymize = append $anonymize "custom" }}{{ end }}
+        {{- $pii := list }}
+        {{- range $alias, $edge := $.context.uses }}{{ if eq $edge.socket "pii_sanitizer" }}{{ $pii = append $pii $edge }}{{ end }}{{ end }}
+        {{- if ne (len $pii) 1 }}{{ fail (printf "%s writes the data masking of %q, which needs one connection on its pii_sanitizer socket, the PII service its sanitizer calls, and that socket carries %d" $bundle $.context.instance_id (len $pii)) }}{{ end }}
+        {{- $service := (first $pii).provides }}
+        {{- if not (and (optional $service "protocol" "") (optional $service "host" "") (optional $service "port" "")) }}{{ fail (printf "%s writes the data masking of %q, whose pii_sanitizer connection reaches %q, which publishes no protocol, host and port for the sanitizer to call" $bundle $.context.instance_id (first $pii).target) }}{{ end }}
+        {{- $config := dict "scheme" (toString $service.protocol) "host" (toString $service.host) "port" (atoi (toString $service.port)) "anonymize" $anonymize "redact_type" "placeholder" "recover_redacted" false "stop_on_error" true }}
+        {{- if $custom }}{{ $_ := set $config "custom_patterns" $custom }}{{ end }}
+        {{- if eq $action "refuse" }}{{ $_ := set $config "block_if_detected" true }}{{ end }}
+        {{- if ne $scope "request" }}{{ $_ := set $config "sanitization_mode" (ternary "OUTPUT" "BOTH" (eq $scope "response")) }}{{ $denyStreaming = true }}{{ end }}
+        {{- $sanitizer = toJson $config }}
+        {{- end }}
+        {{- if $wired }}
+        {{- /* The envelope. The configuration below is written once and wrapped by the envelope the importing Recipe
+          chose: a compose config's content or a ConfigMap key. Both are block scalars holding it at one indentation,
+          so in the compose fragment the config's content key sits one column deeper than its name, the shallowest
+          place a block scalar of that indentation can hang from; the compose target reads the fragment's configs and
+          writes them into the compose file, so that column reaches no emitted byte. */}}
+        {{- if $compose -}}
+        configs:
+          {{ $configName }}:
+           content: |
+        {{- else -}}
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: {{ .context.rendered_name }}{{ $nameSuffix }}
+        data:
+          {{ $file }}: |
+        {{- end }}
+            _format_version: "3.0"
+            services:
+        {{- range $alias, $edge := .context.uses }}
+        {{- if eq $edge.socket "models" }}
+        {{- $base := get $bases $alias }}
+        {{- $header := get $headers $alias }}
+        {{- $walk := get $walks $alias }}
+              - name: {{ printf "model-%s" $alias | toJson }}
+                url: {{ $base | toJson | replace "$" $dollar }}
+                routes:
+        {{- range $operation := list "chat" "completions" }}
+        {{- $path := ternary "/chat/completions" "/completions" (eq $operation "chat") }}
+                  - name: {{ printf "model-%s-%s" $alias $operation | toJson }}
+                    paths:
+                      - {{ printf "/%s/v1%s" $alias $path | toJson }}
+                    methods:
+                      - POST
+                    plugins:
+                      - name: request-transformer
+                        config:
+                          remove:
+                            body:
+                              - model
+        {{- if $guardConfig }}
+                      - name: ai-prompt-guard
+                        config: {{ $guardConfig | replace "$" $dollar }}
+        {{- end }}
+        {{- if $walk }}
+        {{- /* A walked alias's route: Kong Gateway Enterprise's AI Proxy Advanced, whose balancer holds the walk as
+          its targets, each in a priority group of its own by a weight falling from the number of targets to one,
+          and retries one fewer than the targets, so the walk reaches its last target and no further. A target is the
+          walked alias's own model, at the address its connection's service forwards to, with that connection's
+          credential read from the variable its own routes name. A failure the balancer moves on after is one listed
+          here; non_idempotent lets it pass a POST on. */}}
+                      - name: ai-proxy-advanced
+                        config:
+        {{- if $denyStreaming }}
+                          response_streaming: deny
+        {{- end }}
+                          balancer:
+                            algorithm: priority
+                            retries: {{ sub (len $walk) 1 }}
+                            failover_criteria:
+                              - error
+                              - timeout
+                              - invalid_header
+                              - http_429
+                              - http_500
+                              - http_502
+                              - http_503
+                              - http_504
+                              - non_idempotent
+                          targets:
+        {{- range $i, $target := $walk }}
+        {{- $te := get $.context.uses $target }}
+                            - route_type: {{ ternary "llm/v1/chat" "llm/v1/completions" (eq $operation "chat") }}
+                              weight: {{ sub (len $walk) $i }}
+        {{- if hasKey (default dict $te.features) "credential" }}
+                              auth:
+                                header_name: Authorization
+                                header_value: {{ printf "{vault://env/%s}" (get $headers $target) | toJson }}
+        {{- end }}
+                              model:
+                                provider: openai
+                                name: {{ $te.provides.model | toJson | replace "$" $dollar }}
+                                options:
+                                  upstream_url: {{ printf "%s%s" (get $bases $target) $path | toJson | replace "$" $dollar }}
+        {{- end }}
+        {{- else }}
+                      - name: ai-proxy
+                        config:
+                          route_type: {{ ternary "llm/v1/chat" "llm/v1/completions" (eq $operation "chat") }}
+        {{- if $denyStreaming }}
+                          response_streaming: deny
+        {{- end }}
+        {{- if hasKey (default dict $edge.features) "credential" }}
+                          auth:
+                            header_name: Authorization
+                            header_value: {{ printf "{vault://env/%s}" $header | toJson }}
+        {{- end }}
+                          model:
+                            provider: openai
+                            name: {{ $edge.provides.model | toJson | replace "$" $dollar }}
+                            options:
+                              upstream_url: {{ printf "%s%s" $base $path | toJson | replace "$" $dollar }}
+        {{- end }}
+        {{- if $sanitizer }}
+                      - name: ai-sanitizer
+                        config: {{ $sanitizer | replace "$" $dollar }}
+        {{- end }}
+        {{- end }}
+        {{- if eq $budgetScope "model" }}
+                plugins:
+                  - name: ai-rate-limiting-advanced
+                    config: {{ toJson (dict "strategy" "cluster" "sync_rate" 0 "namespace" (printf "period-budget-model-%s" $alias) "policies" (list $budgetPolicy)) }}
+        {{- end }}
+        {{- end }}
+        {{- end }}
+        {{- if eq $budgetScope "gateway" }}
+            plugins:
+              - name: ai-rate-limiting-advanced
+                config: {{ toJson (dict "strategy" "cluster" "sync_rate" 0 "namespace" "period-budget" "policies" (list (set (deepCopy $budgetPolicy) "match" (list (dict "type" "provider" "partition_by" true "values" (list "openai")))))) }}
+        {{- end }}
+        {{- end }}

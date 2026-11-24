@@ -1,0 +1,150 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: strimzi-operator
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    Installs the Strimzi Cluster Operator as an explicit component: a
+    ServiceAccount, the cluster RBAC the operator needs to reconcile Kafka custom
+    resources, and the operator Deployment on the upstream image. Emitting the
+    control plane as a first-class component lets an operator-driven Kafka ship its
+    runtime prerequisite alongside the Kafka custom resource it emits (the
+    bundled-deploy prerequisite mode), so the custom resource and the operator that
+    reconciles it are deployed together. This is a minimal control-plane bootstrap
+    installing no custom-resource definitions, and at the image the Component pins
+    its role falls short of what the operator needs to run a Kafka cluster: it
+    grants nothing on pods, Services, Secrets, volume claims, roles or the
+    operator's own pod sets, and renders none of the roles the operator binds
+    brokers and the entity operator to. Reach for `strimzi-operator-chart`, which
+    renders the project's own chart.
+
+    The operator serves its own metrics at /metrics on port 8080, beside its
+    liveness and readiness paths, and checks no caller. With
+    `values.metrics_enabled` true a ClusterIP Service, `<instance>-metrics` in
+    infra.namespace, carries that port and provides.metrics_endpoint
+    publishes its address with the namespace; false, that key is empty and no
+    Service is rendered.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/messaging/strimzi-operator:1.0.0
+  # What this bootstrap lacks against the project's chart at the release the
+  # image pins, 1.3.0: the chart's roles grant the operator pods, service
+  # accounts, ConfigMaps, Services, endpoints, Secrets and volume claims; roles,
+  # role bindings and cluster role bindings; its own pod sets and every status
+  # and finalizer subresource of its custom resources; disruption budgets,
+  # network policies, ingresses, leases, nodes, storage classes and events. The
+  # chart also renders the cluster roles the operator binds the Kafka brokers,
+  # the entity operator and clients to, and hands the operator the images of
+  # every Kafka version it runs in its environment. None of that is rendered
+  # here, so the operator cannot create a Kafka cluster's nodes.
+  # metrics_endpoint is the address the operator serves its own metrics at while
+  # values.metrics_enabled is true: /metrics on port 8080 of the ClusterIP
+  # Service rendered after the Deployment, in the same file. Every object here
+  # lives in infra.namespace rather than the Release's, so the host carries that
+  # namespace and resolves from a Prometheus server in any other. It is spelled
+  # out in full on purpose: a provides entry cannot read another.
+  provides:
+    metrics_endpoint: "{{ if .values.metrics_enabled }}http://{{ .context.instance_id }}-metrics.{{ .infra.namespace }}:8080/metrics{{ end }}"
+  artifacts:
+    serviceaccount.yaml: |
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: {{ .context.instance_id }}
+        namespace: {{ .infra.namespace }}
+    clusterrole.yaml: |
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: {{ .context.instance_id }}
+      rules:
+        - apiGroups: ["kafka.strimzi.io"]
+          resources: ["kafkas", "kafkanodepools", "kafkatopics", "kafkausers"]
+          verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+        - apiGroups: ["apps"]
+          resources: ["statefulsets", "deployments"]
+          verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    clusterrolebinding.yaml: |
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: {{ .context.instance_id }}
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: {{ .context.instance_id }}
+      subjects:
+        - kind: ServiceAccount
+          name: {{ .context.instance_id }}
+          namespace: {{ .infra.namespace }}
+    # The operator's liveness and readiness probes are the ones the project's
+    # own install manifest gives it: /healthy and /ready on its health and
+    # metrics server, which listens on port 8080. The port is fixed in the
+    # operator rather than set by an option, and a probe names it by number, so
+    # no container port is declared for it.
+    #
+    # That server answers /healthy, /ready and /metrics, plain HTTP on every
+    # address of the pod. While values.metrics_enabled is true a ClusterIP
+    # Service follows the Deployment in this file, selecting its pod and
+    # reaching the port by number too, which a Service does whether or not the
+    # container declares it. Like every object here it is named after the
+    # component instance, with -metrics appended. While the value is false the
+    # file is the Deployment alone.
+    deployment.yaml: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: {{ .context.instance_id }}
+        namespace: {{ .infra.namespace }}
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app.kubernetes.io/name: {{ .context.instance_id }}
+        template:
+          metadata:
+            labels:
+              app.kubernetes.io/name: {{ .context.instance_id }}
+          spec:
+            serviceAccountName: {{ .context.instance_id }}
+            containers:
+              - name: strimzi-cluster-operator
+                image: {{ .infra.image }}
+                env:
+                  - name: STRIMZI_NAMESPACE
+                    value: {{ .infra.namespace }}
+                livenessProbe:
+                  httpGet:
+                    path: /healthy
+                    port: 8080
+                  initialDelaySeconds: 10
+                  periodSeconds: 30
+                readinessProbe:
+                  httpGet:
+                    path: /ready
+                    port: 8080
+                  initialDelaySeconds: 10
+                  periodSeconds: 30
+      {{- if .values.metrics_enabled }}
+      ---
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: {{ .context.instance_id }}-metrics
+        namespace: {{ .infra.namespace }}
+      spec:
+        type: ClusterIP
+        selector:
+          app.kubernetes.io/name: {{ .context.instance_id }}
+        ports:
+          - name: metrics
+            port: 8080
+            targetPort: 8080
+      {{- end }}

@@ -1,0 +1,271 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: argo-workflows
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    Argo Workflows via the project's own Helm chart, served from the argoproj
+    HTTPS chart repository. The chart deploys the workflow controller, which
+    watches Workflow custom resources and starts a pod per step, together with
+    the API server that serves the submission and query API and the web console,
+    the role and role binding for a workflow pod's service account in each
+    namespace the controller manages, and the controller's ConfigMap. When the
+    Component's install_crds value is on, the chart also installs the Argo
+    Workflows CustomResourceDefinitions. This Recipe pins the controller, API
+    server, workflow executor and definition-installer container images to
+    explicit release tags for reproducible renders, and pins the chart's resource
+    names to the release name the helm provider gives the chart, so the API
+    server's Service is named predictably, in the alphabet a Kubernetes name
+    allows. Default chart version in source.version; override via
+    infra.source_version.
+
+    Every namespaced resource lands in the namespace the Release declares for
+    the component, or in `default` where none is declared. The workflow role
+    and role binding are also rendered in each namespace workflow_namespaces
+    names, `default` unless the Aggregate sets it, because workflows run there.
+
+    With `values.metrics_enabled` true the chart serves the workflow
+    controller's metrics over plain HTTP and adds its ClusterIP Service,
+    `<rendered_name>-workflow-controller`, port 8080, which checks no caller;
+    provides.metrics_endpoint publishes the address. False, that key is empty.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/ai-pipeline/argo-workflows:1.0.0
+
+  source:
+    kind: helm-https-chart
+    url: https://argoproj.github.io/argo-helm
+    chart: argo-workflows
+    # Default chart version. Override via infra.source_version.
+    version: "{{ optional .infra `source_version` \"2.0.3\" }}"
+
+  # provides.host is the API server's Service name. The valuesMapping below pins
+  # the chart's fullnameOverride to the rendered name, the release name the helm
+  # provider gives the chart, which spells the Component's name in the alphabet
+  # a Kubernetes name allows. The chart suffixes the server's own Service with
+  # "-server", so that Service is named exactly "<rendered_name>-server" with no
+  # namespace segment. A same-namespace consumer reaches the submission API under
+  # this name directly; a cross-namespace consumer qualifies it with the target
+  # namespace caller-side. protocol is
+  # "http" — the render serves the API over plain HTTP in-cluster and leaves TLS
+  # termination to an ingress in front of it.
+  #
+  # metrics_endpoint is the address the workflow controller serves its metrics
+  # at while values.metrics_enabled is true: /metrics on port 8080 of the
+  # controller's own Service, which the chart names after the resource names
+  # above followed by -workflow-controller and renders only then, a ClusterIP
+  # whatever type the API server's Service takes. It is empty while the value is
+  # false, when the controller still serves its metrics on its pod, over TLS,
+  # and no Service carries them.
+  provides:
+    host: "{{ .context.rendered_name }}-server"
+    port: "{{ .infra.port }}"
+    protocol: "http"
+    metrics_endpoint: "{{ if .values.metrics_enabled }}http://{{ .context.rendered_name }}-workflow-controller:8080/metrics{{ end }}"
+
+  # This Recipe reads from infra.overrides:
+  #   controller_image   - map[string]string (controller.image.* fields; overrides the tag pin)
+  #   server_image       - map[string]string (server.image.* fields; overrides the tag pin)
+  #   executor_image     - map[string]string (executor.image.* fields; overrides the tag pin)
+  #   crd_installer_image - map[string]string (crds.upgradeJob.image.* fields; overrides the tag pin)
+  #   requests           - { cpu: string, memory: string } (resource requests, applied to controller and API server)
+  #   parallelism        - integer (controller.parallelism; how many workflows run at once cluster-wide)
+  #   namespace_parallelism - integer (controller.namespaceParallelism; incomplete workflows allowed per namespace)
+  #   log_level          - string (controller.logging.level; one of debug, info, warn, error)
+  #   single_namespace   - bool (singleNamespace; confine the controller to the release namespace with Roles instead of ClusterRoles)
+  #   service_type       - string (server.serviceType; default ClusterIP)
+  #   auth_modes         - []string (server.authModes; how the API server authenticates callers)
+  #   nodeSelector       - map[string]string (applied to controller and API server)
+  #   tolerations        - []object (applied to controller and API server)
+  #
+  # The workflow controller serves its metrics on port 9090 of its pod whether
+  # or not the value mapping says anything of them, over TLS with a
+  # certificate it generates itself, and checks no caller; no Service carries
+  # them. With values.metrics_enabled true the value mapping writes the
+  # controller's metricsConfig, after its logging block: plain HTTP at /metrics
+  # on that port, the metrics and nothing else, and the controller's own
+  # Service carrying it as 8080, a ClusterIP, since infra.overrides.service_type
+  # sets the API server's Service alone. Each setting provides.metrics_endpoint
+  # reads is written out, so a chart version moving its defaults cannot move
+  # the address. With the value false nothing of it is rendered.
+  valuesMapping: |
+    ## ── Resource naming ────────────────────────────────────────
+    ## Pin the chart's generated names to the rendered name so the API
+    ## server's Service name is the one provides.host publishes.
+    fullnameOverride: "{{ .context.rendered_name }}"
+
+    ## ── Global image tag ───────────────────────────────────────
+    ## Backstop pin for any chart image not pinned individually below. The
+    ## chart would otherwise fall back to its own appVersion.
+    images:
+      tag: v4.1.2
+
+    ## ── Custom resource definitions (Developer intent) ─────────
+    ## Installs the Workflow custom resource definitions with the release when
+    ## on. Turn off when the definitions are managed out of band.
+    crds:
+      install: {{ .values.install_crds }}
+
+      ## The chart applies the full definitions from a hook Job; that Job's
+      ## image bundles the definitions for its own tag, so it is pinned in
+      ## step with the controller. Override the whole image block via
+      ## infra.overrides.crd_installer_image.
+      upgradeJob:
+        {{- if and .infra.overrides .infra.overrides.crd_installer_image }}
+        image:
+          {{- range $k, $v := .infra.overrides.crd_installer_image }}
+          {{ $k }}: "{{ $v }}"
+          {{- end }}
+        {{- else }}
+        image:
+          registry: quay.io
+          repository: argoproj/argo-workflows-crdinstaller
+          tag: v4.1.2
+        {{- end }}
+
+    ## ── Controller scope ───────────────────────────────────────
+    ## By default the controller is granted cluster-wide roles and manages the
+    ## namespaces listed below. Set infra.overrides.single_namespace to confine
+    ## it to the release namespace with namespaced Roles instead.
+    {{- if and .infra.overrides (hasKey .infra.overrides "single_namespace") }}
+    singleNamespace: {{ .infra.overrides.single_namespace }}
+    {{- end }}
+
+    ## ── Workflow controller ────────────────────────────────────
+    ## Watches Workflow resources and starts a pod per step. Its image is pinned
+    ## explicitly for a reproducible render; override the whole image block via
+    ## infra.overrides.controller_image.
+    controller:
+      {{- if and .infra.overrides .infra.overrides.controller_image }}
+      image:
+        {{- range $k, $v := .infra.overrides.controller_image }}
+        {{ $k }}: "{{ $v }}"
+        {{- end }}
+      {{- else }}
+      image:
+        registry: quay.io
+        repository: argoproj/workflow-controller
+        tag: v4.1.2
+      {{- end }}
+
+      ## ── Namespaces this controller runs workflows in ─────────
+      ## The role and role binding a workflow pod's service account needs are
+      ## created in each of these namespaces as well as in the namespace the
+      ## controller runs in.
+      workflowNamespaces: {{ toJson .values.workflow_namespaces }}
+
+      ## ── Concurrency limits ───────────────────────────────────
+      {{- if and .infra.overrides .infra.overrides.parallelism }}
+      parallelism: {{ .infra.overrides.parallelism }}
+      {{- end }}
+      {{- if and .infra.overrides .infra.overrides.namespace_parallelism }}
+      namespaceParallelism: {{ .infra.overrides.namespace_parallelism }}
+      {{- end }}
+
+      ## ── Controller logging ───────────────────────────────────
+      {{- if and .infra.overrides .infra.overrides.log_level }}
+      logging:
+        level: "{{ .infra.overrides.log_level }}"
+      {{- end }}
+      {{- if .values.metrics_enabled }}
+      metricsConfig:
+        enabled: true
+        path: /metrics
+        port: 9090
+        secure: false
+        servicePort: 8080
+      {{- end }}
+
+      ## ── Controller resources ─────────────────────────────────
+      resources:
+        limits:
+          cpu: "{{ .infra.compute.cpu }}"
+          memory: "{{ .infra.compute.memory }}"
+        {{- if and .infra.overrides .infra.overrides.requests }}
+        requests:
+          cpu: "{{ .infra.overrides.requests.cpu }}"
+          memory: "{{ .infra.overrides.requests.memory }}"
+        {{- end }}
+
+      ## ── Controller scheduling ────────────────────────────────
+      {{- if .infra.overrides }}
+      {{- if .infra.overrides.nodeSelector }}
+      nodeSelector: {{ toJson .infra.overrides.nodeSelector }}
+      {{- end }}
+      {{- if .infra.overrides.tolerations }}
+      tolerations: {{ toJson .infra.overrides.tolerations }}
+      {{- end }}
+      {{- end }}
+
+    ## ── Workflow executor ──────────────────────────────────────
+    ## The controller runs this image as the init and wait container beside
+    ## every workflow step, to stage inputs and collect outputs.
+    executor:
+      {{- if and .infra.overrides .infra.overrides.executor_image }}
+      image:
+        {{- range $k, $v := .infra.overrides.executor_image }}
+        {{ $k }}: "{{ $v }}"
+        {{- end }}
+      {{- else }}
+      image:
+        registry: quay.io
+        repository: argoproj/argoexec
+        tag: v4.1.2
+      {{- end }}
+
+    ## ── API server ─────────────────────────────────────────────
+    ## Serves the workflow submission and query API and the web console. This
+    ## is the endpoint provides.host and provides.port address.
+    server:
+      {{- if and .infra.overrides .infra.overrides.server_image }}
+      image:
+        {{- range $k, $v := .infra.overrides.server_image }}
+        {{ $k }}: "{{ $v }}"
+        {{- end }}
+      {{- else }}
+      image:
+        registry: quay.io
+        repository: argoproj/argocli
+        tag: v4.1.2
+      {{- end }}
+
+      ## ── API server service ───────────────────────────────────
+      ## infra.port sets the Service port; the container keeps listening on the
+      ## chart's own target port, so changing this reroutes without rebuilding.
+      servicePort: {{ .infra.port }}
+      {{- if and .infra.overrides .infra.overrides.service_type }}
+      serviceType: "{{ .infra.overrides.service_type }}"
+      {{- end }}
+
+      ## ── Caller authentication ────────────────────────────────
+      {{- if and .infra.overrides .infra.overrides.auth_modes }}
+      authModes: {{ toJson .infra.overrides.auth_modes }}
+      {{- end }}
+
+      ## ── API server resources ─────────────────────────────────
+      resources:
+        limits:
+          cpu: "{{ .infra.compute.cpu }}"
+          memory: "{{ .infra.compute.memory }}"
+        {{- if and .infra.overrides .infra.overrides.requests }}
+        requests:
+          cpu: "{{ .infra.overrides.requests.cpu }}"
+          memory: "{{ .infra.overrides.requests.memory }}"
+        {{- end }}
+
+      ## ── API server scheduling ────────────────────────────────
+      {{- if .infra.overrides }}
+      {{- if .infra.overrides.nodeSelector }}
+      nodeSelector: {{ toJson .infra.overrides.nodeSelector }}
+      {{- end }}
+      {{- if .infra.overrides.tolerations }}
+      tolerations: {{ toJson .infra.overrides.tolerations }}
+      {{- end }}
+      {{- end }}

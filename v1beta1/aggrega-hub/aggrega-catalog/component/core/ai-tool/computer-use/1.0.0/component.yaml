@@ -1,0 +1,121 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/ai-tool/computer-use
+  version: 1.0.0
+  # metadata.license carries the SPDX identifier of the software a Component
+  # packages, and this Component packages none: it declares a virtual-desktop
+  # tool whose display server and applications arrive in an image the
+  # Release names. There is no upstream product whose licence could be
+  # stated, which is the same fact component.aggrega.ai/upstream-licensing
+  # records as not-applicable.
+  description: >
+    A tool that presents an agent with a virtual desktop it can see and
+    control, taking screenshots and issuing pointer and keyboard input, so a
+    deployment can automate applications that expose neither an API nor a web
+    page. The desktop's screen geometry is set by the developer, defaulting to
+    1024 by 768, because the agent reasons over the pixels it is given.
+    Declared as a server: the desktop session is a long-running workload the
+    agent connects to. Marked mutating, since that input drives real
+    applications. Realized on Kubernetes as a single-replica Deployment fronted
+    by a ClusterIP Service, so one desktop stays resident across an agent's
+    turns and every screenshot comes from the session the previous input acted
+    on. An edge from the tool, on a socket the author names, delivers what its
+    `inject:` block dictates, as variables or as files, on every realization
+    that runs the tool. The catalog pins no image, so nothing renders until
+    the Release sets `infra.image`.
+    The component's own `inject:` block takes `env` and `file` entries too, and
+    one reading a value of the tool alone replaces that value's default variable
+    name.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: ai-tool
+    tool.aggrega.ai/impact: mutating
+    component.aggrega.ai/upstream-licensing: not-applicable
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # The mechanisms the developer's own inject block on the component may name:
+  # env and file, the two its realization delivers, as it renders no command
+  # line. Each env entry reaches the container under the name the developer
+  # gives it and each file entry at the path it gives. An entry reading one of
+  # the tool's own values alone replaces that value's default name, the
+  # COMPUTER_USE_TOOL_* variable the realization otherwise delivers it under; an
+  # entry reading it beside another value, or beside infra, metadata or the
+  # component's identity, replaces nothing.
+  inject: [env, file]
+
+  schema:
+    # values — Developer Intent
+    # Filled by the Developer in the Aggregate.
+    values:
+      $ref: "BaseComponents#/schemas/BaseToolParameter"
+      properties:
+        display_width: { type: integer, default: 1024 }
+        display_height: { type: integer, default: 768 }
+      required: [display_width, display_height]
+
+    # infra — Operational Sizing
+    # Filled by Ops in the Release. Developer never sees this.
+    infra:
+      # The image carries no default because this Component wraps no upstream
+      # product: no single project publishes a general virtual desktop for
+      # agents, so the Release names an image it already holds the right to
+      # run, its tag included. That is also why no engine_version knob appears
+      # here — the reference is supplied whole rather than assembled from a
+      # catalog-held name and an operator-held version.
+      image:
+        type: string
+        description: Container image serving the desktop session and its control API over HTTP.
+      port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 8080
+        description: Port the tool listens on, and the port it publishes to consumers.
+      compute:
+        cpu:
+          type: string
+          default: 500m
+        memory:
+          type: string
+          default: 1Gi
+          description: >
+            Memory request and limit. The defaults are a floor for a display
+            server rather than a sizing recommendation: demand tracks the
+            applications the agent drives on the desktop, so a Release raises
+            them for what it actually runs.
+
+    # provides — Public API Contract
+    # Keys exported to consumers via `uses` topology edges. All four describe
+    # where to reach the running session; the screen geometry reaches the
+    # process inside the container instead, because that is what reads it.
+    provides:
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name an agent calls to see and control the desktop. A
+          consumer that composes its own address dials this name; one that
+          does not reads `endpoint` instead.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port the control API is accepted on. It follows the port an
+          operator set in the Release, so a consumer reads it rather than
+          assuming a default.
+      endpoint:
+        type: string
+        required: true
+        description: >
+          Full base URL an agent sends screenshot and input requests to, with
+          the host and the port already composed. A consumer hands it to its
+          tool client as the address it calls.
+      protocol:
+        type: string
+        description: URL scheme to reach `host` and `port` over, for a consumer composing its own address rather than reading `endpoint`.

@@ -1,0 +1,6 @@
+# Content pins for this entity's external inputs, written by `aggrega pin`.
+# Commit it beside the entity. Run `aggrega pin` on the entity again to bring it up to date.
+version: 1
+localSourceDigests:
+  - path: bridge-fragment.yaml
+    digest: sha256:09f23dd3779dc74288c4d24c887445b24c64087d0826e9ced08d08cba1e6ca9a

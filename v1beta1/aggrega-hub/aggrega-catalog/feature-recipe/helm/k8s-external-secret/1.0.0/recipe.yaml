@@ -1,0 +1,132 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: FeatureRecipe
+metadata:
+  name: k8s-external-secret
+  version: 1.0.0
+  description: >
+    Generates a Kubernetes ExternalSecret resource from a co-located Helm chart,
+    so a secret-store operator running in the cluster fetches the credential and
+    reconciles it into a Secret. origin — from values or infra, whichever
+    carries it — is read as the key to fetch from the store, so the rendered
+    output carries the locator rather than the credential value. The ExternalSecret reads from a ClusterSecretStore named
+    platform-secret-store and refreshes hourly. The reconciled Secret uses the
+    deterministic name pattern {rendered_name}-{attachment_name}: the host
+    component's rendered name, which the helm provider spells in the characters
+    a Kubernetes name allows, then the slot name with underscores normalized to
+    hyphens, so the name is a valid RFC-1123 label wherever the host reports a
+    rendered name. On a host that reports none, the host part is the
+    component's identity, and the name is a valid label only where that
+    identity is one. The published provides point a consumer at that Secret
+    and the data key within it.
+
+    Reach for this realization where the External Secrets Operator runs in the
+    cluster with a ClusterSecretStore named platform-secret-store, and the
+    credential should be fetched from that store rather than written into the
+    rendered output. Reach for k8s-existing-secret where the Secret already
+    exists in the target namespace, and for k8s-secret-from-parameter where
+    neither holds and the material may sit in the rendered output, as it may
+    for evaluation.
+  maintainers:
+    - name: "Massimiliano Ferrero"
+      email: "m.ferrero@cognitio.it"
+spec:
+  capability: helm
+  implements: core/referenced-secret:1.0.0
+
+  # The referenceable-secret contract: publish the reconciled Secret's identity as
+  # provides, so a consumer references it (a Kubernetes secretKeyRef) without
+  # re-deriving the name. core/referenced-secret requires both keys; the emitted
+  # ExternalSecret below names its target from these provides — the name is
+  # authored once, here. The host part is .context.rendered_name: a component's
+  # name may carry an underscore or a capital, which the rendered name writes
+  # out. A host whose provider reports no rendered name — a helm Recipe placing
+  # an artifact set alone, such as helm/function-knative — names its own
+  # resources from its identity, and so does this Secret there: the host part is
+  # read through optional, which falls back to .context.instance_id, because a
+  # direct read of .context.rendered_name on such a host halts the build before
+  # that Recipe can judge the attachment. Wherever a rendered name is reported,
+  # the name is the same either way. The slot name is normalized (underscores to
+  # hyphens), so the published name is a valid RFC-1123 label wherever the host
+  # part is a rendered name, and on the fallback only where the component's
+  # identity is one; the consumer and the emitted ExternalSecret share this one
+  # resolved value, so a normalized name cannot drift between them.
+  #
+  # DELIBERATE NEAR-DUPLICATE, and it must be kept in step by hand. The `name`
+  # expression below is character-for-character the one k8s-secret-from-parameter
+  # publishes, and the two MUST agree: they are the two helm realizations of
+  # core/referenced-secret that DERIVE the Secret's name, so a Manifest may bind
+  # either one for the same attachment, and a consuming component reads the
+  # reference from .features.<slot>.provides.name either way. If the two
+  # expressions diverged, swapping between them would silently change a
+  # consumer's rendered reference — the build would still succeed, and the
+  # reference would point at a resource under another name. k8s-secret-from-value
+  # and k8s-secret-set publish the same expression, so these four name the Secret
+  # they derive one way; a change to one of the four is made to all four. The two
+  # helm realizations of core/random-password (random-password-external-secrets,
+  # random-password-kubernetes-secret-generator) compose their Secret's name the
+  # same way, host part included, but deliberately not byte for byte: they honour
+  # values.name ahead of the derived name and these four do not. A change to how
+  # the host part is read is made in all six.
+  #
+  # The third helm realization, k8s-existing-secret, sits outside this agreement
+  # on purpose: it derives no name and publishes the existing Secret's own, so
+  # binding it in place of either of these changes the consumer's reference by
+  # design — the reference then points at the Secret already in the namespace.
+  #
+  # There is no single home available for this expression: a provides value is a
+  # plain string, so the $import: reuse that valuesMapping, workload and artifacts
+  # accept does not apply to a provides block — an import map is refused as a
+  # provides value, and an `$import` key written directly under provides is read
+  # as an ordinary key and imports nothing — and no mapping library could hold
+  # it. Change all four in the same edit.
+  provides:
+    name: '{{ optional .context "rendered_name" .context.instance_id }}-{{ .attachment_name | replace "_" "-" }}'
+    key: "{{ .values.key }}"
+
+  # Resource Generation via a co-located Helm chart: the chart renders one
+  # ExternalSecret whose target name and data key are fed from the published
+  # provides — so the reconciled Secret and the consumer's
+  # .features.<slot>.provides are one authored source (no drift) — with the
+  # origin input as the key to fetch from the store. valuesMapping reads
+  # .provides (the same resolved values the consumer sees) rather than
+  # re-deriving the name inside the chart.
+  #
+  # The store this recipe reads from is the recipe's own fact and carries no
+  # authoring key: which store a cluster runs, and under which name, is a
+  # property of the target rather than of the application, so the Manifest
+  # selects it by binding this FeatureRecipe rather than by filling a field.
+  # A target with a differently-named store is served by a FeatureRecipe of its
+  # own naming that store.
+  source: ./chart
+  # The chart is also passed the scope's namespace, when the scope declares one,
+  # so the emitted ExternalSecret lands beside the workload that references the
+  # Secret it reconciles rather than wherever the applying tool defaults to — a
+  # reference does not resolve a Secret in another namespace. Empty when no scope
+  # declares one, and the chart then omits the field — matching a synthesized
+  # workload, which also emits no namespace and is placed by the applying tool.
+  #
+  # origin is read from whichever pillar carries it — values where the developer
+  # wrote it, infra where the operator did; the Feature halts the build when both
+  # or neither do. DELIBERATE NEAR-DUPLICATE: each realization of a credential
+  # Feature that reads the locator repeats this one expression, because it sits
+  # inside a template the realization owns, and no catalog kind holds a single
+  # template expression for several entities to share. values is read only
+  # through optional, and that is load-bearing: a template that also read
+  # .values.origin as a path would find the key present and empty, and never
+  # fall through to infra.
+  valuesMapping: |
+    secretName: "{{ .provides.name }}"
+    dataKey: "{{ .provides.key }}"
+    remoteKey: {{ optional .values "origin" (optional .infra "origin" "") | toJson }}
+    secretStore: "platform-secret-store"
+    secretStoreKind: "ClusterSecretStore"
+    refreshInterval: "1h"
+    {{- $ns := "" }}
+    {{- if .context.annotations }}
+      {{- $raw := optional (optional (default dict .context.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict .context.annotations) "aggregate" dict) "aggrega.ai/namespace" "") }}
+      {{- if $raw }}{{- $ns = $raw }}{{- end }}
+    {{- end }}
+    namespace: "{{ $ns }}"

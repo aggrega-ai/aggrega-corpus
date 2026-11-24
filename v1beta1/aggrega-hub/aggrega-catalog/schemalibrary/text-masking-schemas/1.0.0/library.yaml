@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: SchemaLibrary
+metadata:
+  name: TextMaskingSchemas
+  version: 1.0.0
+  description: |
+    Schema fragments for masking sensitive text by listed pattern and by
+    entity type. MaskedTextParameter declares patterns and entities once, for
+    core/data-masking, which masks what travels through a gateway, and for
+    values.log_masking on core/gateway/litellm, which masks what that gateway
+    writes to its logs, so a pattern or an entity type means the same thing on
+    both.
+spec:
+  schemas:
+    # What to mask: the regular expressions under patterns and the entity
+    # types under entities. A Feature's values and a Component's value both
+    # reference it, so it carries no Feature base: the documentation keys and
+    # the injection contract a Feature base declares are never a Component's.
+    # A reference to it is the one library entry its object composes, so the
+    # referencing value adds settings of its own beside these as properties,
+    # and states where its gateway matches them.
+    MaskedTextParameter:
+      type: object
+      properties:
+        patterns:
+          type: array
+          description: "Regular expressions whose matches are masked. Each carries a name, which the placeholder in place of the matched text shows unless the entity referencing these lets its author accept one that does not, and the expression itself, handed to the gateway exactly as written in the expression syntax that gateway reads. An expression matches what it literally describes and nothing else: another format, other spacing or another spelling of the same value passes unmasked."
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+                min: 1
+                description: "The pattern's name, which the placeholder in place of a match shows unless the entity referencing these lets its author accept a placeholder that does not."
+              regex:
+                type: string
+                min: 1
+                description: "The regular expression whose matches are masked."
+            required: [name, regex]
+        entities:
+          type: array
+          description: "Entity types a recognizer service detects and the gateway masks, written in that recognizer's own vocabulary, for example PERSON or EMAIL_ADDRESS. Recognition is statistical: it can miss an entity and can mask text that is not one. Listing any needs the gateway to be wired to a recognizer, which each realization names, and a realization refuses a type its recognizer does not know."
+          items:
+            type: string
+            min: 1

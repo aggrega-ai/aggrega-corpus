@@ -1,0 +1,174 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/observability/thanos-store
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    Thanos Store Gateway, the read side of a Thanos metrics stack. The Store
+    Gateway reads historical metric blocks from an S3-compatible object store and
+    serves them to queriers over its StoreAPI on a gRPC port. The object store it
+    reads from is wired through its `objstore` uses-socket: the endpoint the
+    store publishes gives the S3 endpoint in the object-store configuration, and
+    its scheme whether that connection is plain HTTP or TLS. Credentials reach
+    the process as environment variables through the AWS SDK credential chain
+    rather than being embedded in that configuration, so the rendered
+    configuration carries no secret: the access key's secret half is the
+    connection's `credential`, and its identifier the connection's
+    `credential_id` where one is attached, else the `s3_access_key` value. The
+    Store Gateway keeps only an ephemeral local cache of index data — the object
+    store is the system of record — so it renders as a stateless server. Exports its
+    StoreAPI host, port, and protocol to consumers via the uses topology. The
+    gateway serves its own metrics in the Prometheus format at /metrics on its
+    HTTP port, not the published StoreAPI port, and publishes that address as
+    `metrics_endpoint`.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: observability
+    component.aggrega.ai/upstream-licensing: osi-approved
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # Self-inject allowlist: the component may inject resolved uses-edge values
+  # into the env delivery mechanism.
+  inject: [env]
+
+  usesSchema:
+    # The S3-compatible object store the Store Gateway reads metric blocks from:
+    # any component the catalog labels a storage resource. A backup controller,
+    # which the catalog files under storage too but types server, is refused.
+    # The Recipe reads the endpoint the selected store publishes, writes its
+    # host and port as the S3 endpoint in the object-store configuration, and
+    # lets its scheme choose plain HTTP or TLS; a store publishing none halts
+    # the build. The bucket is this component's own value, and a store that
+    # publishes a different one halts the build too.
+    objstore:
+      selector: "component.aggrega.ai/type=resource,component.aggrega.ai/category=storage"
+      inject: [env]
+      required: true
+      # A statement about this connection's target, authored on the connection:
+      # the object store it reaches takes no credential. The secret key has no
+      # default, so this is what lets a connection carrying none build; it
+      # changes nothing else this component renders.
+      valueSchema:
+        unauthenticated:
+          type: boolean
+          default: false
+          description: Declares that the object store this connection reaches takes no credential, so a connection carrying none is intended rather than an omission. A connection carrying neither a credential nor this value halts the build; with this value set and no credential, no secret key is presented. It changes nothing else this component renders.
+      # The access key the Store Gateway authenticates to this object store with
+      # is a pair presented on one connection: credential_id holds its
+      # identifier half and credential its secret half. The Recipe supplies each
+      # as an env secret. The identifier is optional: unattached, the Recipe
+      # takes it from the s3_access_key value instead. The secret half has no
+      # default: a connection with nothing in credential halts the build, naming
+      # it, unless it declares unauthenticated. Transparent (inject: [env]) so the
+      # injected values reach the Recipe on the env pipe.
+      # To have the cluster generate the secret half, attach core/random-password
+      # on the connection; the store takes the same credential by
+      # core/referenced-secret.
+      featuresSchema:
+        credential_id:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [env]
+          description: "Access-key identifier the Store Gateway presents to the object store this connection reaches, the identifier half of the pair whose secret half is this connection's credential, supplied as the object-store access key ID via the credential subsystem. It names an account on that store, so it matches whatever the store itself was given. Unattached, the s3_access_key value is presented instead."
+        credential:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [env]
+          description: "S3 secret key the Store Gateway presents to the object store this connection reaches, supplied as the object-store secret access key via the credential subsystem. There is no default: the build halts when nothing fills this slot, unless the connection's values set unauthenticated: true."
+
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      s3_access_key:
+        type: string
+        default: admin
+        description: S3 access-key identifier presented to the object store where the `objstore` connection carries no `credential_id`; a `credential_id` attached there is presented in its place. Its secret is the `credential` the `objstore` connection carries.
+      bucket:
+        type: string
+        default: thanos
+        description: Object-store bucket the Store Gateway reads metric blocks from. The bucket must be pre-created out of band; the read tier does not provision it. Where the store wired to `objstore` publishes a bucket of its own, this names the same one, or the build halts.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      http_port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 10902
+        description: HTTP port serving health and metrics endpoints, reachable in-cluster only.
+      grpc_port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 10901
+        description: gRPC port serving the StoreAPI; queriers connect here.
+      engine_version:
+        type: string
+        default: "v0.42.0"
+        description: Thanos container image tag.
+      compute:
+        cpu:
+          type: string
+          default: 250m
+        memory:
+          type: string
+          default: 512Mi
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name of the Service the gateway serves historical
+          metric blocks on. A query front end adds this name to its store list
+          together with `port`.
+      port:
+        type: integer
+        required: true
+        description: TCP port the store API is served on. It carries the gRPC port an operator set, never the health-and-metrics HTTP port.
+      protocol:
+        type: string
+        description: How the published address is spoken to — `grpc`, so a query front end dials it as a store rather than as an HTTP endpoint.
+      # The address a Prometheus server scrapes the gateway's own metrics at.
+      # Every Thanos component serves them in the Prometheus format at /metrics
+      # on its HTTP port, always on, and the Recipe configures no credential for
+      # that port; for the Store Gateway it is infra.http_port, which its Service
+      # carries beside the StoreAPI port, so the address is not the published
+      # host and port. The Recipe publishes it spelled out in full from its own
+      # host and HTTP port, because a provides entry cannot read another.
+      metrics_endpoint:
+        type: string
+        description: >
+          The full address Prometheus scrapes this component's metrics at —
+          scheme, host, port and path, `http://<host>:<http_port>/metrics` on
+          the HTTP port, which is not the published `port`. Empty where the
+          component serves none reachable.
+
+  # A connection to a target its catalog labels a managed service
+  # (component.aggrega.ai/hosting: managed) carries a credential, or says on the
+  # connection that its target takes none. The rule reads the target's labels,
+  # the connection's unauthenticated value and its credential slot, all known
+  # before a Recipe binds, so it holds whichever Recipe renders this component;
+  # a self-hosted target draws nothing. The list names every socket of this
+  # component that declares unauthenticated.
+  assertions:
+    managed_target_needs_a_credential: >-
+      {{- range $socket := list "objstore" -}}
+      {{- range $alias, $connection := (optional $.uses $socket dict) -}}
+      {{- $managed := eq (optional $connection.labels "component.aggrega.ai/hosting" "") "managed" -}}
+      {{- $optedOut := optional $connection.values "unauthenticated" false -}}
+      {{- if and $managed (not (hasKey $connection.features "credential")) (not $optedOut) -}}
+      {{- fail (printf "the %s connection %s of %q reaches %q, whose component.aggrega.ai/hosting label is managed, with no credential: attach one under credential on that connection, or set unauthenticated: true in its values" $socket $alias $.metadata.instance_id $connection.target) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- end -}}

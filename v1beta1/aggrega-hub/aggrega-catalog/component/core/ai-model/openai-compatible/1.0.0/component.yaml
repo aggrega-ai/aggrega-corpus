@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/ai-model/openai-compatible
+  version: 1.0.0
+  description: >
+    A broker speaking the OpenAI API, reached as an external reference: no
+    compute runs in-cluster, and what answers behind the endpoint is whatever
+    a Release points it at — a proxy running in the cluster, a gateway, or any
+    service serving that API. It is the component to reach for when an
+    application should not name a provider at all: the endpoint is
+    operator-supplied in the Release and the model is an alias the broker
+    resolves, so which provider actually answers can change with neither the
+    Aggregate nor the application changing. The provider name it carries
+    records which broker sits behind it, for a reader and for a selector to
+    match on rather than for the compiler, which pipes the strings and reads
+    neither. Consumers read the endpoint and the model name over a `uses`
+    edge, the contract every model here publishes. It holds no credential: a
+    consumer that must present a key to the service behind the endpoint
+    declares that key as `credential` on the socket that reaches the endpoint
+    and presents it itself.
+  labels:
+    component.aggrega.ai/type: resource
+    component.aggrega.ai/category: ai-model
+    model.aggrega.ai/capability: generative
+    # Model API: whatever the Release points the endpoint at answers there, and
+    # this broker's whole contract is that it speaks the OpenAI API, so an
+    # OpenAI client reaches it whichever service that is.
+    model.aggrega.ai/api: openai
+    component.aggrega.ai/upstream-licensing: not-applicable
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  schema:
+    values:
+      $ref: "BaseComponents#/schemas/BaseModelParameter"
+      properties:
+        provider_name: { type: string }
+      required: [provider_name]
+    infra:
+      # The broker gateway's own endpoint. Unlike a per-provider model with a
+      # fixed managed host, a broker endpoint is deployment-specific (the gateway
+      # the deployment routes through), so it is operator-supplied.
+      endpoint: { type: string }
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      # endpoint and model are the family contract an ai-agent consumer reads.
+      endpoint:
+        type: string
+        required: true
+        description: >
+          Base URL a consumer sends requests to. What answers behind it is
+          whatever the Release points at, so an application reads this instead
+          of naming a provider.
+      model:
+        type: string
+        required: true
+        description: >
+          Name a request asks the broker for. It is an alias the broker
+          resolves, so which provider serves it can change without the
+          consumer changing.
+      provider:
+        type: string
+        required: true
+        description: >
+          Name of the broker answering behind the endpoint. A consumer reads it
+          to record or label which service its requests reached, since the
+          endpoint alone does not say.

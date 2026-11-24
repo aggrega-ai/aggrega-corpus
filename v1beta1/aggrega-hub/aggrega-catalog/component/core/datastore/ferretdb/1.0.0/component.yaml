@@ -1,0 +1,167 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/datastore/ferretdb
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    A document-database proxy that speaks the MongoDB wire protocol and stores
+    data in a PostgreSQL backend with the DocumentDB extension. It is typed as a
+    stateful server because the endpoint it presents to consumers is a durable
+    document database: standard database consumers bind it through their
+    database socket exactly as they would a native datastore. The proxy process
+    itself holds no local state — its Recipe renders a stateless workload — but
+    the service contract it exposes is a database, so the type label reflects
+    the consumer-facing contract rather than the internal workload form. It
+    fronts a PostgreSQL/DocumentDB backend wired through its `backend`
+    uses-socket: the backend host, port, user, and database arrive on the
+    injection context and are composed into the proxy's PostgreSQL connection.
+    Exports its host, port, and protocol to consumers via the uses topology.
+
+    With `values.metrics_enabled` true each Recipe makes FerretDB's own
+    metrics, served at /debug/metrics on its debug listener, port 8088,
+    reachable and publishes that address as `metrics_endpoint`; false, that key
+    is empty. That listener checks no caller and also serves /debug/pprof, with
+    CPU profiles and execution traces on request, /debug/vars, /debug/archive
+    and /debug/graphs. On Kubernetes the value moves it from the pod's loopback
+    address onto every interface of the pod and names its port on the Service,
+    newly opening it to every in-cluster caller that reaches the pod; on Docker
+    Compose the value newly opens it to every peer on the network.
+  labels:
+    component.aggrega.ai/type: stateful-server
+    component.aggrega.ai/category: datastore
+    component.aggrega.ai/upstream-licensing: osi-approved
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # Self-inject allowlist: the component may inject resolved uses-edge values
+  # into the env delivery mechanism.
+  inject: [env]
+
+  usesSchema:
+    # The PostgreSQL/DocumentDB backend the proxy stores data in. The selected
+    # component's provides host, port, user, and database arrive on the
+    # injection context and are composed into the proxy's connection.
+    backend:
+      selector: "component.aggrega.ai/type=stateful-server"
+      inject: [env]
+      required: true
+      # A statement about this connection's target, authored on the connection:
+      # the backend it reaches takes no credential. It changes nothing this
+      # component renders.
+      valueSchema:
+        unauthenticated:
+          type: boolean
+          default: false
+          description: Declares that the backend this connection reaches takes no credential, so a connection carrying none is intended rather than an omission. It changes nothing this component renders.
+      # Optional password credential, held on the connection it is presented on.
+      # The proxy delegates authentication to its PostgreSQL backend, so this
+      # password is the same superuser password the backend uses. When attached,
+      # the Recipe wires it through the credential subsystem; when unattached,
+      # the Recipe falls back to its inline default.
+      # To replace the Recipe's development default, attach core/random-password
+      # on the connection: the cluster generates it, and the backend takes the
+      # same credential by core/referenced-secret.
+      featuresSchema:
+        credential:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [env]
+          description: "Optional password the proxy presents to the backend this connection reaches, shared with that backend. When attached, supplies the backend password via the credential subsystem. Unattached, compose/ferretdb and helm/ferretdb present the development literal `apppass`, which this catalog publishes, so every Release that leaves the slot unattached shares that password."
+
+  schema:
+    values:
+      # FerretDB's own metrics, in the Prometheus format, at /debug/metrics on
+      # its debug listener, port 8088. That listener checks no caller, and
+      # beside the metrics it serves /debug/pprof, which takes a CPU profile or
+      # an execution trace on request, /debug/vars, /debug/archive, a zip
+      # holding a ten-second CPU profile and execution trace among other
+      # debugging data, and /debug/graphs. On Kubernetes the listener stays on
+      # the pod's loopback address unless this value is true, which binds it on
+      # every interface of the pod and adds its port to the ClusterIP Service,
+      # so the value newly opens it to every in-cluster caller that reaches the
+      # pod. On Docker Compose the listener stays on the container's loopback
+      # address unless this value is true, so there the value newly opens it to
+      # every peer on the compose network. False leaves both as they are and the
+      # address unpublished.
+      metrics_enabled:
+        type: boolean
+        default: false
+        description: Makes FerretDB's own metrics, in the Prometheus format at /debug/metrics on port 8088, reachable and publishes their address as `metrics_endpoint`; while false that key is empty. The port checks no caller and also serves /debug/pprof (CPU profiles and execution traces on request), /debug/vars, /debug/archive and /debug/graphs. On Kubernetes the value moves the listener from the pod's loopback address onto every interface and names its port on the Service, newly opening it to every in-cluster caller that reaches the pod; on Docker Compose the value newly opens it to every peer on the network.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 27017
+        description: Document-database wire port the proxy listens on. Most operators should omit this and let the Recipe assign the default (27017).
+      engine_version:
+        type: string
+        default: "2.7.0"
+        description: Proxy container image tag.
+      compute:
+        cpu:
+          type: string
+          default: 250m
+        memory:
+          type: string
+          default: 512Mi
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      host:
+        type: string
+        required: true
+        description: Address a client opens its document-database connection to. On the in-cluster realizations it is the Service's DNS name.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port the proxy accepts connections on. It follows the port an
+          operator set in the Release, so a consumer reads it rather than
+          assuming a default.
+      protocol:
+        type: string
+        description: >
+          Wire protocol the published address speaks — `mongodb`, so a
+          consumer uses a MongoDB driver and never has to know a PostgreSQL
+          backend is behind it.
+      # The address a Prometheus server scrapes the proxy's own metrics at,
+      # while values.metrics_enabled is true: /debug/metrics on port 8088 of the
+      # name each Recipe's Service carries. Every Recipe publishes it spelled
+      # out in full.
+      metrics_endpoint:
+        type: string
+        description: >
+          The full address Prometheus scrapes this component's metrics at —
+          scheme, host, port and path, `http://<host>:8088/debug/metrics`, the
+          host being the proxy's Service name. Empty while
+          values.metrics_enabled is false.
+
+  # A connection to a target its catalog labels a managed service
+  # (component.aggrega.ai/hosting: managed) carries a credential, or says on the
+  # connection that its target takes none. The rule reads the target's labels,
+  # the connection's unauthenticated value and its credential slot, all known
+  # before a Recipe binds, so it holds whichever Recipe renders this component;
+  # a self-hosted target draws nothing. The list names every socket of this
+  # component that declares unauthenticated.
+  assertions:
+    managed_target_needs_a_credential: >-
+      {{- range $socket := list "backend" -}}
+      {{- range $alias, $connection := (optional $.uses $socket dict) -}}
+      {{- $managed := eq (optional $connection.labels "component.aggrega.ai/hosting" "") "managed" -}}
+      {{- $optedOut := optional $connection.values "unauthenticated" false -}}
+      {{- if and $managed (not (hasKey $connection.features "credential")) (not $optedOut) -}}
+      {{- fail (printf "the %s connection %s of %q reaches %q, whose component.aggrega.ai/hosting label is managed, with no credential: attach one under credential on that connection, or set unauthenticated: true in its values" $socket $alias $.metadata.instance_id $connection.target) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- end -}}

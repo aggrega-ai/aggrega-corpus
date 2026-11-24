@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: nats
+  version: 1.0.0
+  description: >
+    NATS for local development via Docker Compose. Synthesized-mode Workload —
+    the compose provider translates the Workload kind into a service entry
+    (image, port, exposed service). Used as an in-memory messaging server with
+    no persistence, so no data volume is declared. Authentication is off by
+    default; when a password credential is attached its value arrives on the
+    env pipe and the server is started with user/password authentication flags.
+    With no credential attached the server runs unauthenticated and the render
+    stays reproducible. provides.host is the bare service name, resolved on the
+    compose network.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: compose
+  implements: core/messaging/nats:1.0.0
+  # This Recipe reads no infra.overrides keys.
+
+  provides:
+    host: "{{ .context.instance_id }}"
+    port: "{{ .infra.port }}"
+    protocol: "nats"
+
+  workload: |
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    containers:
+      main:
+        image: "nats:{{ .infra.engine_version }}"
+        # Authentication is wired through the optional `password` credential
+        # slot. When a credential is attached its value arrives on the inject
+        # pipe as .context.inject.env.NATS_PASSWORD, and the server is started
+        # with user/password authentication flags. A credential attached that
+        # delivers no NATS_PASSWORD halts the build naming that key, rather than
+        # starting the server unauthenticated. With no credential attached no
+        # auth flags are emitted and the server runs unauthenticated.
+    {{- $delivered := default dict (optional (default dict .context.inject) "env" dict) }}
+    {{- if or (hasKey (default dict .features) "password") (optional $delivered "NATS_PASSWORD" "") }}
+        command:
+          - "--user"
+          - "{{ .values.user }}"
+          - "--pass"
+          - "{{ index .context.inject.env "NATS_PASSWORD" | replace "\\" "\\\\" | replace "\"" "\\\"" }}"
+    {{- end }}
+        ports:
+          client: {{ .infra.port }}
+        # NATS documents /healthz on its monitoring port as returning OK when the
+        # server is able to accept connections. That port is enabled by the
+        # image's own configuration file, which the authentication flags above
+        # replace, so the service's healthcheck asks the same question on the
+        # client port instead: it opens a TCP connection there with the nc the
+        # image's busybox provides. A service keeps one healthcheck, so one probe
+        # is declared.
+        health:
+          ready:
+            tcp: {{ .infra.port }}
+            periodSeconds: 10
+            timeoutSeconds: 5
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          client: {{ .infra.port }}

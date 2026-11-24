@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/ai-model/huggingface
+  version: 1.0.0
+  description: >
+    Hugging Face's managed Inference API, reached as an external reference: no
+    compute runs in-cluster and the compiler never calls the provider. It
+    fronts models of several kinds rather than one, so beside the model name
+    the component exposes the task a request is for — generating text,
+    transforming it, or returning features — which is what decides the shape
+    of the answer. Its host is fixed, so the realization publishes the
+    endpoint itself and a Release supplies none. The API key is the consumer's
+    to attach: the environment-variable name it arrives under belongs to the
+    application rather than to the model.
+  labels:
+    component.aggrega.ai/type: resource
+    component.aggrega.ai/category: ai-model
+    # Model API: Hugging Face's own Inference API answers at the host published
+    # here, each request shaped by the task it is for. It is not the OpenAI
+    # API, so a consumer reaches it through Hugging Face's client or request
+    # shape.
+    model.aggrega.ai/api: native
+    component.aggrega.ai/hosting: managed
+    component.aggrega.ai/upstream-licensing: proprietary
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  schema:
+    values:
+      $ref: "BaseComponents#/schemas/BaseModelParameter"
+      properties:
+        task: { type: string, enum: [text-generation, text2text-generation, feature-extraction], default: text-generation }
+      required: [task]
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      # endpoint and model are the family contract an ai-agent consumer reads.
+      endpoint:
+        type: string
+        required: true
+        description: >
+          Base URL of the Hugging Face Inference API. The host is fixed, so
+          the realization publishes it and a consumer points its client here
+          without a Release supplying anything.
+      model:
+        type: string
+        required: true
+        description: >
+          Repository id of the model a request is sent to. The API routes on
+          it, so a consumer appends it to the endpoint or passes it as the
+          model field.

@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/ai-model/databricks
+  version: 1.0.0
+  description: >
+    A Databricks model serving endpoint, reached as an external reference: no
+    compute runs in-cluster and the compiler never calls the provider. Serving
+    is per-workspace, so the host is operator-supplied in the Release while
+    the served endpoint is named separately as a value — which is what lets
+    one workspace serve several models and an Aggregate say which of them it
+    means. Consumers read the endpoint and the model name over a `uses` edge,
+    the contract every model here publishes, so an application reaching a
+    model served from a data platform is wired exactly like one reaching a
+    public API. Authentication is the consumer's concern: a workload attaches
+    its own credential rather than receiving one from this realization.
+  labels:
+    component.aggrega.ai/type: resource
+    component.aggrega.ai/category: ai-model
+    # Model API: the workspace's own model-serving API answers at the workspace
+    # address published here, a request naming the serving endpoint the values
+    # declare. A consumer reaches it through that API rather than by handing
+    # the address to an OpenAI client.
+    model.aggrega.ai/api: native
+    component.aggrega.ai/hosting: managed
+    component.aggrega.ai/upstream-licensing: proprietary
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  schema:
+    values:
+      $ref: "BaseComponents#/schemas/BaseModelParameter"
+      properties:
+        endpoint_name: { type: string }
+      required: [endpoint_name]
+    infra:
+      # The Databricks serving host is per-workspace (https://<workspace>.cloud.
+      # databricks.com), so the endpoint is operator-supplied rather than a fixed host.
+      endpoint: { type: string }
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      # endpoint and model are the family contract an ai-agent consumer reads.
+      endpoint:
+        type: string
+        required: true
+        description: >
+          Base URL of the Databricks workspace whose serving endpoints a
+          consumer calls. Serving is per-workspace, so the Release supplies
+          the host.
+      model:
+        type: string
+        required: true
+        description: >
+          Name of the serving endpoint inside that workspace a request is
+          routed to. One workspace serves several, so a consumer needs this to
+          reach the intended one.

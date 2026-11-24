@@ -1,0 +1,198 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/messaging/livekit-server
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    A LiveKit media server — the selective forwarding unit that carries realtime
+    audio and video between the participants of a room. A client opens a
+    WebSocket signalling session on the API port, then exchanges media over
+    WebRTC, which the server terminates either on one multiplexed UDP port with
+    a TCP port beside it as the fallback path for clients whose network blocks
+    UDP, or on a contiguous range of UDP ports that gives each connection its
+    own socket, which carries traffic only where the pod uses the node's own
+    network. Wire here when the cluster
+    carries realtime voice or video itself rather than handing the media to a
+    carrier it does not run, and the same server
+    serves conventional applications as readily as agent workloads.
+    Consumers receive the server's in-cluster host, its signalling port, the
+    protocol that port speaks, and the API key identifier they pair with their
+    own issued secret; the token-signing secret arrives through the api_secret
+    slot here and as the `credential` on each consumer's connection to this
+    server, and is never published on the topology. Realized by a Helm Recipe
+    that synthesizes a Deployment and a ClusterIP Service over the upstream
+    image and declares no volume: the server holds no durable disk, keeping room
+    and participant state in memory, so more than one replica means wiring the
+    state-store socket to a Redis-compatible datastore rather than adding
+    storage here.
+
+    With `values.metrics_enabled` true the Recipe turns on the server's
+    metrics, on a port of their own that checks no caller, and publishes their
+    address as `metrics_endpoint`; false, that key is empty.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: messaging
+    component.aggrega.ai/hosting: self-hosted
+    component.aggrega.ai/upstream-licensing: osi-approved
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # Self-inject allowlist: the component may inject its own provides keys and
+  # resolved uses-edge values into the env delivery mechanism.
+  inject: [env]
+
+  usesSchema:
+    # The Redis-compatible store the server coordinates through when a
+    # Release runs more than one replica. The selected component's host and
+    # port arrive on the injection context and compose the server's store
+    # address. Optional: a Release running one replica keeps room state in memory
+    # and binds nothing here, and renders byte-identically to a component with
+    # no socket at all. A store publishing protocol valkey-tls or redis-tls is reached over
+    # TLS, the server checking its certificate and the name dialed against the
+    # authority in server_ca where one is attached, and against the image's
+    # default trust store where not; a store publishing another value served
+    # over TLS halts the build, naming the connection.
+    state_store:
+      selector: "component.aggrega.ai/category=datastore"
+      inject: [env]
+      # The authority the server checks the store's certificate against, for a
+      # store whose certificate an authority the image does not already trust
+      # signs. Secret-kind-pinned because a referenceable Secret is what the
+      # Recipe mounts, and so marked sensitive as every secret-kind slot is,
+      # though the authority's certificate is not itself secret; delivered as a
+      # file.
+      featuresSchema:
+        server_ca:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [file]
+          description: "Optional authority the server checks the store's certificate against while the store publishes protocol valkey-tls or redis-tls, where the image does not already trust the authority that signs it. Its Secret holds ca.crt. The Recipe mounts the whole Secret read-only and names the file in the server's store settings. The build halts on a server_ca publishing no Secret name, and on one wired to a store served without TLS. Fill it with core/referenced-secret."
+
+  featuresSchema:
+    # The API secret the server signs and validates client access tokens with.
+    # Required, and deliberately carrying no inline default: a signing secret
+    # that ships with the catalog would be a shared secret every reader holds,
+    # so the credential is supplied rather than shipped and nothing renders
+    # until it is. Transparent (inject: [env]) so the value reaches the
+    # container on the env pipe; the selector is secret-kind-pinned but
+    # family-agnostic, so either an inject-value or a referenceable credential
+    # may fill it.
+    api_secret:
+      selector: "feature.aggrega.ai/kind=secret"
+      required: true
+      sensitive: true
+      inject: [env]
+      description: "Signing secret paired with the api_key identifier. The server issues and validates client access tokens with it, so every client of this server holds the same pair."
+
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      api_key:
+        type: string
+        default: "devkey"
+        description: Public identifier of the API key pair. It travels in the clear inside every access token the server issues, so it is not secret; the secret half is the api_secret credential slot.
+      # The server's own metrics, in the Prometheus format. The server serves
+      # them on a listener of its own, apart from the API port, when its
+      # configuration names a port for it, and that listener serves the metrics
+      # and nothing else; the server can ask for a username and password there,
+      # which the Recipe does not set, so it checks no caller. The Recipe names
+      # the port 6789, the one the server's own sample configuration uses, only
+      # while this value is true, and puts it on the Service; false leaves the
+      # metrics off and their address unpublished.
+      metrics_enabled:
+        type: boolean
+        default: false
+        description: Turns on the server's own metrics, in the Prometheus format, on a port of their own, 6789, and publishes their address as `metrics_endpoint`; while false that key is empty. The metrics port checks no caller, so anything that reaches it can read them.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 7880
+        description: Signalling and API port. Clients open their WebSocket session here and the server APIs answer on it. Most operators should omit this and let the Recipe assign the default (7880).
+      rtc_tcp_port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 7881
+        description: TCP port carrying WebRTC media for clients whose network blocks UDP. It is a fallback path rather than the ordinary one, and it stays declared so such a client still connects.
+      rtc_udp_port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 7882
+        description: Single UDP port all WebRTC media is multiplexed onto. It is declared as a container port and fronted by the Service, so it is the media path a Release reaches with no further host configuration. It carries the media while the two range bounds below are unset; setting both of them selects the range instead, and this port is then neither configured nor declared.
+      rtc_port_range_start:
+        type: integer
+        min: 1024
+        max: 65535
+        description: First port of the contiguous UDP range the server draws a per-connection media port from. Set it together with rtc_port_range_end — the server reads the range only when both bounds are present, and carries media on the multiplexed rtc_udp_port when either is missing. A range gives each connection its own socket rather than multiplexing every connection onto one, which raises the media throughput a single server sustains. The ports in it are configuration the server reads rather than ports the component declares — they are not container ports and no Service fronts them, so they carry client traffic only where the pod uses the node's own network and the range is open on the node's firewall.
+      rtc_port_range_end:
+        type: integer
+        min: 1024
+        max: 65535
+        description: Last port of the contiguous UDP media range, inclusive, and greater than rtc_port_range_start. Set it together with rtc_port_range_start — the server reads the range only when both bounds are present.
+      engine_version:
+        type: string
+        default: "v1.13.6"
+        description: Server container image tag. Selects the image tag on container targets.
+      log_level:
+        type: string
+        enum: [debug, info, warn, error]
+        default: info
+        description: Server log verbosity.
+      compute:
+        cpu:
+          type: string
+          default: 500m
+        memory:
+          type: string
+          default: 512Mi
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name of the Service carrying signalling. A client
+          opens its session against this name together with `port`; the media
+          ports are a separate path and are not published here.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port that Service accepts signalling and API requests on. It
+          carries the signalling port an operator set, never one of the media
+          ports.
+      protocol:
+        type: string
+        description: How the published address is spoken to — `ws`, since a client opens a WebSocket signalling session before any media flows.
+      api_key:
+        type: string
+        description: >
+          Public identifier of the API key pair, which a consumer sends when
+          it mints an access token. It is the naming half of the pair; the
+          secret half arrives through the credential attached to the
+          component's api_secret slot, and a consumer presents the same
+          secret as `credential` on the connection that reaches this server.
+      # The address a Prometheus server scrapes the server's own metrics at,
+      # while values.metrics_enabled is true: /metrics on port 6789 of the
+      # published host. The Recipe publishes it spelled out in full, because a
+      # provides entry cannot read another.
+      metrics_endpoint:
+        type: string
+        description: >
+          The full address Prometheus scrapes this component's metrics at —
+          scheme, host, port and path, `http://<host>:6789/metrics`. Empty
+          while values.metrics_enabled is false.

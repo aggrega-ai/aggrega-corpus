@@ -1,0 +1,624 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: kong-enterprise-chart
+  version: 1.0.0
+  description: >
+    Kong Gateway Enterprise on Kubernetes via the official Kong Helm chart,
+    served from that project's HTTPS chart repository, with the chart's
+    enterprise settings on. The gateway's configuration lives in the PostgreSQL
+    backend wired on the backend socket, so the chart's bundled database,
+    ingress controller, manager console and developer portal are off. It
+    renders a Deployment, a ServiceAccount, ClusterIP Services for the proxy
+    data plane and the in-cluster Admin API, the chart's Kong custom-resource
+    definitions, and the three schema-migration Jobs Kong sequences around a
+    release.
+
+    The image is the one infra.image names and no other.
+    infra.image_pull_secret becomes the chart's image pull secret. The licence
+    reaches every Kong container as KONG_LICENSE_DATA, from a secretKeyRef to
+    the Secret the license slot names, so no licence material is in the
+    rendered output.
+
+    Each model wired to the models socket gets a chat and a completion route
+    through Kong's AI proxy, the routes core/gateway/kong serves, in a
+    ConfigMap that a step in the gateway's own pod imports into the database.
+    It is the component's only realization. Any of the six AI Features halts
+    the build until infra.ai_gateway_entitled affirms the licence's AI
+    entitlement.
+
+    With `values.metrics_enabled` true a ClusterIP Service,
+    `<rendered_name>-status`, carries the chart's status port, 8100, and
+    provides.metrics_endpoint publishes /metrics on it; false, neither. That
+    port, open on the pod for the probes, answers only a GET of /status,
+    /status/ready or /metrics from another address: the KongStatusGuard
+    bundle refuses the rest, POST /status/ready and any route the image adds
+    among them.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/gateway/kong-enterprise:1.0.0
+
+  source:
+    kind: helm-https-chart
+    url: https://charts.konghq.com
+    chart: kong
+    # Default chart version. Override via infra.source_version.
+    version: "{{ optional .infra `source_version` \"3.4.1\" }}"
+
+  # provides.host is the proxy data-plane Service name — the entry point client
+  # traffic is sent to. The valuesMapping below pins the chart's
+  # fullnameOverride to the rendered name, the release name the helm provider
+  # gives the chart, which spells the Component's name in the alphabet a
+  # Kubernetes name allows; the chart suffixes the proxy Service with "-proxy"
+  # and the Admin API Service, which is not published, with "-admin", as a
+  # render of the chart shows. The name carries no namespace; a consumer in
+  # another namespace qualifies it on its own side.
+  #
+  # endpoint is the route the gateway serves for the model values.model names,
+  # under that alias in the path, on the proxy Service name and port; model is
+  # that alias. A provides entry cannot read another, so the Service name is
+  # spelled out again and the entries are edited together. With nothing wired
+  # to the models socket values.model is omitted — the Component's assertion
+  # halts on any other combination — and both are empty.
+  #
+  # metrics_endpoint is the address the gateway serves its own metrics at
+  # while values.metrics_enabled is true: /metrics on the status port of the
+  # ClusterIP Service "<rendered_name>-status" this Recipe emits beside the
+  # chart then (below). The Prometheus plugin bundled with Kong answers it
+  # there with no plugin instance configured, and the Status API's allowlist
+  # lets a GET of it through. It carries no namespace, as host does. It is
+  # empty while the value is false, when the chart's status listener still
+  # answers on the pod and no Service carries it.
+  provides:
+    host: "{{ .context.rendered_name }}-proxy"
+    port: "{{ .infra.proxy_port }}"
+    protocol: "http"
+    endpoint: '{{ with optional .values "model" "" }}http://{{ $.context.rendered_name }}-proxy:{{ $.infra.proxy_port }}/{{ . }}/v1{{ end }}'
+    model: '{{ optional .values "model" "" }}'
+    metrics_endpoint: "{{ if .values.metrics_enabled }}http://{{ .context.rendered_name }}-status:{{ .locals.status_port }}/metrics{{ end }}"
+
+  # The entries below are the values the value mapping shares with the
+  # KongModelRoutes bundle imported for the gateway's model routes, which
+  # stops the build naming the local when one is missing or differs from its
+  # own: model_routes_delivery has the bundle emit one ConfigMap, carrying the
+  # routes as model_routes_file, named after the rendered name followed by
+  # model_routes_config_map_suffix; a models connection's credential reaches
+  # the gateway as AI_PROXY_<ALIAS>_API_KEY, from which the value mapping
+  # composes AI_PROXY_<ALIAS>_AUTHORIZATION, the bearer token the routes name
+  # through Kong's environment vault. A locals entry cannot read a connection,
+  # so the value mapping applies the alias rule itself, once.
+  # model_routes_edition has the bundle also write the AI plugins this
+  # component's core/fallback-chain, core/period-budget and core/data-masking
+  # attachments ask for, which only Kong Gateway Enterprise carries.
+  #
+  # status_port is this Recipe's own rather than the bundle's: the port the
+  # Service this Recipe emits for the gateway's Status API listens on, the
+  # chart's own default for that listener, and the single authored home for
+  # that Service and provides.metrics_endpoint. The Service forwards to the
+  # container port by the name the chart gives it, status, so a chart that
+  # moves the listener's number keeps the address working.
+  #
+  # The last four entries are what the value mapping shares with the
+  # KongStatusGuard bundle imported for the Status API's allowlist, which
+  # stops the build naming one of the first three when it is missing or
+  # differs from its own: status_guard_delivery has the bundle emit one
+  # ConfigMap, carrying the allowlist as status_guard_file, the file the
+  # gateway includes, named after the rendered name followed by
+  # status_guard_config_map_suffix. status_guard_default_namespace is this
+  # Recipe's own: the namespace the chart is rendered against where neither the
+  # Release nor the Aggregate names one, as the status Service below writes it, so the bundle
+  # places the ConfigMap where the gateway's pods and Jobs mount it from.
+  locals:
+    model_routes_edition: enterprise
+    model_routes_delivery: config_map
+    model_routes_file: model-routes.yaml
+    model_routes_config_map_suffix: "-model-routes"
+    connection_variable_prefix: AI_PROXY_
+    credential_variable_suffix: _API_KEY
+    header_variable_suffix: _AUTHORIZATION
+    status_port: "8100"
+    status_guard_delivery: config_map
+    status_guard_file: status-guard.conf
+    status_guard_config_map_suffix: "-status-guard"
+    status_guard_default_namespace: default
+
+  # They hold before anything renders. The image's version and the licence's
+  # locator are checked where they are read, at the head of the value mapping.
+  assertions:
+    # The catalog names no enterprise image, so the Release names the one it
+    # runs; the chart's own default image is never rendered in its place.
+    image_supplied: >-
+      {{- if not (optional .infra "image" "") -}}
+      {{- fail "this realization runs the Kong Gateway Enterprise image the Release supplies, because access to that image is governed by Kong's terms and the catalog therefore names none: set infra.image to the full reference of the image the operator is entitled to pull, version tag included, as in kong/kong-gateway:3.16.0.0" -}}
+      {{- end -}}
+    # The AI entitlement, affirmed rather than hoped for. Kong sells the
+    # plugins these six Features would run on this gateway as its AI Gateway
+    # Enterprise offering, an entitlement carried inside the licence, which
+    # the build never reads; and Kong's support reference describes an
+    # enterprise plugin on a node without a valid licence as skipped, with a
+    # debug log line, the request served without it. The compiler
+    # runs ahead of time and cannot look, so it asks the operator to affirm the
+    # entitlement and halts when any of the six is attached and nobody has.
+    ai_gateway_entitlement_affirmed: >-
+      {{- $ai := list -}}
+      {{- range $name, $attachment := (default dict .features) -}}
+      {{- $type := first (splitList ":" (toString $attachment.type)) -}}
+      {{- if has $type (list "core/semantic-caching" "core/period-budget" "core/data-masking" "core/fallback-chain" "core/retry-policy" "core/target-selection") -}}
+      {{- $ai = append $ai (printf "%s (%s)" $name $type) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- if and $ai (not (optional .infra "ai_gateway_entitled" false)) -}}
+      {{- fail (printf "this gateway carries %s, which Kong Gateway Enterprise runs only under the AI Gateway Enterprise entitlement of its licence, and Kong skips such a plugin without refusing it where the licence lacks that entitlement, which no build can see; set infra.ai_gateway_entitled to true on this component in the Release to affirm that the licence the license slot names carries Kong's AI Gateway Enterprise entitlement, or remove the attachment" (join ", " $ai)) -}}
+      {{- end -}}
+
+  # The models the gateway serves, as Kong's own declarative configuration,
+  # from the KongModelRoutes bundle every Recipe running a Kong gateway imports,
+  # so the routes and the rules they are written by have one text wherever the
+  # gateway runs. It is emitted beside the chart's resources and loaded into the
+  # backend database by the import step the value mapping below adds. With
+  # nothing wired to the models socket it emits nothing.
+  #
+  # The gateway's Status API, put on a Service while values.metrics_enabled is
+  # true. The chart binds the status listener on every interface of the
+  # gateway's pod, where its probes reach it, and its templates offer no
+  # Service for it, so this Recipe emits one beside the chart: a ClusterIP
+  # Service, "<rendered_name>-status", whose port status_port forwards to the
+  # container port the chart names status. It names that listener for a
+  # scraper and adds no caller that could not reach the pod already, and
+  # infra.overrides.service_type, which sets the proxy's Service, never
+  # reaches it. The listener checks no caller itself: beside /metrics, the
+  # routes of the open-source gateway it is built on — GET /status, GET
+  # /status/ready, GET /status/dns, and POST /status/ready, which with
+  # status=draining marks the node draining so its readiness probe fails and
+  # the pod leaves its Services until it restarts — and whatever the
+  # enterprise image the Release names adds there, which is not read here; the
+  # allowlist below stands in front of all of it. It selects the gateway's
+  # pods by the chart's own selector labels — the chart's name, kong, since
+  # this Recipe sets no nameOverride, the component app, which the chart gives
+  # the gateway's pods and not the migration Jobs', and the release name,
+  # which is the rendered name. It is placed in the namespace the chart is
+  # rendered against: the one the Release, or else the Aggregate, declares through the
+  # aggrega.ai/namespace annotation, or `default` where it declares none; the
+  # helm provider places no artifact in a namespace itself, so the Service
+  # writes its own. With the value false, nothing is emitted.
+  #
+  # The Status API's allowlist, from the KongStatusGuard bundle every Recipe
+  # running a Kong gateway imports. With status_guard_delivery set to
+  # config_map the bundle emits one ConfigMap, "<rendered_name>-status-guard",
+  # carrying a fragment of nginx configuration as status_guard_file, on every
+  # Release; the value mapping below mounts it and has the gateway include it
+  # in the Status API's own server block, through the configuration property
+  # Kong documents for the gateway's editions alike. From any address but the
+  # pod's loopback one the fragment lets through a GET of /status,
+  # /status/ready or /metrics — the chart's readiness and liveness probes and
+  # a scrape — and answers every other request 403 before the gateway handles
+  # it, any route the enterprise image adds to the Status API included.
+  artifacts:
+    model-routes:
+      $import: KongModelRoutes#/artifacts/ModelRoutes
+    status-guard:
+      $import: KongStatusGuard#/artifacts/StatusGuard
+    status-service.yaml: |
+      {{- if .values.metrics_enabled -}}
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: {{ .context.rendered_name }}-status
+        namespace: "{{ optional (optional (default dict .context.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict .context.annotations) "aggregate" dict) "aggrega.ai/namespace" "") | default "default" }}"
+      spec:
+        type: ClusterIP
+        ports:
+          - name: status
+            port: {{ .locals.status_port }}
+            targetPort: status
+            protocol: TCP
+        selector:
+          app.kubernetes.io/name: kong
+          app.kubernetes.io/component: app
+          app.kubernetes.io/instance: {{ .context.rendered_name }}
+      {{- end }}
+
+  # This Recipe reads from infra.overrides:
+  #   service_type - string (proxy.type; how the data plane is exposed, default ClusterIP)
+  #   requests     - { cpu: string, memory: string } (gateway resource requests)
+  #   nodeSelector - map[string]string (pod scheduling)
+  #   tolerations  - []object (pod scheduling)
+  #
+  # It reads no image override: the image is infra.image and nothing else.
+  valuesMapping: |
+    ## ── The configuration backend edge ─────────────────────────
+    ## The gateway keeps its routing configuration here. The edge is required, so
+    ## it is always resolved by the time this template runs; its host and port
+    ## compose the connection, and its user and database name the login.
+    {{- $backend := dict }}
+    {{- range $alias, $edge := .context.uses }}
+      {{- if eq $edge.socket "backend" }}
+        {{- $backend = $edge }}
+      {{- end }}
+    {{- end }}
+    {{- /* The models connections, in alias order, and those of them carrying a
+           credential. The directory the routes file is mounted at is the
+           single authored home for the mount and the path the import step
+           reads.
+
+           The route set is written by the KongModelRoutes bundle from each
+           models connection's alias, the endpoint and model name its model
+           publishes and whether it carries a credential; from the values of
+           the core/fallback-chain, core/period-budget and core/data-masking
+           attachments it writes plugins for; and, beside a core/data-masking
+           attachment, from the protocol, host and port the pii_sanitizer
+           connection publishes. Their digest is what rolls the gateway's pod
+           when the route set changes, below. It reads exactly what the bundle
+           reads, field by field, so a change the routes do not carry rolls
+           nothing; a field the bundle comes to read is added here in the same
+           edit. */}}
+    {{- $routesDir := "/etc/kong/model-routes" }}
+    {{- /* The directory the Status API's allowlist is mounted at, the single
+           authored home for the mount and the file the gateway includes. */}}
+    {{- $guardDir := "/etc/kong/status-guard" }}
+    {{- $wired := list }}
+    {{- $credentialed := list }}
+    {{- $routeSet := list }}
+    {{- $sanitizerAddress := list }}
+    {{- range $alias, $edge := .context.uses }}
+      {{- if eq $edge.socket "models" }}
+        {{- $wired = append $wired $alias }}
+        {{- $hasCredential := hasKey (default dict $edge.features) "credential" }}
+        {{- if $hasCredential }}
+          {{- $credentialed = append $credentialed $alias }}
+        {{- end }}
+        {{- $routeSet = append $routeSet (list $alias $edge.provides.endpoint $edge.provides.model $hasCredential) }}
+      {{- else if eq $edge.socket "pii_sanitizer" }}
+        {{- $sanitizerAddress = append $sanitizerAddress (list $alias (optional $edge.provides "protocol" "") (optional $edge.provides "host" "") (optional $edge.provides "port" "")) }}
+      {{- end }}
+    {{- end }}
+    {{- $routeInputs := dict "routes" $routeSet }}
+    {{- range $attachment := (default dict .features) }}
+      {{- $type := first (splitList ":" (toString $attachment.type)) }}
+      {{- $values := default dict $attachment.values }}
+      {{- $infra := default dict $attachment.infra }}
+      {{- if eq $type "core/fallback-chain" }}
+        {{- $_ := set $routeInputs $type (list (pick $values "chains" "max_hops")) }}
+      {{- else if eq $type "core/period-budget" }}
+        {{- $_ := set $routeInputs $type (list (pick $values "scope" "unit") (pick $infra "limit" "period")) }}
+      {{- else if eq $type "core/data-masking" }}
+        {{- $_ := set $routeInputs $type (list (pick $values "action" "entities" "patterns" "scope") $sanitizerAddress) }}
+      {{- end }}
+    {{- end }}
+    {{- $routesDigest := sha256sum (toJson $routeInputs) }}
+    {{- /* The inline development password, the single authored home for the
+           gateway's and the import step's connection when the backend
+           connection carries no credential. */}}
+    {{- $devPassword := "apppass" }}
+    {{- /* The image, the single authored home for the chart's image values and
+           for the image the import step runs: the step writes into the
+           database the gateway reads, so the two run one release. */}}
+    {{- $image := .infra.image }}
+    {{- /* The version the image's tag begins with: the text after the last
+           colon of the reference's last path segment, a digest after an @ left
+           out, read as its first two or three numbers, as 3.16.0 for
+           kong/kong-gateway:3.16.0.0. The chart labels every resource it
+           renders with the gateway's major and minor version, read from its
+           image values, so it is handed this one; a tag carrying none stops the
+           build here. */}}
+    {{- $version := trimPrefix ":" (regexFind `:[0-9]+\.[0-9]+(\.[0-9]+)?` (regexReplaceAll `^.*/` (regexReplaceAll `@.*$` $image "") "")) }}
+    {{- if not $version }}
+    {{- fail (printf "infra.image is %q, whose tag does not begin with the gateway's version, but the Kong chart labels every resource it renders with that version and this realization reads it from the image's tag; name the image by a tag that begins with its version, as in kong/kong-gateway:3.16.0.0, a digest after it where one is pinned" $image) }}
+    {{- end }}
+    {{- /* The oldest gateway each plugin the KongModelRoutes bundle writes for an
+           attachment is written for, read from the same version: AI Proxy
+           Advanced's priority balancer as the bundle writes it, from 3.12, the
+           release that stopped it retrying the first target more than once; AI
+           Rate Limiting Advanced's policy form beside AI Proxy, from 3.15, the
+           first release whose first three numbers tell that pairing's fix
+           apart; the AI PII Sanitizer from 3.10, the release that added it. An
+           older image stops the build here, naming both. The sanitizer masks
+           replies from 3.12, the release that added the setting saying what it
+           masks, and refuses a request carrying a match from 3.12, the release
+           that added block_if_detected, so a data masking attachment whose
+           scope reaches replies, or whose action is refuse, stops the build on
+           an image older than that, naming the scope or the action. */}}
+    {{- range $name, $attachment := (default dict .features) }}
+      {{- $type := first (splitList ":" (toString $attachment.type)) }}
+      {{- $oldest := get (dict "core/fallback-chain" "3.12.0" "core/period-budget" "3.15.0" "core/data-masking" "3.10.0") $type }}
+      {{- if and $oldest (not (semverCompare (printf ">=%s" $oldest) $version)) }}
+      {{- fail (printf "the %s attachment %q on %q is written as Kong Gateway Enterprise %s and later configure it, but infra.image is %q, whose tag reads %s; name an image of Kong Gateway Enterprise %s or later" $type $name $.context.instance_id $oldest $image $version $oldest) }}
+      {{- end }}
+      {{- $scope := toString (optional (default dict $attachment.values) "scope" "request") }}
+      {{- if and (eq $type "core/data-masking") (ne $scope "request") (not (semverCompare ">=3.12.0" $version)) }}
+      {{- fail (printf "the core/data-masking attachment %q on %q asks for scope %s, which reaches replies, and Kong Gateway Enterprise's AI PII Sanitizer masks replies from 3.12.0, but infra.image is %q, whose tag reads %s; name an image of Kong Gateway Enterprise 3.12.0 or later, or set scope to request" $name $.context.instance_id $scope $image $version) }}
+      {{- end }}
+      {{- $action := toString (optional (default dict $attachment.values) "action" "redact") }}
+      {{- if and (eq $type "core/data-masking") (eq $action "refuse") (not (semverCompare ">=3.12.0" $version)) }}
+      {{- fail (printf "the core/data-masking attachment %q on %q asks for action refuse, which Kong Gateway Enterprise's AI PII Sanitizer carries out with block_if_detected from 3.12.0, but infra.image is %q, whose tag reads %s; name an image of Kong Gateway Enterprise 3.12.0 or later, or set action to redact" $name $.context.instance_id $image $version) }}
+      {{- end }}
+    {{- end }}
+    {{- /* The Secret the license slot's attachment names. The licence is read as
+           KONG_LICENSE_DATA from a secretKeyRef, so the attachment has to
+           publish a Secret's name and the data key inside it, as
+           core/referenced-secret does; one that publishes neither stops the
+           build here. */}}
+    {{- $license := optional (optional (default dict .features) "license" dict) "provides" dict }}
+    {{- if not (and (optional $license "name" "") (optional $license "key" "")) }}
+    {{- fail (printf "the license slot of %q is bound to an attachment that publishes no Secret name and data key, but this realization reads the Kong licence as KONG_LICENSE_DATA from a secretKeyRef to that Secret; bind the slot to core/referenced-secret, whose k8s-existing-secret realization names a Secret that already exists" .context.instance_id) }}
+    {{- end }}
+
+    ## ── Pin the chart's resource names to the rendered name ────
+    ## Names the proxy Service "<rendered_name>-proxy", matching provides.host,
+    ## and the Admin API Service "<rendered_name>-admin".
+    fullnameOverride: "{{ .context.rendered_name }}"
+
+    ## ── The gateway image ──────────────────────────────────────
+    ## The one reference infra.image names, whole, so the chart's own default
+    ## repository and tag never reach the render; the chart reads the gateway's
+    ## version for its labels from effectiveSemver.
+    image:
+      unifiedRepoTag: "{{ $image }}"
+      effectiveSemver: "{{ $version }}"
+      {{- with .infra.image_pull_secret }}
+      pullSecrets:
+        - "{{ . }}"
+      {{- end }}
+
+    ## ── Enterprise settings ────────────────────────────────────
+    ## The chart's enterprise block, on. Its developer portal Services are
+    ## switched off below with the manager console, because the Component
+    ## describes neither; the licence is set in env below rather than through
+    ## the chart's license_secret, which reads only a data key named license.
+    enterprise:
+      enabled: true
+
+    ## ── Chart extras this Component does not describe ──────────
+    ## The chart can also deploy a PostgreSQL of its own, a Kubernetes ingress
+    ## controller, the manager console and the developer portal. The backend is
+    ## wired through the topology rather than bundled, and the Component
+    ## describes none of the others, so all are switched off rather than
+    ## rendered unreferenced. With its enterprise settings on, the chart also
+    ## sets the manager console's listener in the gateway's own environment
+    ## from manager.http and manager.tls, whatever manager.enabled says, so both
+    ## are off as well and the gateway listens for no console.
+    postgresql:
+      enabled: false
+    ingressController:
+      enabled: false
+    manager:
+      enabled: false
+      http:
+        enabled: false
+      tls:
+        enabled: false
+    portal:
+      enabled: false
+    portalapi:
+      enabled: false
+
+    ## ── Backend connection and licence ─────────────────────────
+    ## Composed from the resolved `backend` edge. The password is the one place
+    ## the two credential shapes differ: with a credential on that connection,
+    ## it is bound by NAME so the material never appears in the rendered
+    ## artifact; with none, the Component declares the slot optional, so an
+    ## inline development default keeps the render working.
+    ##
+    ## The licence is Kong's first load source, KONG_LICENSE_DATA, bound by NAME
+    ## to the Secret and the data key the license slot's attachment publishes,
+    ## whatever that key is called. The chart writes it into the environment of
+    ## the gateway, its own init containers and the three migration Jobs.
+    ##
+    ## nginx_status_include has the gateway include the Status API's
+    ## allowlist, which the KongStatusGuard bundle emits and the volume below
+    ## mounts, in the Status API's own server block: from any address but the
+    ## pod's loopback one only a GET of /status, /status/ready or /metrics
+    ## reaches the chart's status listener, so its probes and a scrape keep
+    ## answering and every other request, POST /status/ready among them, is
+    ## answered 403. The chart writes it as KONG_NGINX_STATUS_INCLUDE into the
+    ## same containers as the licence; only the gateway's own container starts
+    ## a listener that reads it.
+    env:
+      database: postgres
+      pg_host: "{{ $backend.provides.host }}"
+      pg_port: {{ $backend.provides.port }}
+      pg_user: "{{ $backend.provides.user }}"
+      pg_database: "{{ $backend.provides.database }}"
+      {{- if hasKey (default dict $backend.features) "credential" }}
+      pg_password:
+        valueFrom:
+          secretKeyRef:
+            name: "{{ $backend.features.credential.provides.name }}"
+            key: "{{ $backend.features.credential.provides.key }}"
+      {{- else }}
+      pg_password: "{{ $devPassword }}"
+      {{- end }}
+      license_data:
+        valueFrom:
+          secretKeyRef:
+            name: "{{ $license.name }}"
+            key: "{{ $license.key }}"
+      nginx_status_include: "{{ $guardDir }}/{{ .locals.status_guard_file }}"
+
+    ## ── The models the gateway serves ──────────────────────────
+    ## While the models socket holds a connection, an init container of the
+    ## gateway's pod imports the routes ConfigMap the artifact above emits into
+    ## the backend database, with the gateway's image, the same backend
+    ## connection and password and the same licence. The chart places such a
+    ## container ahead of its own wait for the database, so on a first install
+    ## it fails until the bootstrap migration Job has provisioned the schema and
+    ## the cluster retries it; once the schema is there it succeeds and the
+    ## gateway starts.
+    ##
+    ## The chart also places this container in each of its three migration
+    ## Jobs, ahead of the migration itself, and there an import that needs the
+    ## schema would hold back the very Job that provisions it. So the step reads
+    ## its pod's app.kubernetes.io/component label, which the chart sets to app
+    ## on the gateway's pods and to the migration's name on each Job's, and
+    ## exits at once anywhere but in the gateway's own pod. Like the chart's own
+    ## wait for the database, it runs through a shell the image carries.
+    ##
+    ## The ConfigMap's content is no part of the pod's own specification, so
+    ## the pod carries the digest of what the route set is written from as the
+    ## annotation checksum/model-routes: a changed route set changes the pod's
+    ## specification, the Deployment rolls the gateway, and the new pod imports
+    ## the changed routes before it serves. The chart writes podAnnotations onto
+    ## the gateway's pods alone, never onto a migration Job's.
+    ##
+    ## The import adds and updates each service, route and plugin under an id
+    ## Kong derives from its name, so a re-run writes the same rows again; it
+    ## removes nothing, so a route whose connection is removed stays in the
+    ## database until it is deleted through the Admin API, and so does a
+    ## plugin an attachment wrote once the attachment is removed — AI Proxy
+    ## Advanced stays on a route beside the AI proxy written back onto it. The
+    ## step reads no model credential: the routes hold a reference to one,
+    ## which only the gateway resolves.
+    ##
+    ## The Status API's allowlist is mounted on every Release, beside the
+    ## routes' ConfigMap while a model is wired; the chart mounts a user volume
+    ## in the gateway's container, its own wait for the database and its
+    ## migration Jobs alike.
+    {{- if $wired }}
+    podAnnotations:
+      checksum/model-routes: "{{ $routesDigest }}"
+    {{- end }}
+    deployment:
+      {{- if $wired }}
+      initContainers:
+        - name: model-routes
+          image: "{{ $image }}"
+          args:
+            - /bin/sh
+            - -c
+            - 'if [ "$MODEL_ROUTES_POD_COMPONENT" != app ]; then exit 0; fi; exec kong config db_import {{ $routesDir }}/{{ .locals.model_routes_file }}'
+          env:
+            - name: MODEL_ROUTES_POD_COMPONENT
+              valueFrom:
+                fieldRef:
+                  fieldPath: "metadata.labels['app.kubernetes.io/component']"
+            - name: KONG_DATABASE
+              value: postgres
+            - name: KONG_PG_HOST
+              value: "{{ $backend.provides.host }}"
+            - name: KONG_PG_PORT
+              value: "{{ $backend.provides.port }}"
+            - name: KONG_PG_USER
+              value: "{{ $backend.provides.user }}"
+            - name: KONG_PG_DATABASE
+              value: "{{ $backend.provides.database }}"
+            - name: KONG_PG_PASSWORD
+              {{- if hasKey (default dict $backend.features) "credential" }}
+              valueFrom:
+                secretKeyRef:
+                  name: "{{ $backend.features.credential.provides.name }}"
+                  key: "{{ $backend.features.credential.provides.key }}"
+              {{- else }}
+              value: "{{ $devPassword }}"
+              {{- end }}
+            - name: KONG_LICENSE_DATA
+              valueFrom:
+                secretKeyRef:
+                  name: "{{ $license.name }}"
+                  key: "{{ $license.key }}"
+          volumeMounts:
+            - name: model-routes
+              mountPath: "{{ $routesDir }}"
+              readOnly: true
+      {{- end }}
+      userDefinedVolumes:
+        - name: status-guard
+          configMap:
+            name: "{{ .context.rendered_name }}{{ .locals.status_guard_config_map_suffix }}"
+      {{- if $wired }}
+        - name: model-routes
+          configMap:
+            name: "{{ .context.rendered_name }}{{ .locals.model_routes_config_map_suffix }}"
+      {{- end }}
+      userDefinedVolumeMounts:
+        - name: status-guard
+          mountPath: "{{ $guardDir }}"
+          readOnly: true
+
+    ## Each models connection carrying a credential delivers it as
+    ## AI_PROXY_<ALIAS>_API_KEY, bound by NAME to the secret its attachment
+    ## publishes, and composes AI_PROXY_<ALIAS>_AUTHORIZATION from it, the
+    ## bearer token the connection's routes read through Kong's environment
+    ## vault. The chart writes its environment in name order, so the credential
+    ## variable comes before the token, and the cluster composes the token from
+    ## it; neither carries the value in the rendered artifact.
+    {{- with $credentialed }}
+    customEnv:
+      {{- range $alias := . }}
+      {{- $name := regexReplaceAll "[^A-Z0-9]" (upper $alias) "_" }}
+      {{- $credential := (get $.context.uses $alias).features.credential }}
+      {{ $.locals.connection_variable_prefix }}{{ $name }}{{ $.locals.credential_variable_suffix }}:
+        valueFrom:
+          secretKeyRef:
+            name: "{{ $credential.provides.name }}"
+            key: "{{ $credential.provides.key }}"
+      {{ $.locals.connection_variable_prefix }}{{ $name }}{{ $.locals.header_variable_suffix }}: "Bearer $({{ $.locals.connection_variable_prefix }}{{ $name }}{{ $.locals.credential_variable_suffix }})"
+      {{- end }}
+    {{- end }}
+
+    ## ── Schema migrations ──────────────────────────────────────
+    ## The three steps the product's own maintainers sequence around a release:
+    ## a bootstrap before the gateway first serves, an up-migration before an
+    ## upgrade and a finishing migration after one.
+    migrations:
+      init: true
+      preUpgrade: true
+      postUpgrade: true
+
+    ## ── Proxy data plane ───────────────────────────────────────
+    ## The client entry point, and the Service provides.host addresses.
+    ## infra.proxy_port sets both the container port and the Service port, so the
+    ## published address and the listener move together. TLS is terminated
+    ## outside the cluster, matching the "http" this Recipe publishes.
+    proxy:
+      enabled: true
+      {{- if and .infra.overrides .infra.overrides.service_type }}
+      type: "{{ .infra.overrides.service_type }}"
+      {{- else }}
+      type: ClusterIP
+      {{- end }}
+      http:
+        enabled: true
+        containerPort: {{ .infra.proxy_port }}
+        servicePort: {{ .infra.proxy_port }}
+      tls:
+        enabled: false
+
+    ## ── Admin API ──────────────────────────────────────────────
+    ## In-cluster only, on the port the operator set. Never published through
+    ## provides.
+    admin:
+      enabled: true
+      type: ClusterIP
+      http:
+        enabled: true
+        containerPort: {{ .infra.admin_port }}
+        servicePort: {{ .infra.admin_port }}
+      tls:
+        enabled: false
+
+    ## ── Gateway resources ──────────────────────────────────────
+    resources:
+      limits:
+        cpu: "{{ .infra.compute.cpu }}"
+        memory: "{{ .infra.compute.memory }}"
+      {{- if and .infra.overrides .infra.overrides.requests }}
+      requests:
+        cpu: "{{ .infra.overrides.requests.cpu }}"
+        memory: "{{ .infra.overrides.requests.memory }}"
+      {{- end }}
+
+    ## ── Scheduling overrides ───────────────────────────────────
+    {{- if .infra.overrides }}
+    {{- if .infra.overrides.nodeSelector }}
+    nodeSelector: {{ toJson .infra.overrides.nodeSelector }}
+    {{- end }}
+    {{- if .infra.overrides.tolerations }}
+    tolerations: {{ toJson .infra.overrides.tolerations }}
+    {{- end }}
+    {{- end }}

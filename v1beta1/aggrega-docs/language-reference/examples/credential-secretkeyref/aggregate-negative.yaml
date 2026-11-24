@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Aggregate
+metadata:
+  name: credential-secretkeyref-negative
+  version: "1.0.0"
+  description: >
+    The negative case: a non-referenceable credential (core/secret-value) attached
+    to the password slot, then built on the helm target — where the postgres
+    Recipe references the slot via containers.attachments (an env secretKeyRef). A
+    secretKeyRef needs a Secret resource to point at, but an inject-value
+    credential publishes none, so the build halts loudly, reporting
+    slot-not-referenceable and naming the slot. The fix is to attach
+    core/referenced-secret (see aggregate-helm.yaml).
+spec:
+  components:
+    db:
+      type: core/datastore/postgres
+      features:
+        password:
+          type: core/secret-value
+          values:
+            key: POSTGRES_PASSWORD
+            origin: dev-pw-change-me

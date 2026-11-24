@@ -1,0 +1,234 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/messaging/kafka
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    An Apache Kafka event-streaming broker in KRaft mode, with no ZooKeeper,
+    keeping its commit log on durable storage, so it renders as a stateful
+    server. Its primary contract to consumers is the client bootstrap endpoint:
+    a producer or consumer wires to it, through `host` and `port` or the
+    `bootstrap_servers` list, and reaches the cluster there.
+
+    Realized on Kubernetes two ways, both through Helm Recipes and chosen in the
+    Manifest: a synthesis Recipe that builds one node, running the broker and
+    controller roles in one process, from the official Apache Kafka image, and a
+    controller-driven Recipe that emits a Kafka custom resource for the Strimzi
+    Cluster Operator to reconcile. Reach for the synthesis Recipe on a cluster
+    that runs no Kafka control plane — it needs no operator installed and no
+    chart repository, so it builds with nothing fetched — and for the
+    controller-driven Recipe where the Strimzi Cluster Operator is already in
+    place and the cluster should own broker upgrades, rolling restarts and
+    partition rebalancing; it runs Kafka 4.2.0 to 4.3.1 only, which the
+    `engine_version` default is not.
+
+    Reach for terraform/kafka-msk where Kafka is an Amazon MSK cluster in the
+    operator's AWS account: two or three brokers, one per client subnet,
+    serving plaintext on 9092 inside the VPC, or TLS on 9094. There is no
+    Compose realization, and no CloudFormation one: a stack reads no bootstrap
+    address off an MSK cluster without running code of its own.
+
+    `infra.client_tls`, off by default, serves clients TLS alone and publishes
+    `protocol` `kafka-ssl`: the synthesized broker presents the certificate
+    attached to `server_certificate`, Strimzi one its cluster authority issues,
+    MSK one AWS issues.
+  # `values.metrics_enabled` is honoured by the controller-driven Recipe alone;
+  # the others publish the metrics keys empty and halt the build on true.
+  labels:
+    component.aggrega.ai/type: stateful-server
+    component.aggrega.ai/category: messaging
+    # Realized self-hosted (helm) and managed (Amazon MSK), so no single
+    # hosting posture is its identity; the posture of a Release follows the
+    # Recipe the Manifest selects. Selector-only: never stamped onto output.
+    component.aggrega.ai/hosting: mixed
+    # The Apache Kafka server, packaged here and run by MSK alike, is
+    # Apache-2.0.
+    component.aggrega.ai/upstream-licensing: osi-approved
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  featuresSchema:
+    # Optional server certificate, read only while infra.client_tls is true. It
+    # reaches the broker's container as files (inject: [file]), so its fill must
+    # name a Secret the workload mounts — core/referenced-secret, whose
+    # k8s-existing-secret realization names one that already exists. The official
+    # image writes every Kafka variable as one line of its configuration file, so
+    # a PEM delivered as a value cannot reach it; the synthesized broker reads the
+    # mounted files instead. Unattached with client_tls off, nothing renders for
+    # it; each realization halts on the two mismatched pairings.
+    server_certificate:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [file]
+      description: "Optional certificate the broker presents to its clients while infra.client_tls is true: a Secret holding tls.crt, the certificate followed by any intermediate certificates, and tls.key, its private key, the two keys a kubernetes.io/tls Secret holds, the key unencrypted in PKCS #8 form (BEGIN PRIVATE KEY), the one form Kafka reads. The certificate names every address a client dials: the published host, and its namespace-qualified forms where clients in other namespaces connect; on the controller-driven realization a client also dials each broker under <instance>-kafka-brokers, beside the published <instance>-kafka-bootstrap, so the certificate also names *.<instance>-kafka-brokers and its namespace-qualified forms. Mounted as files, so attach a Feature that names an existing Secret, such as core/referenced-secret. Required by the synthesized realization while client_tls is true; the controller-driven one presents it in place of the certificate the Strimzi cluster authority issues, from a Secret in the Kafka resource's namespace. A build halts on it attached while client_tls is false. MSK presents a certificate AWS issues, so its realization halts on any attachment here."
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      cluster_id:
+        type: string
+        default: "4L6g3nShT-eMCtK--X86sw"
+        description: Pinned KRaft cluster identity; a fixed value keeps the render deterministic. Honoured by the synthesized realization; on the controller-driven one the operator generates the identity, and on MSK the service does, so neither reads it and each halts the build on any value other than this default.
+      # The brokers' own metrics, in the Prometheus format. Apache Kafka keeps its
+      # metrics behind JMX; a Prometheus endpoint comes from something run beside
+      # it. On the controller-driven realization true sets the Kafka resource's
+      # metrics configuration to the Strimzi metrics reporter, which the operator
+      # configures on every node and which serves /metrics on a container port
+      # named tcp-prometheus, 9404, plain HTTP with no caller check, on every
+      # address of the pod; the same listener answers an exporter health check at
+      # /-/healthy and a static help page at every other path, and nothing else.
+      # No Service carries the port, so the Recipe publishes the pod facts. The
+      # official image the synthesized realization runs carries no exporter, so
+      # there true halts the build rather than publish an address nothing serves;
+      # MSK runs its brokers in no pod a scraper could discover, so it halts too.
+      metrics_enabled:
+        type: boolean
+        default: false
+        description: Turns on the brokers' own metrics, in the Prometheus format, on a port of their own on every node, and publishes the pod label selector, port name and path a scraper discovers them by; while false those keys are empty. The port checks no caller, so anything that reaches a node can read them. Honored by the controller-driven realization; the synthesized one serves no Prometheus metrics, and MSK runs no pod these keys could name, so both halt the build when this is true.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      broker_port:
+        type: integer
+        default: 9092
+        description: Client bootstrap port — the endpoint producers and consumers connect to. MSK fixes its ports itself, serving plaintext on 9092 and, while infra.client_tls is true, TLS on 9094, which its realization publishes as port; so the MSK realization halts the build on any value other than this default.
+      # The synthesized broker realizes it with a listener named TLS (security
+      # protocol SSL) in place of PLAINTEXT on broker_port, advertised at the same
+      # Service name, which is also the listener the broker reaches itself on, so
+      # it trusts its own certificate chain for that. Strimzi realizes it with its
+      # internal listener's tls set true, named tls; MSK with client-broker
+      # encryption TLS. Consumers learn of it from the published protocol alone.
+      client_tls:
+        type: boolean
+        default: false
+        description: >
+          Serve client connections over TLS alone. Off by default, which serves
+          plaintext and renders exactly as a broker without the setting. On, the
+          client listener accepts TLS alone on the published host and port,
+          requests no client certificate, and the published `protocol` is
+          `kafka-ssl`. The synthesized realization presents the certificate
+          attached to `server_certificate` (required while this is on). The
+          controller-driven realization presents one the Strimzi cluster
+          certificate authority issues, or the one attached to
+          `server_certificate`; a consumer trusts the authority's certificate,
+          `ca.crt` in the Secret `<cluster>-cluster-ca-cert`, through its
+          `server_ca`. On MSK it turns client-broker encryption in transit to
+          TLS alone, on port 9094, whose certificate AWS issues and clients
+          trust without a `server_ca`; that certificate does not name a DNS
+          name the Release sets in `infra.overrides.host`, so the MSK
+          realization halts on the two together. The controller quorum is
+          unchanged.
+      controller_port:
+        type: integer
+        default: 9093
+        description: Internal KRaft controller-quorum port. Not part of the exported contract. Honoured by the synthesized realization; on the controller-driven one the operator fixes the port, and on MSK the controllers are the service's own, so neither reads it and each halts the build on any value other than this default.
+      engine_version:
+        type: string
+        default: "4.1.2"
+        description: Apache Kafka image tag. Pins the packaged Kafka version the workload references. On the controller-driven realization it is the Kafka version the operator runs, one of 4.2.0 to 4.3.1, which this default is not. On MSK the major and minor version it begins with (4.1 from this default) is the cluster's Kafka version, one of 3.8, 3.9, 4.0 and 4.1, and any other halts the build naming them.
+      storage:
+        size:
+          type: string
+          default: 10Gi
+          description: Size of the persistent volume backing the Kafka commit log. On MSK it is each broker's EBS volume, in whole GiB from 1Gi to 16384Gi.
+      compute:
+        cpu:
+          type: string
+          default: 500m
+          description: CPU each Kafka node is given. The MSK realization does not read it, sizing each broker by infra.overrides.instance_type, and halts the build on any value other than this default.
+        memory:
+          type: string
+          default: 512Mi
+          description: Memory each Kafka node is given. The synthesized realization gives the broker a Java heap of half of it, so it halts the build on a quantity in neither whole Mi nor whole Gi. The MSK realization does not read it, sizing each broker by infra.overrides.instance_type, and halts the build on any value other than this default.
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+      control_plane_present:
+        type: boolean
+        default: false
+        description: >
+          Operator affirmation that the Kafka operator (control plane) is
+          installed in the target cluster. An operator-driven realization halts
+          the build unless this is set true, so a Kafka custom resource is never
+          emitted as an orphan into a cluster that cannot reconcile it. The
+          synthesized StatefulSet realization ignores this flag. The MSK
+          realization does not read it and halts the build while it is true:
+          no Kafka control plane is installed for MSK.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges:
+      # the bootstrap host and client port first, then the same bootstrap
+      # address as the list a Kafka client takes. The controller listener is
+      # internal to the node and is not part of the exported contract.
+      host:
+        type: string
+        required: true
+        description: >
+          Bootstrap address a producer or consumer connects to first, from
+          which the client learns the rest of the cluster. Which Service
+          carries it follows the realization the Manifest selected, so a
+          consumer reads this rather than deriving a name. On MSK it is a
+          pointer string Terraform resolves to the first broker of the
+          bootstrap list, or the DNS name the Release sets in
+          infra.overrides.host instead, so a consumer on another target
+          receives an address it can resolve.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port the bootstrap address accepts client connections on. It
+          carries the broker port an operator set, never the controller-quorum
+          port, which is internal to the cluster; on MSK it is 9092, or 9094
+          while infra.client_tls is true.
+      # A realization serving one bootstrap address publishes it here alone,
+      # joined from the host and port above; one running several brokers lists
+      # each of them, so a client can still start while one broker is down.
+      bootstrap_servers:
+        type: string
+        required: true
+        description: >
+          Comma-separated `host:port` list a Kafka client takes as its bootstrap
+          servers — what a client that takes a list reads, where `host` and
+          `port` serve one that takes a single address. A realization with one
+          bootstrap address publishes that address as the whole list. On MSK it
+          is a pointer string Terraform resolves to every broker, or the
+          infra.overrides.host name with the port while the Release sets one;
+          a consumer on another target receives the pointer as text.
+      protocol:
+        type: string
+        description: >
+          Wire protocol the published address speaks, which is what a consumer
+          selects a client library and its connection security for, on every
+          realization — `kafka` while `infra.client_tls` is off, and `kafka-ssl`
+          while it is on, when the address accepts TLS connections alone: a
+          Kafka client then sets its `security.protocol` to `SSL`. A client that
+          reads only `host` and `port` reads this key
+          too to learn that TLS is required: a plaintext client reaching a TLS
+          listener fails its handshake and exchanges no record.
+      # Where Prometheus finds the brokers' metrics, while values.metrics_enabled
+      # is true on the controller-driven realization: the label selector of the
+      # node pods, the name of the container port carrying the metrics and the
+      # path, for a scraper that discovers those pods directly. Empty otherwise.
+      # None of the keys carries a namespace: a scraper reads where the target
+      # runs from its own connection.
+      metrics_pod_selector:
+        type: string
+        description: >
+          Kubernetes label selector matching every Kafka node pod, for a scraper
+          that discovers those pods directly. Set by the controller-driven
+          realization while values.metrics_enabled is true, beside
+          `metrics_pod_port` and `metrics_path`; empty otherwise.
+      metrics_pod_port:
+        type: string
+        description: >
+          Name of the container port on those pods that carries the metrics,
+          `tcp-prometheus`. Set and empty together with `metrics_pod_selector`.
+      metrics_path:
+        type: string
+        description: >
+          Path the metrics are served at on that port, `/metrics`. Set and empty
+          together with `metrics_pod_selector`.

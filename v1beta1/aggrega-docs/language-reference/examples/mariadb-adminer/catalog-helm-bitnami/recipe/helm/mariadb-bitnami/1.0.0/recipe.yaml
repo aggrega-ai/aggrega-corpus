@@ -1,0 +1,198 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: mariadb-bitnami
+  version: 1.0.0
+  description: >
+    MariaDB via Bitnami Helm chart (bitnami/mariadb). The chart version comes
+    from the operator's infra.source_version where the Release pins one, and
+    otherwise from .values.chart_version — a developer-authored value flowing
+    from the Aggregate into source resolution. A non-zero
+    infra.ha.read_replicas runs that many read replicas through the chart's
+    replication architecture, with the password attached on the
+    replication_password slot; infra.ha.enabled halts the build naming the
+    key, because the chart promotes no read replica when its primary fails.
+  maintainers:
+    - name: "Massimiliano Ferrero"
+      email: "m.ferrero@cognitio.it"
+spec:
+  capability: helm
+  implements: core/datastore/mariadb
+
+  source:
+    kind: helm-oci-chart
+    # OCI chart reference: registry path plus the chart name.
+    url: oci://registry-1.docker.io/bitnamicharts/mariadb
+    # Chart version: the operator's infra pin where the Release sets one,
+    # otherwise the developer-authored value flowing in from the Aggregate.
+    # `optional` reads the pin by name, so an absent pin falls through to the
+    # value; either way the resolved version pins identically at lock and build.
+    version: "{{ optional .infra `source_version` .values.chart_version }}"
+
+  locals:
+    primary_compute: "mariadb"
+
+  provides:
+    # The valuesMapping pins the chart's fullnameOverride to the rendered name —
+    # the release name the helm provider gives the chart, which spells the
+    # Component's name in the alphabet a Kubernetes name allows — followed by the
+    # chart's own "-mariadb" suffix, so the primary Service is
+    # "<rendered_name>-mariadb" (e.g. "db-mariadb") and a consumer dials that,
+    # NOT the bare name. With read replicas the chart's replication architecture
+    # names the primary Service "<rendered_name>-mariadb-primary" instead, and
+    # renders no "<rendered_name>-mariadb" Service, so the host follows it. The
+    # compose and self-contained Kubernetes targets name their services
+    # differently; each target's provides.host reflects its own service naming,
+    # and the same Aggregate edge routes whichever string this Recipe emits.
+    host: "{{ .context.rendered_name }}-mariadb{{ if gt (int .infra.ha.read_replicas) 0 }}-primary{{ end }}"
+    port: "3306"
+    protocol: "mariadb"
+
+  # The chart's replication architecture runs one primary and read replicas
+  # that replicate from it; nothing in the chart promotes a read replica when
+  # the primary fails. So infra.ha.read_replicas is honoured and
+  # infra.ha.enabled is refused by name rather than dropped. Read replicas sign
+  # in to the primary with a replication password: without one delivered on
+  # the replication_password slot the chart would generate a different one on
+  # every render, so a non-zero read_replicas without it is refused too.
+  assertions:
+    no_high_availability: >-
+      {{- if .infra.ha.enabled -}}
+      {{- fail "infra.ha.enabled is true, and the Bitnami MariaDB chart has no automatic failover: its read replicas replicate from one primary, and none is promoted when the primary fails. Set infra.ha.enabled to false; infra.ha.read_replicas still runs read replicas" -}}
+      {{- end -}}
+    read_replicas_need_replication_password: >-
+      {{- if and (gt (int .infra.ha.read_replicas) 0) (not (hasKey .features "replication_password")) -}}
+      {{- fail (printf "infra.ha.read_replicas is %v, and the chart's read replicas sign in to the primary with a replication password: attach a core/secret-value Feature to the replication_password slot with key MARIADB_REPLICATION_PASSWORD, or set infra.ha.read_replicas to 0" .infra.ha.read_replicas) -}}
+      {{- end -}}
+
+  valuesMapping: |
+    ## ── Pin the chart's resource names to the rendered name ────
+    ## Names the primary Service "<rendered_name>-mariadb" ("-mariadb-primary"
+    ## with read replicas), matching provides.host. Every object the chart
+    ## emits derives its name from this key, read from a render rather than
+    ## assumed.
+    fullnameOverride: "{{ .context.rendered_name }}-mariadb"
+
+    ## ── Image overrides ────────────────────────────────────────
+    {{- if .infra.overrides }}
+    {{- if .infra.overrides.image }}
+    image:
+      {{- range $k, $v := .infra.overrides.image }}
+      {{ $k }}: "{{ $v }}"
+      {{- end }}
+    {{- end }}
+    {{- if .infra.overrides.volume_permissions_image }}
+    volumePermissions:
+      image:
+        {{- range $k, $v := .infra.overrides.volume_permissions_image }}
+        {{ $k }}: "{{ $v }}"
+        {{- end }}
+    {{- end }}
+    {{- if .infra.overrides.global_storage_class }}
+    global:
+      storageClass: "{{ .infra.overrides.global_storage_class }}"
+    {{- end }}
+    {{- end }}
+
+    ## ── Authentication ─────────────────────────────────────────
+    ## The credential Secrets deliver the passwords into the component inject
+    ## pipe (.context.inject.env); the chart reads them inline. No Kubernetes
+    ## Secret is generated here — that is the production resource-generation path.
+    auth:
+      database: "{{ .values.database }}"
+      rootPassword: "{{ .context.inject.env.MARIADB_ROOT_PASSWORD | replace "\\" "\\\\" | replace "\"" "\\\"" }}"
+      {{- if .values.user }}
+      username: "{{ .values.user }}"
+      password: "{{ .context.inject.env.MARIADB_PASSWORD | replace "\\" "\\\\" | replace "\"" "\\\"" }}"
+      {{- end }}
+      {{- if gt (int .infra.ha.read_replicas) 0 }}
+      replicationPassword: "{{ .context.inject.env.MARIADB_REPLICATION_PASSWORD | replace "\\" "\\\\" | replace "\"" "\\\"" }}"
+      {{- end }}
+
+    ## ── Primary ────────────────────────────────────────────────
+    primary:
+      {{- if .values.custom_config }}
+      configuration: |-
+        {{ .values.custom_config | nindent 8 }}
+      {{- end }}
+
+      resources:
+        limits:
+          cpu: "{{ .infra.compute.cpu }}"
+          memory: "{{ .infra.compute.memory }}"
+        {{- if .infra.overrides }}
+        {{- if .infra.overrides.requests }}
+        requests:
+          cpu: "{{ .infra.overrides.requests.cpu }}"
+          memory: "{{ .infra.overrides.requests.memory }}"
+        {{- end }}
+        {{- end }}
+
+      persistence:
+        enabled: true
+        size: "{{ .infra.storage.size }}"
+        storageClass: "{{ .infra.storage.type }}"
+        accessModes:
+          - ReadWriteOnce
+
+      {{- if .infra.overrides }}
+      {{- if .infra.overrides.nodeSelector }}
+      nodeSelector: {{ toJson .infra.overrides.nodeSelector }}
+      {{- end }}
+      {{- if .infra.overrides.tolerations }}
+      tolerations: {{ toJson .infra.overrides.tolerations }}
+      {{- end }}
+      {{- if .infra.overrides.affinity }}
+      affinity: {{ toJson .infra.overrides.affinity }}
+      {{- end }}
+      {{- if .infra.overrides.service_type }}
+      service:
+        type: "{{ .infra.overrides.service_type }}"
+      {{- end }}
+      {{- end }}
+
+    ## ── Init scripts ───────────────────────────────────────────
+    {{- if .values.init_scripts }}
+    initdbScripts:
+      {{- range $name, $sql := .values.init_scripts }}
+      {{ $name }}: |
+        {{ $sql | nindent 8 }}
+      {{- end }}
+    {{- end }}
+
+    ## ── Read replicas ──────────────────────────────────────────
+    ## The chart renders its secondaries only under architecture: replication,
+    ## so a non-zero infra.ha.read_replicas selects it and sizes the secondary
+    ## StatefulSet; otherwise the chart runs its single primary.
+    {{- if gt (int .infra.ha.read_replicas) 0 }}
+    architecture: replication
+    secondary:
+      replicaCount: {{ .infra.ha.read_replicas }}
+      resources:
+        limits:
+          cpu: "{{ .infra.compute.cpu }}"
+          memory: "{{ .infra.compute.memory }}"
+      persistence:
+        enabled: true
+        size: "{{ .infra.storage.size }}"
+        storageClass: "{{ .infra.storage.type }}"
+    {{- else }}
+    architecture: standalone
+    {{- end }}
+
+    ## ── Metrics ────────────────────────────────────────────────
+    {{- if .infra.overrides }}
+    {{- if .infra.overrides.metrics }}
+    metrics:
+      enabled: true
+      {{- if .infra.overrides.metrics.image }}
+      image:
+        {{- range $k, $v := .infra.overrides.metrics.image }}
+        {{ $k }}: "{{ $v }}"
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- end }}

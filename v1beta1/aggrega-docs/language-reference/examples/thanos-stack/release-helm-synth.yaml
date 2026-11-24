@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Release
+metadata:
+  name: k8s-helm-synth
+  environment: production
+  version: "1.0.0"
+spec:
+  aggregate: aggregate
+  manifest: manifest-helm-synth
+  boundaries:
+    app:
+      directory: app
+      components:
+        # The module's internal components are addressed by their dotted
+        # module-scoped IDs. Compute sizing is owned by the operator; the object
+        # store's realization fixes its own image, port and volume, and
+        # everything else is left to the components' schema defaults, so the
+        # stack renders self-contained.
+        metrics.objstore: {}
+        metrics.store:
+          infra:
+            compute:
+              cpu: 250m
+              memory: 512Mi
+        metrics.query:
+          infra:
+            compute:
+              cpu: 250m
+              memory: 512Mi

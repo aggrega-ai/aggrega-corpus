@@ -1,0 +1,162 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/ai-model/ollama
+  version: 1.0.0
+  description: >
+    Ollama running in-cluster as a self-hosted inference server. A Recipe
+    synthesizes the runtime directly: a weights-pull initContainer resolves the
+    model pointer into a model-cache volume the serving container mounts, and a
+    ClusterIP Service fronts the OpenAI-compatible API. The model value is a
+    deterministic pointer resolved at pod start, never fetched at compile time.
+    Exports its host, port, endpoint, model, and protocol to consumers via the
+    uses topology, so an agent reaches the model without hardcoding an endpoint.
+
+    On Kubernetes there are two realizations and the Manifest chooses between
+    them. `ollama` synthesizes the runtime as a workload and fetches nothing, and
+    it is the one to reach for where the build must complete with no chart
+    repository reachable, or where more than one serving replica is wanted —
+    it gives each replica its own model cache. `ollama-chart` renders the
+    community-maintained Ollama Helm chart, which additionally renders a
+    horizontal autoscaler from the replica bounds below, so reach for it where a
+    chart repository is reachable at build time. That realization backs its
+    single serving replica with one model cache and refuses a higher replica
+    count rather than rendering one that cannot schedule. Both realizations run
+    liveness and readiness probes against the serving endpoint, so a rollout
+    reports the server ready only once it answers.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: ai-model
+    model.aggrega.ai/capability: generative
+    # Model API: Ollama's OpenAI-compatible API answers at the endpoint
+    # published here, under the /v1 path it carries; the server's own native
+    # routes sit outside that path.
+    model.aggrega.ai/api: openai
+    component.aggrega.ai/hosting: self-hosted
+    component.aggrega.ai/upstream-licensing: osi-approved
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # Self-inject allowlist: the component may inject its own provides keys into
+  # the env delivery mechanism.
+  inject: [env]
+  featuresSchema:
+    # Optional model-registry pull credential for gated model weights. When a
+    # credential is attached here, the Recipe delivers it to the
+    # weights-pull initContainer as an environment variable; when unattached,
+    # weights are pulled anonymously, byte-identically to a Recipe with no slot.
+    # `required` omitted → optional. Transparent (inject: [env]); the selector
+    # is secret-kind-pinned but family-agnostic.
+    model_pull_token:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      description: "Optional model-registry pull credential for gated model weights. When attached, the weights-pull initContainer receives it as an environment variable; unattached, weights are pulled anonymously."
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate. `model` is
+      # the deterministic weights pointer (an Ollama model name such as
+      # llama3.1); the runtime resolves it at pod start.
+      $ref: "BaseComponents#/schemas/BaseModelParameter"
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 11434
+        description: Server listen port for the model API. Most operators should omit this and let the Recipe assign the default (11434).
+      # The default tag serves Chat Completions and the Responses API under /v1;
+      # some OpenAI clients call the Responses API by default. It is pinned
+      # exactly, never a moving tag, so every build runs the same server.
+      engine_version:
+        type: string
+        default: "0.15.6"
+        description: Ollama runtime image tag. Selects the image tag on the synthesized serving and weights-pull containers; the chart-backed realization pins its own image tag.
+      source_version:
+        type: string
+        description: Version of the Helm chart the chart-backed realization pulls. Read only by that realization; the workload-synthesis realization pulls no source artifact and ignores it. Changing it away from the Recipe's default does not guarantee value-mapping compatibility with the new chart.
+      replicas:
+        type: integer
+        min: 1
+        default: 1
+        description: Number of serving replicas. On the workload-synthesis realization each replica holds its own model-cache volume and pulls the weights independently; the chart-backed realization backs every replica with one shared cache and therefore serves one replica only, halting rather than rendering a count it cannot schedule.
+      min_replicas:
+        type: integer
+        min: 1
+        description: Lower bound for the replica count when horizontal autoscaling is configured. Read together with max_replicas by the chart-backed realization, which renders a horizontal autoscaler from the pair; the workload-synthesis realization serves a fixed replica count and records the bound without acting on it.
+      max_replicas:
+        type: integer
+        min: 1
+        description: Upper bound for the replica count when horizontal autoscaling is configured. Read together with min_replicas by the chart-backed realization, which renders a horizontal autoscaler from the pair; the workload-synthesis realization serves a fixed replica count and records the bound without acting on it.
+      compute:
+        cpu:
+          type: string
+          default: "1"
+        memory:
+          type: string
+          default: 4Gi
+      model_cache:
+        type: object
+        description: Per-replica model-weights cache volume. Sized for the pulled model; each serving replica gets its own claim.
+        properties:
+          size:
+            type: string
+            default: 20Gi
+          class:
+            type: string
+      model_artifact:
+        type: string
+        description: Optional OCI reference to the model weights, an alternative weights source to the Hugging Face model id in values.model. A deterministic pointer the runtime resolves at pod start; the compiler never fetches it. Declared ahead of rendering — the synth recipes resolve weights from values.model and do not yet consume this pointer.
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+      gpu:
+        type: object
+        description: Optional GPU scheduling for the serving container. When set, the Recipe requests GPUs as the extended resource nvidia.com/gpu and, when a runtime class is named, schedules the pod under it. Requires a GPU-capable cluster and, for runtime_class, a matching RuntimeClass configured in the cluster. Omit the whole object to serve on CPU.
+        properties:
+          count:
+            type: integer
+            min: 1
+            description: Number of GPUs requested for the serving container, delivered as the extended resource nvidia.com/gpu. Set this to enable GPU serving; omit to serve on CPU.
+          runtime_class:
+            type: string
+            description: Name of the RuntimeClass selecting the GPU-enabled container runtime (for example nvidia). Omit to use the cluster default runtime.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      # endpoint and model are the family contract an ai-agent consumer reads;
+      # host, port, and protocol expose the raw in-cluster serving location.
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name of the Service fronting the inference server. A
+          consumer that composes its own address dials this name; one that
+          does not reads `endpoint` instead.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port that Service accepts model requests on. It follows the port
+          an operator set in the Release, so a consumer reads it rather than
+          assuming a default.
+      endpoint:
+        type: string
+        required: true
+        description: >
+          Full base URL of the OpenAI-compatible API the server serves, with
+          the host, the port and the API path already composed. A consumer
+          hands it to a client library as its base URL.
+      model:
+        type: string
+        required: true
+        description: Name a request must ask this server for, which is the model it pulled at start rather than a provider catalogue name.
+      protocol:
+        type: string
+        description: URL scheme to reach `host` and `port` over, for a consumer composing its own address rather than reading `endpoint`.

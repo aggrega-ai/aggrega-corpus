@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/ai-model/anthropic
+  version: 1.0.0
+  description: >
+    Anthropic's managed Claude API, reached as an external reference: no
+    compute runs in-cluster and the compiler never calls the provider. The
+    endpoint defaults to the managed host, so a bare declaration is enough,
+    and it sits on `infra` rather than inside a Recipe so an operator may
+    repoint it at a gateway or proxy without editing the Aggregate. Consumers
+    read the endpoint and the developer-selected model name over a `uses` edge
+    — the contract every model here publishes — so exchanging this component
+    for another provider's changes nothing on the consuming side. The API key
+    is the consumer's to attach: the environment-variable name it arrives
+    under belongs to the application rather than to the model.
+  labels:
+    component.aggrega.ai/type: resource
+    component.aggrega.ai/category: ai-model
+    model.aggrega.ai/capability: generative
+    # Model API: Anthropic's Messages API answers at the endpoint published
+    # here, the API the anthropic value names. It is not the OpenAI API, so a
+    # consumer reaches it through Anthropic's client or request shape, and a
+    # socket naming the anthropic value takes it.
+    model.aggrega.ai/api: anthropic
+    component.aggrega.ai/hosting: managed
+    component.aggrega.ai/upstream-licensing: proprietary
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  schema:
+    values:
+      $ref: "BaseComponents#/schemas/BaseModelParameter"
+    infra:
+      # Anthropic's managed API has a fixed host, so the endpoint defaults to it
+      # and an operator need not supply one. It is sourced from infra (not
+      # hardcoded in the Recipe) so an operator may repoint it at a gateway or
+      # proxy.
+      endpoint: { type: string, default: "https://api.anthropic.com" }
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      # endpoint and model are the family contract an ai-agent consumer reads.
+      endpoint:
+        type: string
+        required: true
+        description: >
+          Base URL a consumer sends Claude requests to. It follows the
+          endpoint set in the Release, so an operator may point it at a
+          gateway or proxy without the application changing.
+      model:
+        type: string
+        required: true
+        description: >
+          Name of the Claude model a request asks for, carried through from
+          the model the Aggregate declared. A consumer sends it as the model
+          field of each request.

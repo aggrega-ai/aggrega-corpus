@@ -1,0 +1,170 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: rabbitmq-cluster
+  version: 1.0.0
+  license: MPL-2.0
+  description: >
+    RabbitMQ realized as a RabbitmqCluster custom resource the RabbitMQ Cluster
+    Operator reconciles, rather than a directly synthesized StatefulSet — the
+    controller-driven realization of the same RabbitMQ component, selectable in the
+    Manifest alongside the synthesis recipe. The recipe emits one RabbitmqCluster
+    conformant to the rabbitmq.com/v1beta1 API; the controller turns it into a
+    running broker, its client Service and its credential Secret. The
+    RabbitmqCluster is written into the namespace the Release, or else the Aggregate, names through the
+    aggrega.ai/namespace annotation, where one is set. provides.host is
+    the client Service the controller creates for the cluster, so a consumer wires
+    to it exactly as it would to the synthesized realization. Credential custody is
+    the operator's choice: infra.credentials generated leaves the password with the
+    controller, and supplied points it at an existing Secret named in
+    infra.credentials_secret. The RabbitMQ Cluster Operator is a runtime
+    prerequisite: the build halts unless the operator affirms it is installed
+    (infra.control_plane_present), so no custom resource is emitted into a cluster
+    that cannot reconcile it. Reach for this realization where the control plane is
+    already in place; reach for the synthesis recipe where it is not.
+
+    The controller switches the broker's metrics on and puts their port, 15692,
+    which checks no caller, on the client Service. With `values.metrics_enabled`
+    true their address is published as provides.metrics_endpoint while the
+    cluster runs one node; with more, provides.metrics_service names that client
+    Service for a scraper to discover every node behind it. With the value
+    false, those keys are empty.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/messaging/rabbitmq:1.0.0
+  # The RabbitMQ Cluster Operator creates the cluster's client Service under the
+  # RabbitmqCluster's own name, with no suffix, listening on the AMQP port;
+  # provides.host is that bare in-cluster name, matching the synthesis
+  # realization's contract so consumers are realization-agnostic. A consumer in
+  # another namespace qualifies the host on its own side (caller-side routing).
+  #
+  # The port is written as the literal the controller's Service publishes rather
+  # than as infra.port, because the controller fixes it — see the port-fidelity
+  # assertion below.
+  #
+  # metrics_endpoint is the address the broker serves its own metrics at:
+  # /metrics on port 15692. The controller switches the broker's prometheus
+  # plugin on and puts that port on the same client Service whenever the cluster
+  # serves no TLS, and this custom resource configures none. It is published
+  # while values.metrics_enabled is true and the cluster runs one node, the
+  # node count infra.overrides.replicas sets, defaulting to one. With more nodes
+  # it is empty: each node serves only its own metrics, and the client Service
+  # sends each scrape to whichever node it picks, so one address would read a
+  # different node's counters every time. Then metrics_service,
+  # metrics_service_port and metrics_path name that client Service, the name
+  # the controller gives its metrics port, prometheus, and the path, for a
+  # scraper that discovers every node behind the Service. Every metrics key is
+  # empty while the value is false, though the port stays on the Service. The
+  # Service name is spelled out again on purpose: a provides entry cannot read
+  # another. The port name is the controller's, read from its v2.23.0 source
+  # for a cluster serving no TLS, as this custom resource configures, and
+  # evolves with it like every other detail here.
+  provides:
+    host: "{{ .context.instance_id }}"
+    port: "5672"
+    protocol: "amqp"
+    metrics_endpoint: "{{ if and .values.metrics_enabled (le (int (optional (default dict .infra.overrides) \"replicas\" 1)) 1) }}http://{{ .context.instance_id }}:15692/metrics{{ end }}"
+    metrics_service: "{{ if and .values.metrics_enabled (gt (int (optional (default dict .infra.overrides) \"replicas\" 1)) 1) }}{{ .context.instance_id }}{{ end }}"
+    metrics_service_port: "{{ if and .values.metrics_enabled (gt (int (optional (default dict .infra.overrides) \"replicas\" 1)) 1) }}prometheus{{ end }}"
+    metrics_path: "{{ if and .values.metrics_enabled (gt (int (optional (default dict .infra.overrides) \"replicas\" 1)) 1) }}/metrics{{ end }}"
+  # Three declared conditions, each halting rather than emitting something that
+  # renders cleanly and does not work.
+  assertions:
+    # The RabbitMQ Cluster Operator must exist in the target cluster before a
+    # RabbitmqCluster custom resource can reconcile. The compiler cannot inspect
+    # cluster state, so the prerequisite is declared: an operator affirms it in the
+    # Release, and an unaffirmed build halts here rather than emitting an orphan
+    # custom resource.
+    rabbitmq_operator_prerequisite: >-
+      {{- if not .infra.control_plane_present -}}
+      {{- fail "the RabbitMQ Cluster Operator must be installed in the target cluster before this realization emits its RabbitmqCluster custom resource; once the operator is present, affirm the prerequisite by setting infra.control_plane_present to true in the Release" -}}
+      {{- end -}}
+    # The controller fixes the ports on the client Service it creates: AMQP on 5672
+    # and the management API on 15672. They are not fields on the custom resource,
+    # so a port set here would be accepted, validated and then reach no emitted
+    # byte. Halting says so instead of dropping it silently.
+    rabbitmq_controller_port_fidelity: >-
+      {{- if ne (int .infra.port) 5672 -}}
+      {{- fail "the RabbitMQ Cluster Operator publishes AMQP on 5672 and this realization cannot move it; leave infra.port at its default on this realization, or select the synthesis recipe in the Manifest, which does honor it" -}}
+      {{- end -}}
+      {{- if ne (int .infra.management_port) 15672 -}}
+      {{- fail "the RabbitMQ Cluster Operator publishes the management API on 15672 and this realization cannot move it; leave infra.management_port at its default on this realization, or select the synthesis recipe in the Manifest, which does honor it" -}}
+      {{- end -}}
+    # Supplied credentials need a Secret to read them from. An empty name would
+    # render a custom resource the controller waits on forever.
+    rabbitmq_supplied_credentials_secret: >-
+      {{- if and (eq .infra.credentials "supplied") (not .infra.credentials_secret) -}}
+      {{- fail "infra.credentials is supplied, so name the existing Secret the controller reads the broker credentials from in infra.credentials_secret; leave infra.credentials at generated to have the controller create and own that Secret instead" -}}
+      {{- end -}}
+  # This Recipe reads from infra.overrides:
+  #   replicas - integer (RabbitmqCluster spec.replicas; default 1)
+  #
+  # The node count is the one cluster-shape knob the Component's own schema does
+  # not enumerate: the default renders the single-node broker, and a quorum
+  # cluster raises it. The custom resource's own field documentation notes that
+  # only odd counts form a quorum under a network partition, so raise it to an odd
+  # number.
+  #
+  # The storage class is written only when the Release names one. The controller
+  # copies the field onto the broker's volume claim as it stands, and Kubernetes
+  # reads an empty class as a request for a volume with no class at all, while an
+  # absent one leaves the claim to the cluster's default storage class.
+  #
+  # The RabbitmqCluster is written into the namespace the Release, or else the Aggregate, names for this
+  # component through the aggrega.ai/namespace annotation, on its boundary or its
+  # own entry, and the controller creates the broker's pods and its client
+  # Service there, so they land where a consumer reads that the cluster runs —
+  # the namespace it qualifies host and metrics_endpoint with, and the one a
+  # scraper discovers the nodes behind metrics_service in. The provider does not
+  # place an artifact on its own. Where no namespace is named the field is
+  # omitted, and the RabbitmqCluster lands wherever the applying tool puts it.
+  artifacts:
+    rabbitmqcluster.yaml: |
+      apiVersion: rabbitmq.com/v1beta1
+      kind: RabbitmqCluster
+      metadata:
+        name: {{ .context.instance_id }}
+        {{- $ns := "" }}
+        {{- if .context.annotations }}
+          {{- $raw := optional (optional (default dict .context.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict .context.annotations) "aggregate" dict) "aggrega.ai/namespace" "") }}
+          {{- if $raw }}{{- $ns = $raw }}{{- end }}
+        {{- end }}
+        {{- with $ns }}
+        namespace: "{{ . }}"
+        {{- end }}
+      spec:
+        {{- if and .infra.overrides .infra.overrides.replicas }}
+        replicas: {{ .infra.overrides.replicas }}
+        {{- else }}
+        replicas: 1
+        {{- end }}
+        image: "rabbitmq:{{ .infra.engine_version }}"
+        persistence:
+          storage: "{{ .infra.storage.size }}"
+          {{- with .infra.storage.type }}
+          storageClassName: "{{ . }}"
+          {{- end }}
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+        service:
+          type: ClusterIP
+        {{- if eq .infra.credentials "supplied" }}
+        secretBackend:
+          externalSecret:
+            name: "{{ .infra.credentials_secret }}"
+        {{- else }}
+        rabbitmq:
+          additionalConfig: |
+            default_user = {{ .values.user }}
+        {{- end }}

@@ -1,0 +1,203 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/observability/loki
+  version: 1.0.0
+  # The packaged Loki server is AGPL-3.0.
+  license: AGPL-3.0
+  description: >
+    A Grafana Loki log-aggregation server. Loki receives log streams from
+    shippers and agents over its HTTP push API, indexes them by label rather
+    than by full-text content, stores them in a chunk object store, and answers
+    log-query and range requests over the same HTTP API. This component models
+    Loki in its single-binary shape: every Loki subsystem — distributor,
+    ingester, querier, compactor — runs inside one process backed by a local
+    filesystem chunk store, so it renders as a single stateful server with a
+    data volume rather than a set of microservices. A memcached may be wired to
+    the optional `chunk_cache` socket to hold decompressed chunks between
+    queries; the per-connection values on that edge — batch size, parallelism,
+    timeout and entry lifetime — tune how this server drives that one cache, and
+    with nothing wired the server runs without a chunk cache. The socket takes
+    one connection, and a second halts the build, as does a target publishing a
+    protocol other than memcached or memcached-tls, or none. Its contract to
+    consumers is
+    that HTTP endpoint: a log shipper pushes streams to it, and a dashboards
+    server reads them back over the query API. It also receives OpenTelemetry
+    logs at the base address it publishes as `otlp_http_endpoint`, and carries
+    `observability.aggrega.ai/logs: otlp-http`, so an OpenTelemetry Collector's
+    `logs` socket takes it. Realized on helm by
+    `loki`, which sources the official Grafana Loki chart, and on compose by
+    `loki`, a compose service running the same image and publishing nothing to
+    the host. Loki serves its own metrics in the Prometheus format at /metrics
+    on its HTTP port, on by default, and every Recipe publishes that address as
+    `metrics_endpoint`.
+  labels:
+    component.aggrega.ai/type: stateful-server
+    component.aggrega.ai/category: observability
+    component.aggrega.ai/upstream-licensing: osi-approved
+    # Signal: Loki receives OpenTelemetry logs over HTTP at the /otlp path of
+    # its push API, published as otlp_http_endpoint, so it carries logs:
+    # otlp-http. An OpenTelemetry Collector's logs socket selects the key and
+    # writes an OTLP HTTP exporter to that address. The value names what the
+    # server receives, not a configured state: the endpoint answers whether or
+    # not a collector is wired to it.
+    observability.aggrega.ai/logs: otlp-http
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # Self-inject allowlist: the component may inject resolved uses-edge values
+  # into the env delivery mechanism.
+  inject: [env]
+
+  usesSchema:
+    # An external memcached the server keeps its decompressed chunks in, so a
+    # query that touches a chunk a previous query already read does not fetch and
+    # decompress it again. Optional: with nothing wired the server runs with no
+    # chunk cache at all, which is the shape a single-node deployment wants. The
+    # values below tune how this server drives that one cache — a batch size, a
+    # thread count, a timeout and an entry lifetime — and they belong to the
+    # connection rather than to either component, because one memcached serving
+    # two log servers takes different numbers from each. The socket takes one
+    # connection: the server has a single chunk-cache client, driven by one set of
+    # those values, so a second connection would configure nothing. The
+    # chunk_cache_takes_one_connection assertion at the end of this file halts
+    # the build on it instead. The selector admits any datastore, but the client
+    # speaks the memcached protocol, so a target publishing another protocol, or
+    # none, halts the build; Memcached publishes memcached, and memcached-tls
+    # while it serves TLS alone. A cache publishing memcached-tls is reached over
+    # TLS, the server checking its certificate and the name dialed against the
+    # authority in server_ca where one is attached, and against the image's
+    # default trust store where not.
+    chunk_cache:
+      selector: "component.aggrega.ai/category=datastore"
+      inject: [env]
+      # The authority the server checks the cache's certificate against, for a
+      # cache whose certificate an authority the image does not already trust
+      # signs. Secret-kind-pinned because a referenceable Secret is what the
+      # Recipe mounts, and so marked sensitive as every secret-kind slot is,
+      # though the authority's certificate is not itself secret; delivered as a
+      # file.
+      featuresSchema:
+        server_ca:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [file]
+          description: "Optional authority the server checks the cache's certificate against while the cache publishes protocol memcached-tls, where the image does not already trust the authority that signs it. Its Secret holds ca.crt. The Kubernetes realization mounts the whole Secret read-only into the server and names the file in its chunk-cache client; the Compose realization refuses it, since no credential Feature realized there delivers a Secret as files. The build halts on a server_ca publishing no Secret name, and on one wired to a cache served without TLS. Fill it with core/referenced-secret."
+      valueSchema:
+        # How many chunks the server asks for in one request on this connection.
+        batch_size:
+          type: integer
+          default: 4
+          description: How many chunks the server fetches from this cache in a single request. Raising it trades a larger response for fewer round trips.
+        # How many such requests the server keeps in flight on this connection.
+        parallelism:
+          type: integer
+          default: 5
+          description: How many chunk requests the server keeps in flight against this cache at once.
+        # How long the server waits for this cache before giving up and reading
+        # the chunk from its own store instead.
+        timeout:
+          type: string
+          default: "2000ms"
+          description: How long the server waits for a response from this cache before falling back to its own chunk store. Expressed as a Go duration (e.g. `2000ms`).
+        # How long an entry the server wrote stays usable on this connection.
+        entry_lifetime:
+          type: string
+          default: "0s"
+          description: How long a chunk the server writes to this cache stays usable before it is treated as expired. Expressed as a Go duration; `0s` leaves expiry to the cache's own eviction.
+
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      retention_period:
+        type: string
+        default: "168h"
+        description: How long stored log streams are kept before the in-process compactor deletes them. Expressed as a Go duration (e.g. `168h` for seven days).
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      source_version:
+        type: string
+        description: Source artifact version (Helm chart). Overrides the helm Recipe's default source version; the compose realization pulls no source artifact and ignores it. Changing from default does not guarantee value mapping compatibility.
+      compute:
+        cpu:
+          type: string
+          default: 500m
+        memory:
+          type: string
+          default: 512Mi
+      storage:
+        size:
+          type: string
+          default: 10Gi
+          description: Size of the persistent volume backing the Loki single-binary chunk store. Docker Compose sets no size on a volume, so the compose realization creates the volume without honouring it.
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      host:
+        type: string
+        required: true
+        description: >
+          Name the push and query API is reached at — the in-cluster Service
+          on helm, the service name on compose. A shipper sending log streams
+          and a dashboard querying them both dial this name.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port the push and query API is served on. Each realization
+          serves the project's own default, so a consumer reads this rather
+          than hard-coding one.
+      protocol:
+        type: string
+        description: How the published address is spoken to — `http`, so a consumer reaches both the push and the query paths with an HTTP client.
+      # The base address Loki receives OpenTelemetry logs at, as an OTLP HTTP
+      # exporter is given it: the push API's own address followed by Loki's
+      # /otlp path, to which the exporter appends /v1/logs itself. Loki accepts
+      # an OTLP payload only with structured metadata allowed, which needs the
+      # v13 schema; every realization writes that schema and allows it. It is
+      # the key an OpenTelemetry Collector's logs socket reads. Like every key
+      # declared here, every Recipe realizing this component publishes it.
+      otlp_http_endpoint:
+        type: string
+        description: >
+          The base address OpenTelemetry logs are received at —
+          `http://<host>:<port>/otlp`. An OTLP HTTP exporter given it appends
+          `/v1/logs` itself.
+      # The address a Prometheus server scrapes Loki's own metrics at. Every
+      # Loki component serves them in the Prometheus format at /metrics on the
+      # HTTP port of the push and query API, always on, and no Recipe
+      # configures a credential for that port. Every Recipe publishes the
+      # address spelled out in full from its own host and port, because a
+      # provides entry cannot read another.
+      metrics_endpoint:
+        type: string
+        description: >
+          The full address Prometheus scrapes this component's metrics at —
+          scheme, host, port and path, `http://<host>:<port>/metrics` on the
+          push and query API. Empty where the component serves none reachable.
+
+  # The chunk_cache socket takes one connection. The server has a single
+  # chunk-cache client, configured from one connection's batch size,
+  # parallelism, timeout and entry lifetime, so with two connections wired all
+  # but one would be accepted and then ignored. The build halts instead, naming
+  # each connection on the socket. The rule reads only the socket's connections,
+  # all known before a Recipe binds, so it holds whichever Recipe renders this
+  # component.
+  assertions:
+    chunk_cache_takes_one_connection: >-
+      {{- $connections := optional $.uses "chunk_cache" dict -}}
+      {{- if gt (len $connections) 1 -}}
+      {{- $named := list -}}
+      {{- range $alias, $connection := $connections -}}
+      {{- $named = append $named (printf "%s reaching %q" $alias $connection.target) -}}
+      {{- end -}}
+      {{- fail (printf "the chunk_cache socket of %q holds %d connections (%s), but the server has a single chunk-cache client, driven by one connection's batch size, parallelism, timeout and entry lifetime: wire one memcached to chunk_cache and remove the other connections" $.metadata.instance_id (len $connections) (join ", " $named)) -}}
+      {{- end -}}

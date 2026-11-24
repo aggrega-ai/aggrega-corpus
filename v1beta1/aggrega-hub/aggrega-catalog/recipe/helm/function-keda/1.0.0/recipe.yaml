@@ -1,0 +1,337 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: function-keda
+  version: 1.0.0
+  description: >
+    The generic event-driven compute primitive realized as a Deployment paired
+    with a KEDA scaling resource the KEDA control plane reconciles. The recipe
+    synthesizes the workload and emits one ScaledObject beside it; the control
+    plane reads the depth of the event source the Release names and sets the
+    replica count from it, zero included, so the function occupies no compute
+    while the source is empty.
+
+    This is the queue-paced of the primitive's two realizations: work arrives on
+    an event source the Release names, rather than as an inbound call. Where
+    work arrives as an inbound call, the Manifest maps the component to the
+    request-paced realization instead. The two are chosen there and never both
+    at once.
+
+    No Service definition and no provides contract are emitted, because the
+    component declares none and because the event source invokes the function
+    rather than a caller reaching it. The KEDA control plane is a runtime
+    prerequisite: the build halts unless the operator affirms it is installed
+    (infra.control_plane_present), so no custom resource is emitted into a
+    cluster that cannot reconcile it.
+
+    An edge's inject block dictates what reaches the container, since the image
+    is the Release's own code: each env entry a variable under that name, beside
+    FUNCTION_RUNTIME, which no edge may dictate while it is the default, and
+    each file entry a read-only file from a ConfigMap. The component's own
+    inject block delivers env entries too, and one reading runtime alone
+    replaces FUNCTION_RUNTIME, its default name. An arg entry, or any other
+    mechanism, is refused by
+    name: the recipe renders no command line. A credential published for the
+    pod to reference, such as core/referenced-secret, halts the build by name.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/compute/function:1.0.0
+  # This Recipe reads from infra.overrides:
+  #   annotations - map[string]string (added to the ScaledObject's annotations)
+  #
+  # The key exists because the control plane reads its per-object switches from
+  # the scaling resource's annotations, and which switches an installation
+  # offers belongs to the installed control-plane version rather than to this
+  # catalog. The two scaling bounds are not among them: they come from
+  # infra.min_replicas and infra.max_replicas.
+  #
+  # infra keys read here: image, port, compute, min_replicas, max_replicas,
+  # control_plane_present, scaler.type, scaler.metadata,
+  # scaler.authentication_ref, overrides.annotations.
+  #
+  # The emitted Deployment starts at the replica floor, so a floor of zero is
+  # visible in the workload itself as well as in the scaling resource.
+  #
+  # The event source is an operator value rather than a fixed property of the
+  # component because the component is generic — it names no source of its own,
+  # which is what leaves both pacings open to it. Where the event source
+  # requires credentials to read its depth, the Release names an existing
+  # trigger-authentication resource in infra.scaler.authentication_ref and the
+  # recipe carries that name through without resolving it.
+  #
+  # Target-expected names: the image is the Release's, so no upstream
+  # documentation names a spelling for the developer's runtime value. The recipe
+  # delivers it under a stable default name for the application's own code to
+  # read, which the component's own inject block may replace, as described
+  # above the workload.
+  #
+  # The scaler's metadata keys carry through as authored, because which keys a
+  # scaler kind reads belongs to the installed control-plane version. Both key
+  # and value are rendered as strings, which is the shape that resource's
+  # metadata field takes.
+  provides: {}
+  assertions:
+    # The KEDA control plane must exist in the target cluster before a scaling
+    # custom resource can reconcile. The compiler cannot inspect cluster state,
+    # so the prerequisite is declared: an operator affirms it in the Release,
+    # and an unaffirmed build halts here rather than emitting an orphan custom
+    # resource.
+    keda_control_plane_prerequisite: >-
+      {{- if not .infra.control_plane_present -}}
+      {{- fail "the KEDA control plane must be installed in the target cluster before this realization emits its ScaledObject; once KEDA is present, affirm the prerequisite by setting infra.control_plane_present to true in the Release" -}}
+      {{- end -}}
+    # This component packages no upstream product, so it holds no default image
+    # to fall back to: the Release names the one it runs.
+    image_supplied: >-
+      {{- if not (optional .infra "image" "") -}}
+      {{- fail "this realization runs an image the Release supplies, because the generic compute primitive packages no software and therefore holds no default: set infra.image to the container image serving the function in the Release" -}}
+      {{- end -}}
+    # A queue-paced realization with no event source named would emit a scaling
+    # resource that scales on nothing, which reconciles into a workload pinned
+    # at its floor. Both halves are required, and each is named separately so
+    # the reader is told which one is missing. The scaler block carries no
+    # default, so it is absent rather than empty when a Release sets none; it
+    # is read through the optional accessor for that reason, which is what lets
+    # this assertion report the omission instead of the template failing on a
+    # missing key.
+    scaler_named: >-
+      {{- $scaler := optional .infra "scaler" dict -}}
+      {{- if not (optional $scaler "type" "") -}}
+      {{- fail "this realization scales on an event source the Release names, and none is set, so the emitted scaling resource would scale on nothing: set infra.scaler.type to the event-source kind your KEDA installation spells it as, or map this component to the request-paced realization in the Manifest if its work arrives as an inbound call instead" -}}
+      {{- end -}}
+      {{- if not (optional $scaler "metadata" "") -}}
+      {{- fail "this Release names an event-source kind in infra.scaler.type but supplies no coordinates for it, so the emitted scaling resource would name a source it cannot reach: set infra.scaler.metadata to the keys that kind expects, as strings" -}}
+      {{- end -}}
+    # The compute block's two sub-keys carry defaults, and a Release that
+    # authors the block while setting only one of them takes neither default:
+    # the emitted container then carries one quantity and silently loses the
+    # other. Both are required together for that reason, and each is named
+    # separately so the reader is told which one is missing.
+    compute_group_complete: >-
+      {{- $compute := optional .infra "compute" dict -}}
+      {{- if not (optional $compute "cpu" "") -}}
+      {{- fail "this Release sets part of infra.compute and leaves compute.cpu empty, so the rendered container would carry no CPU request or limit: set both compute.cpu and compute.memory together, or remove the compute block entirely to take the component's defaults" -}}
+      {{- end -}}
+      {{- if not (optional $compute "memory" "") -}}
+      {{- fail "this Release sets part of infra.compute and leaves compute.memory empty, so the rendered container would carry no memory request or limit: set both compute.cpu and compute.memory together, or remove the compute block entirely to take the component's defaults" -}}
+      {{- end -}}
+  # A credential attached to the component reaches the container only through
+  # the delivery pipe the workload below renders: a core/secret-value attachment
+  # writes its value there as a variable under the key it names, so the value is
+  # written into the rendered Deployment, and a core/secret-provided attachment
+  # under the names its own inject block dictates. Every other credential
+  # Feature publishes a secret for the pod to reference, or leaves it to a
+  # controller, and this realization renders no reference: a Workload reference
+  # names a credential slot, and the component declares none. Such an attachment
+  # would build and reach no container, so the workload halts on it first,
+  # naming it. A credential is recognised by the label its Feature declares,
+  # feature.aggrega.ai/kind: secret, and its Feature by its type with any
+  # version set aside. The check sits in the workload rather than among the
+  # assertions above because the attachment's labels are read here.
+  #
+  # DELIBERATE NEAR-DUPLICATE of the credential check helm/server, helm/worker,
+  # helm/task and helm/function-knative carry: the same template, save the
+  # component type and the rendered resource its refusal names. It is a part of
+  # a workload template, and a WorkloadLibrary entry replaces a whole workload,
+  # never a part of one, so no catalog kind holds it for five Recipes to share;
+  # a change to it is made to all five.
+  #
+  # Delivery from an edge. The image is the Release's own code, so no name this
+  # Recipe could choose is one that code reads: each of the component's
+  # connections dictates its own delivery in its inject block, and an edge that
+  # dictates nothing delivers nothing. The pipe is read as a map. Every env
+  # entry becomes a container variable under the name the edge gave it, its
+  # value written whole, after the runtime; an entry under the runtime's name
+  # halts, naming the connection. Every file entry becomes a read-only file at
+  # the path the edge names: one ConfigMap holds the entries, emitted only while
+  # there is one, and each is mounted by subPath, so a path that is not
+  # absolute, or one lying beneath another entry's path, is refused. An arg
+  # entry is refused, because this Recipe renders no command line: Kubernetes
+  # takes a container's arguments in place of the image's default command,
+  # which is the Release's. Any other mechanism is refused too. A refusal names
+  # the entry, its mechanism and the connection that dictated it.
+  #
+  # The block reading the pipe is the one helm/server, helm/worker and
+  # helm/task declare, word for word, and helm/function-knative adapts to the
+  # Knative Service it renders; a change to it is made to all five.
+  #
+  # The component's own values. The developer may also write an inject block on
+  # the component itself, whose env entries reach the pipe under the names the
+  # developer chose and so reach the container with every other env entry. The
+  # name this Recipe gives the runtime is a default: it is rendered only while
+  # no entry of that block, in any mechanism, delivers the runtime. The template
+  # reads that at .context.self_inject, which maps each name the developer wrote
+  # to values.<key> for an entry whose template reads that one own value. A
+  # refusal naming a variable that block delivers names the block, rather than
+  # an attachment.
+  #
+  # DELIBERATE NEAR-DUPLICATE of the reading of .context.self_inject every
+  # Recipe in this catalog that reads .context.self_inject declares: the same
+  # lines, save the own values each looks up and the mechanisms it reads. A
+  # Recipe of a tool or of an agent reads env and file entries, and reads the
+  # file entries a second time for the files it emits; a Recipe of
+  # core/compute/function, task or worker reads env entries alone; a Recipe of
+  # core/compute/server that refuses a variable by name reads the names of the
+  # env entries alone; and a realization of core/ai-tool/mcp that delivers none
+  # of the block reads it only to refuse each of its entries. It is part of a
+  # workload or a values mapping, and no catalog kind holds part of one for
+  # several Recipes to share; a change to it is made to all of them.
+  workload: |
+    {{- range $name, $attachment := (default dict .features) }}
+    {{- $type := first (splitList ":" (toString (optional $attachment "type" ""))) }}
+    {{- $kind := optional (default dict (optional $attachment "labels" dict)) "feature.aggrega.ai/kind" "" }}
+    {{- if and (eq $kind "secret") (not (has $type (list "core/secret-value" "core/secret-provided"))) }}
+    {{- fail (printf "the %s attachment %q on %q would reach no container: this realization delivers a credential only through the component's delivery pipe, which core/secret-value fills with its value under the key it names and core/secret-provided through the attachment's own inject block, and it renders no reference to a secret, since core/compute/function declares no credential slot a reference could name. Attach the credential as core/secret-value, whose value is then written into the rendered Deployment's environment, or realize the component with a Recipe that reads the secret by reference" $type $name $.context.instance_id) }}
+    {{- end }}
+    {{- end }}
+    {{- $inject := default dict .context.inject }}
+    {{- $env := optional $inject "env" dict }}
+    {{- $files := optional $inject "file" dict }}
+    {{- range $mechanism, $entries := $inject }}
+    {{- if not (has $mechanism (list "all" "env" "file")) }}
+    {{- range $name, $_ := $entries }}
+    {{- $by := "an attachment on the component" }}
+    {{- range $alias, $edge := $.context.uses }}
+    {{- if hasKey (optional (default dict $edge.inject) $mechanism dict) $name }}{{ $by = printf "its connection %q" $alias }}{{ end }}
+    {{- end }}
+    {{- if eq $mechanism "arg" }}
+    {{- fail (printf "the component %q is handed the command-line argument %q by %s, and this realization renders no command line: Kubernetes takes a container's arguments in place of the image's default command, and that command is the Release's. Dictate the value as an env or a file entry in that inject block instead" $.context.instance_id $name $by) }}
+    {{- end }}
+    {{- fail (printf "the component %q is handed %q under the delivery mechanism %q by %s, and this realization delivers env and file entries only: dictate the value as an env or a file entry in that inject block instead" $.context.instance_id $name $mechanism $by) }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- range $path, $_ := $files }}
+    {{- if not (hasPrefix "/" $path) }}
+    {{- fail (printf "the component %q is handed a file at %q, and a file is written at an absolute path inside the container: write that path in the connection's inject block starting with /" $.context.instance_id $path) }}
+    {{- end }}
+    {{- range $other, $_ := $files }}
+    {{- if hasPrefix (printf "%s/" $path) $other }}
+    {{- fail (printf "the component %q is handed a file at %q and another at %q beneath it, and one path cannot be both a file and a directory: dictate the two files at paths neither of which lies beneath the other" $.context.instance_id $path $other) }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- $named := dict }}
+    {{- $ownEnv := dict }}
+    {{- range $mechanism, $names := default dict .context.self_inject }}
+    {{- range $name, $key := $names }}
+    {{- if $key }}{{ $_ := set $named (toString $key) true }}{{ end }}
+    {{- if eq $mechanism "env" }}{{ $_ := set $ownEnv $name true }}{{ end }}
+    {{- end }}
+    {{- end }}
+    {{- $runtimeByDefault := not (hasKey $named "values.runtime") }}
+    {{- if and $runtimeByDefault (hasKey $env "FUNCTION_RUNTIME") }}
+    {{- $by := "an attachment on the component" }}
+    {{- if hasKey $ownEnv "FUNCTION_RUNTIME" }}{{ $by = "the component's own inject block" }}{{ end }}
+    {{- range $alias, $edge := .context.uses }}
+    {{- if hasKey (optional (default dict $edge.inject) "env" dict) "FUNCTION_RUNTIME" }}{{ $by = printf "its connection %q" $alias }}{{ end }}
+    {{- end }}
+    {{- fail (printf "the component %q delivers its developer value runtime to the container as FUNCTION_RUNTIME, and %s dictates a variable under that name as well, so one would silently replace the other: rename the variable in that inject block" .context.instance_id $by) }}
+    {{- end }}
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # A resident workload the scaling resource below drives. It starts at the
+    # replica floor rather than at one, so a floor of zero renders a workload
+    # holding no replicas until the event source has depth.
+    form: stateless
+    replicas: {{ .infra.min_replicas }}
+    containers:
+      main:
+        image: "{{ .infra.image }}"
+        ports:
+          http: {{ .infra.port }}
+        {{- if or $runtimeByDefault $env }}
+        variables:
+          {{- if $runtimeByDefault }}
+          FUNCTION_RUNTIME: "{{ .values.runtime }}"
+          {{- end }}
+          {{- range $k, $v := $env }}
+          {{ toJson $k }}: {{ toJson $v }}
+          {{- end }}
+        {{- end }}
+        {{- if $files }}
+        volumeMounts:
+          {{- $i := 0 }}
+          {{- range $path, $_ := $files }}
+          - name: inject-files
+            path: {{ toJson $path }}
+            subPath: "file-{{ $i }}"
+            readonly: true
+          {{- $i = add $i 1 }}
+          {{- end }}
+        {{- end }}
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+    {{- if $files }}
+    volumes:
+      inject-files:
+        configmap:
+          source: "{{ .context.rendered_name }}-files"
+    {{- end }}
+  # The output filename carries the realization's own name rather than the bare
+  # resource kind, because an artifact key is the output path used as written:
+  # two realizations sharing a key cannot sit in one boundary, and the build
+  # halts naming the path when they do.
+  #
+  # function-keda-files.configmap.yaml holds the file entries an edge dictates,
+  # keyed file-0, file-1 and so on in path order, the keys the workload's mounts
+  # read. It is emitted only while an edge dictates a file, so a build with none
+  # renders nothing there. The pod mounts it by name, which resolves only in the
+  # pod's own namespace, so it carries the namespace the Release, or else the Aggregate, declares for
+  # the component through the aggrega.ai/namespace annotation, as the
+  # workload's own resources do, and none where it declares none.
+  artifacts:
+    function-keda-files.configmap.yaml: |
+      {{- $files := optional (default dict .context.inject) "file" dict }}
+      {{- if $files -}}
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: {{ .context.rendered_name }}-files
+        {{- with optional (optional (default dict .context.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict .context.annotations) "aggregate" dict) "aggrega.ai/namespace" "") }}
+        namespace: "{{ . }}"
+        {{- end }}
+      data:
+        {{- $i := 0 }}
+        {{- range $path, $v := $files }}
+        file-{{ $i }}: {{ toJson $v }}
+        {{- $i = add $i 1 }}
+        {{- end }}
+      {{- end }}
+    function-scaledobject.yaml: |
+      apiVersion: keda.sh/v1alpha1
+      kind: ScaledObject
+      metadata:
+        name: {{ .context.rendered_name }}
+        {{- if and .infra.overrides .infra.overrides.annotations }}
+        annotations:
+          {{- range $k, $v := .infra.overrides.annotations }}
+          {{ $k }}: "{{ $v | replace "\\" "\\\\" | replace "\"" "\\\"" }}"
+          {{- end }}
+        {{- end }}
+      spec:
+        scaleTargetRef:
+          name: {{ .context.rendered_name }}
+        minReplicaCount: {{ .infra.min_replicas }}
+        maxReplicaCount: {{ .infra.max_replicas }}
+        triggers:
+          - type: "{{ .infra.scaler.type }}"
+            metadata:
+              {{- range $k, $v := .infra.scaler.metadata }}
+              {{ $k }}: "{{ $v | replace "\\" "\\\\" | replace "\"" "\\\"" }}"
+              {{- end }}
+            {{- with (optional .infra.scaler "authentication_ref" "") }}
+            authenticationRef:
+              name: "{{ . }}"
+            {{- end }}

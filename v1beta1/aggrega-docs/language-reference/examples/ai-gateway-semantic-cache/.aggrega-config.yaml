@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+workspace: {}
+# This workspace authors no catalog entity of its own: the hub registry
+# supplies every one it uses, and the gateway configuration step
+# the semantic-caching realization runs.
+default_registry: hub.aggrega.ai

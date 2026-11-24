@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Feature
+metadata:
+  name: core/gcp-workload-identity
+  version: 1.0.0
+  description: >
+    Binds a workload to a Google Cloud service account through GKE Workload
+    Identity. Its FeatureRecipe emits one Kubernetes ServiceAccount annotated
+    with the Google service-account email; the pod runs under that ServiceAccount
+    and impersonates the Google service account at runtime, so no static key
+    material is stored.
+
+    It fills a workload's identity slot: the workload's Component declares the
+    need, and the operator attaches this Feature in the Release, on the
+    Release's entry for the component. The Google service-account email and the
+    ServiceAccount name are operator sizing (infra) — which identity a workload
+    runs under is operational configuration.
+
+    Emitting the ServiceAccount and binding the pod are two explicit steps;
+    attaching this Feature performs the first. The consumer's Recipe performs
+    the second when it reads the published ServiceAccount name; otherwise set
+    the aggrega.ai/service-account annotation on the consumer to that name. The
+    annotation is honoured on the synthesized render path; a consumer rendered
+    from an external chart via `source:` does not honour it, and the binding has
+    to be expressed through that chart's own inputs instead.
+  annotations:
+    security.aggrega.ai/class: "cloud_native"
+    routing.aggrega.ai/tier: "none"
+  maintainers:
+    - name: "Massimiliano Ferrero"
+      email: "m.ferrero@cognitio.it"
+spec:
+  appliesTo: "component.aggrega.ai/type=server"
+  interoperability:
+    conflictsWith: []
+  schema:
+    infra:
+      gcp_service_account:
+        type: string
+        required: true
+        description: >
+          The Google service-account email the ServiceAccount is annotated with
+          (<name>@<project>.iam.gserviceaccount.com). The pod impersonates this
+          Google service account at runtime through Workload Identity.
+      service_account_name:
+        type: string
+        description: >
+          The name of the emitted ServiceAccount. Supplied where a Workload
+          Identity binding already names the ServiceAccount it trusts, in which
+          case that exact name is emitted; left unset, the bound FeatureRecipe
+          derives a name that is distinct per attached component. Set the same
+          value on the consumer's aggrega.ai/service-account annotation to run the
+          pod under it — honoured on the synthesized render path, not on a
+          consumer rendered from an external chart. The published provides.name
+          carries whichever name was emitted, so a consumer can mirror it without
+          knowing which case applied.
+    provides:
+      name:
+        type: string
+        description: >
+          The emitted ServiceAccount's name — the value the consumer's Recipe
+          reads to run its pod under it, or the value to mirror onto the
+          consumer's aggrega.ai/service-account annotation so the pod binds to
+          it, on the synthesized render path.

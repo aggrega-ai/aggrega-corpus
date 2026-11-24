@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Aggregate
+metadata:
+  name: aggregate
+  version: "1.0.0"
+  description: >
+    A Prometheus metrics server scraping two Grafana dashboards servers,
+    authored once and compiled to two targets: a Docker Compose stack for local
+    development and Kubernetes via Workload synthesis on the official
+    prom/prometheus image. Grafana serves its own metrics in the Prometheus
+    format at /metrics on its web port, and its Recipe publishes that address as
+    `metrics_endpoint`, so each Grafana is a real scrape target. Each one is
+    wired on the `scrape_target` socket and becomes one scrape job — the address
+    the Grafana publishes is piped in as that job's target and path, and the
+    per-edge `values` on each connection tune that job's label and cadence. The
+    same developer intent drives both targets; only the Recipe layer selected by
+    the Manifest differs.
+spec:
+  components:
+    team-dashboards:
+      type: core/observability/grafana
+    ops-dashboards:
+      type: core/observability/grafana
+    metrics:
+      type: core/observability/prometheus
+      uses:
+        # Two connections on one socket: Prometheus scrapes both Grafanas. Each
+        # connection is one scrape job, so the settings that differ per target
+        # are authored on the connection rather than on the component.
+        scrape_target:
+          # No `values` here, so this job takes what the socket declares: the
+          # edge alias as its `job_name`, and the socket's declared defaults
+          # for the keys this connection leaves unset.
+          team-dashboards:
+            target: team-dashboards
+          # Every key set here overrides that connection's job and leaves the
+          # other connection untouched.
+          ops-dashboards:
+            target: ops-dashboards
+            values:
+              job_name: ops-grafana
+              scrape_interval: 30s

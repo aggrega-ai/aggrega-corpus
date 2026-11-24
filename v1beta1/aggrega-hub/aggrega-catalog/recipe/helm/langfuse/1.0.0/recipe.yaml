@@ -1,0 +1,552 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: langfuse
+  version: 1.0.0
+  license: MIT
+  description: >
+    Langfuse as a self-hosted tracing and prompt-registry platform on Kubernetes
+    via the helm provider's Workload synthesis, running the official upstream
+    images directly (no external Helm chart). Renders one Deployment carrying the
+    console and ingestion API and the asynchronous worker, and a ClusterIP
+    Service fronting the console. The configuration contract is authored against
+    Langfuse 4.22.0.
+
+    The relational backend, the cache and the object store arrive as topology
+    edges; the columnar analytics store is supplied as operator-set pointer
+    strings, and the build halts until both of its addresses are set.
+    infra.external_base_url reaches the console as NEXTAUTH_URL. An attached
+    credential, on a connection or in a Component slot, reaches the containers
+    as an env secretKeyRef, never as a value in the manifest. The encryption
+    key, the session secret, the salt and the object store's secret key have
+    no default: the first three slots are required, and an event_store
+    connection with no credential halts the build unless its values set
+    unauthenticated: true. The backend password, left unattached, renders a
+    development literal; the cache and analytics-store passwords render
+    nothing. A cache publishing
+    valkey-tls or redis-tls is reached over TLS, its certificate checked against the cache
+    connection's server_ca, mounted, or the runtime's trust store; another TLS
+    protocol on the cache halts the build.
+
+    Reach for this realization where the build must complete with nothing
+    fetched, or where no chart repository is reachable from it; reach for
+    `langfuse-chart`, which renders the platform maintainers' own chart in
+    separate Deployments, where the console and the worker will be scaled
+    independently.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/observability/langfuse:1.0.0
+  # This Recipe reads no infra.overrides keys.
+  #
+  # The two entries below are the single authored home for the two container
+  # images. Each is dereferenced once in the workload template; they are named
+  # here so the image repositories and the shared tag sit together and cannot be
+  # moved apart, since the console and the worker must not run different
+  # versions of the same platform.
+  #
+  # Both artifacts are published under terms that let any reader pull and run
+  # them: the platform's core is MIT and the images are fetchable anonymously.
+  # A named subtree of the upstream is licensed separately and is inert without
+  # an enterprise key, which is why this Recipe names MIT for what it pins while
+  # the Component records the open-core class for the product as a whole.
+  locals:
+    console_image: "langfuse/langfuse:{{ .infra.engine_version }}"
+    worker_image: "langfuse/langfuse-worker:{{ .infra.engine_version }}"
+  # The columnar analytics store is not an edge: its HTTP address and its
+  # native-protocol migration address are operator-supplied deterministic
+  # pointer strings the runtime resolves, since a Release typically reaches a
+  # columnar store it does not run itself.
+  #
+  # The columnar analytics store is where every trace, observation and score
+  # this platform serves actually lives, and its two addresses have no sensible
+  # default: a Release reaches whichever store it runs or contracts for. A
+  # build that has not supplied them halts here rather than rendering a console
+  # with an address-less variable, which starts and then stays empty.
+  assertions:
+    analytics_store_addresses_supplied: >-
+      {{- if not (and (hasKey .infra "analytics_store_url") (index .infra "analytics_store_url")) -}}
+      {{- fail "infra.analytics_store_url must name the HTTP address of the columnar analytics store holding traces, observations and scores; set it in the Release" -}}
+      {{- end -}}
+      {{- if not (and (hasKey .infra "analytics_store_migration_url") (index .infra "analytics_store_migration_url")) -}}
+      {{- fail "infra.analytics_store_migration_url must name the native-protocol address of the same analytics store, which the platform applies its schema migrations over; set it in the Release" -}}
+      {{- end -}}
+  # provides is evaluated before the workload and cannot read it, so the port has
+  # one authored home in .infra.port that every reader dereferences — provides.port
+  # and provides.endpoint here, and below the console's own listen port, the
+  # container port and the Service; the literal is never repeated.
+  #
+  # host and endpoint spell the Service name out twice on purpose. A provides
+  # entry cannot read another provides entry, and the name has to match the
+  # Service the helm provider derives from the service key below, so there is no
+  # home either could dereference instead — the repetition is forced, not a
+  # choice, and the two must be edited together.
+  #
+  # provides.host is the bare, self-contained in-cluster service name of the
+  # synthesized ClusterIP Service — it carries no namespace, so the Recipe is
+  # independent of where it is deployed. A consumer in another namespace
+  # qualifies the host with the target namespace on its own side (caller-side
+  # routing).
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ .infra.port }}"
+    endpoint: "http://{{ .context.rendered_name }}-default:{{ .infra.port }}"
+    protocol: "http"
+  # One Deployment carries two containers: the console and ingestion API, and
+  # the asynchronous worker that drains the ingestion queue into the columnar
+  # analytics store. The two are versioned together and read one identical set
+  # of backing-system addresses, so they are co-located rather than split —
+  # which trades independent scaling for one place to configure. A ClusterIP
+  # Service fronts the console; the worker's port carries only its own health
+  # endpoint and is not published on the Service.
+  #
+  # The relational backend, the cache and the object store arrive as topology
+  # edges. Their addresses reach the platform under the variable names the
+  # platform itself reads, and the backend is delivered as separate host, port,
+  # user and database variables rather than as a connection string, because a
+  # password embedded in a URL cannot be delivered as a Kubernetes secret
+  # reference — the separate form is what keeps the credential out of the
+  # rendered manifest. The object store's address is the endpoint the store
+  # publishes, scheme included, and the bucket, region, prefixes and access-key
+  # identifier are read from that edge's own values, so wiring a different
+  # store is a change of target and edge values rather than a change of component.
+  # A store that publishes a bucket of its own must publish the edge's bucket,
+  # or the build halts naming both.
+  #
+  # Every credential but the encryption key, the session secret and the salt
+  # is optional. Three are held on the connection they are presented on — the
+  # backend's password, the cache's password and the secret half of the object
+  # store's access key — and the rest are slots of the Component. When one is
+  # attached its value reaches the container as an env secretKeyRef and never
+  # appears in the rendered manifest. The encryption key, the session secret
+  # and the salt are always attached: the Component requires those slots, so
+  # no key every reader of this catalog holds is ever rendered. The object
+  # store's secret key
+  # has no default either: an event_store connection carrying none halts the
+  # build, unless the connection says its store takes none, and then no secret
+  # key is presented. Any other credential left unattached takes the
+  # deterministic development literal its own description announces. The cache
+  # and analytics-store passwords are the two exceptions: with nothing attached
+  # they emit no variable at all, because presenting a password to a service
+  # that wants none fails the connection rather than defaulting.
+  workload: |
+    {{- /*
+      The console's externally reachable base URL. The operator's value wins when
+      one was supplied; with none, the in-cluster Service address stands in, which
+      is correct for an installation nobody reaches from a browser outside the
+      cluster. Bound once here because both containers read it and the fallback
+      must not be spelled twice.
+    */ -}}
+    {{- $externalURL := .infra.external_base_url | default (printf "http://%s-default:%v" .context.rendered_name .infra.port) -}}
+    {{- /*
+      The alias of each connection carrying a credential, or empty: the
+      relational backend's password, the cache's password, and the secret half
+      of the object store's access key. Resolved once here because both
+      containers deliver each of them.
+    */ -}}
+    {{- $backendCredential := "" -}}
+    {{- $cacheCredential := "" -}}
+    {{- $eventStoreCredential := "" -}}
+    {{- range $alias, $edge := .context.uses -}}
+    {{- if hasKey (default dict $edge.features) "credential" -}}
+    {{- if eq $edge.socket "backend" -}}{{- $backendCredential = $alias -}}{{- end -}}
+    {{- if eq $edge.socket "cache" -}}{{- $cacheCredential = $alias -}}{{- end -}}
+    {{- if eq $edge.socket "event_store" -}}{{- $eventStoreCredential = $alias -}}{{- end -}}
+    {{- end -}}
+    {{- end -}}
+    {{- /*
+      The object store's secret key has no default to fall back on: an
+      event_store connection carrying no credential halts the build, naming the
+      connection and the slot to fill, unless the connection says its store
+      takes none.
+    */ -}}
+    {{- range $alias, $edge := .context.uses -}}
+    {{- if and (eq $edge.socket "event_store") (not (hasKey (default dict $edge.features) "credential")) (not (optional (default dict $edge.values) "unauthenticated" false)) -}}
+    {{- fail (printf "the event_store connection %s of %q reaches %q with nothing in its credential slot, and the secret key the platform presents to the object store has no default; attach the store's secret key under credential on that connection, or set unauthenticated: true in its values if the store takes no credential" $alias $.context.instance_id $edge.target) -}}
+    {{- end -}}
+    {{- end -}}
+    {{- /*
+      The connection variables this Recipe reads off the inject pipe, under the
+      socket whose edge delivers them, each beside the provides key the edge's
+      inject block names it from. The pipe is read as a map, and every read of
+      these variables below goes through it, so a variable nothing delivered is
+      told apart from one delivered empty: an edge on one of these sockets
+      leaving any of its variables missing halts the build, naming the edge, the
+      variables and the inject block to write, rather than rendering a
+      connection setting with an empty value. A socket in $required is read
+      whether or not anything is wired to it, so leaving it empty halts too.
+    */ -}}
+    {{- $env := optional (default dict .context.inject) "env" dict -}}
+    {{- $reads := dict "backend" (dict "DATABASE_HOST" "host" "DATABASE_PORT" "port" "DATABASE_USERNAME" "user" "DATABASE_NAME" "database") "cache" (dict "REDIS_HOST" "host" "REDIS_PORT" "port") -}}
+    {{- $required := list "backend" "cache" -}}
+    {{- $gaps := list }}{{ $wired := list -}}
+    {{- range $alias, $edge := .context.uses }}{{ with get $reads $edge.socket -}}
+    {{- $wired = append $wired $edge.socket }}{{ $missing := list }}{{ $shape := list -}}
+    {{- range $var, $from := . }}{{ if not (hasKey $env $var) }}{{ $missing = append $missing $var }}{{ end }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- if $missing }}{{ $gaps = append $gaps (printf "the edge %q on its %s socket delivers no %s, so give that edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $alias $edge.socket (join " or " $missing) (join ", " $shape)) }}{{ end -}}
+    {{- end }}{{ end -}}
+    {{- range $socket := $required }}{{ if not (has $socket $wired) -}}
+    {{- $vars := list }}{{ $shape := list }}{{ range $var, $from := get $reads $socket }}{{ $vars = append $vars $var }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- $gaps = append $gaps (printf "nothing is wired to its %s socket to deliver %s, so wire one and give its edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $socket (join " and " $vars) (join ", " $shape)) -}}
+    {{- end }}{{ end -}}
+    {{- if $gaps }}{{ fail (printf "core/observability/langfuse %q composes its connection settings from variables its edges deliver on its inject pipe, but %s" .context.instance_id (join "; and " $gaps)) }}{{ end -}}
+    {{- /*
+      The object store's address: the endpoint the store wired to event_store
+      publishes, scheme included, so a store served over https is reached over
+      https. The platform's S3 client is handed it whole, and a store
+      publishing none halts the build naming the connection. Resolved once
+      here because both containers deliver it.
+
+      The bucket stays the connection's own value. Where the store publishes a
+      bucket too, the two must name the same one, so a difference halts the
+      build naming both rather than writing into a bucket other than the one
+      the store publishes; a store publishing no bucket leaves the value alone.
+    */ -}}
+    {{- $storeEndpoint := "" -}}
+    {{- range $alias, $edge := .context.uses -}}
+    {{- if eq $edge.socket "event_store" -}}
+    {{- $storeEndpoint = toString (optional (default dict $edge.provides) "endpoint" "") -}}
+    {{- if not $storeEndpoint -}}
+    {{- fail (printf "the event_store connection %s of %q is wired to %q, which publishes no endpoint, but the platform's S3 client is pointed at the full address of the object store it writes event bodies and media to, scheme included; wire a store publishing endpoint, such as core/storage/s3-object-store, to the event_store socket instead" $alias $.context.instance_id $edge.target) -}}
+    {{- end -}}
+    {{- $storeBucket := toString (optional (default dict $edge.provides) "bucket" "") -}}
+    {{- if and $storeBucket (ne $storeBucket (toString $edge.values.bucket)) -}}
+    {{- fail (printf "the event_store connection %s of %q names the bucket %q, but %q, the store it is wired to, publishes the bucket %q, so the platform would write event bodies and media into a bucket other than the one the store publishes; set bucket in that connection's values to %q" $alias $.context.instance_id (toString $edge.values.bucket) $edge.target $storeBucket $storeBucket) -}}
+    {{- end -}}
+    {{- end -}}
+    {{- end -}}
+    {{- /*
+      The cache connection over TLS. A cache publishing valkey-tls or redis-tls accepts TLS
+      connections alone, so both containers reach it over TLS; any other value
+      ending in -tls names a cache served over TLS this platform is not taught
+      to reach, and halts rather than connecting in plaintext. A server_ca on
+      the connection is the authority both containers check the cache's
+      certificate against; it is mounted, so its attachment must name a
+      Secret, and it is refused on a cache served without TLS, where no
+      handshake takes place to check a certificate in. Resolved once here
+      because both containers deliver it. DELIBERATE NEAR-DUPLICATE of the
+      same block in the Dify Recipes: no catalog kind holds a template
+      fragment for several Recipes to share.
+    */ -}}
+    {{- $cacheTLS := false }}{{ $cacheCA := "" -}}
+    {{- range $alias, $edge := .context.uses }}{{ if eq $edge.socket "cache" -}}
+    {{- $proto := toString (optional (default dict $edge.provides) "protocol" "") -}}
+    {{- $edgeTLS := has $proto (list "valkey-tls" "redis-tls") -}}
+    {{- if $edgeTLS }}{{ $cacheTLS = true }}{{ else if hasSuffix "-tls" $proto -}}
+    {{- fail (printf "the cache connection %s of %q reaches %q, which publishes protocol %s, a cache served over TLS that the Langfuse console and worker do not reach: they speak the Redis protocol, over TLS to a cache publishing valkey-tls or redis-tls; wire a Redis-protocol cache to the cache socket" $alias $.context.instance_id $edge.target $proto) -}}
+    {{- end -}}
+    {{- if hasKey (default dict $edge.features) "server_ca" -}}
+    {{- $caProvides := optional (optional (default dict $edge.features) "server_ca" dict) "provides" dict -}}
+    {{- if not (and (kindIs "map" $caProvides) (optional $caProvides "name" "")) -}}
+    {{- fail (printf "the server_ca on the cache connection %s of %q publishes no Secret name, so no Secret could be mounted into the console and the worker: attach a server_ca publishing one, such as core/referenced-secret" $alias $.context.instance_id) -}}
+    {{- end -}}
+    {{- if not $edgeTLS -}}
+    {{- fail (printf "the cache connection %s of %q holds a server_ca, but the cache it reaches, %q, publishes protocol %s, served without TLS, so no TLS handshake takes place to check a certificate in: turn client_tls on for that cache, or remove the server_ca" $alias $.context.instance_id $edge.target (default "none" $proto)) -}}
+    {{- end -}}
+    {{- $cacheCA = $alias -}}
+    {{- end -}}
+    {{- end }}{{ end -}}
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # Neither container holds durable state — the relational backend, the cache,
+    # the object store and the analytics store are the systems of record — so the
+    # default stateless form (a Deployment on the helm provider) is correct: no
+    # form: stateful, no persistentTemplate volume, no PVC.
+    form: stateless
+    replicas: 1
+    containers:
+      main:
+        image: "{{ .locals.console_image }}"
+        variables:
+          # The listen port the console binds. It is emitted as well as published
+          # on the container port and the Service, because the process reads its
+          # bind port from here: without it, moving infra.port would move the
+          # Service and the container port while the process kept binding its own
+          # default.
+          PORT: "{{ .infra.port }}"
+          NEXTAUTH_URL: "{{ $externalURL }}"
+          LANGFUSE_LOG_LEVEL: "{{ .infra.log_level }}"
+          LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "{{ .values.experimental_features }}"
+          LANGFUSE_OTEL_INGESTION_MAX_BODY_BYTES: "{{ .values.otel_max_body_bytes }}"
+          LANGFUSE_OTEL_MEDIA_UPLOAD_ENABLED: "{{ .values.media_upload_enabled }}"
+          # The backend identity arrives on the inject pipe under the names the
+          # platform itself reads, so these pass through untranslated.
+          DATABASE_HOST: "{{ $env.DATABASE_HOST }}"
+          DATABASE_PORT: "{{ $env.DATABASE_PORT }}"
+          DATABASE_USERNAME: "{{ $env.DATABASE_USERNAME }}"
+          DATABASE_NAME: "{{ $env.DATABASE_NAME }}"
+          # The cache identity likewise passes through under the platform's own
+          # names. The key prefix comes from the cache edge's own values block,
+          # read by socket name rather than by the alias the topology chose, so
+          # the Recipe does not depend on that alias.
+          REDIS_HOST: "{{ $env.REDIS_HOST }}"
+          REDIS_PORT: "{{ $env.REDIS_PORT }}"
+    {{- range $alias, $edge := .context.uses }}
+    {{- if eq $edge.socket "cache" }}
+          REDIS_KEY_PREFIX: "{{ $edge.values.key_prefix }}"
+    {{- end }}
+    {{- end }}
+          # Over TLS the cache client verifies the cache's certificate and the
+          # name dialed, Node's default: against the authority in the
+          # connection's server_ca where one is attached, and otherwise against
+          # the runtime's own trust store, which a publicly trusted certificate
+          # chains to.
+    {{- if $cacheTLS }}
+          REDIS_TLS_ENABLED: "true"
+    {{- if $cacheCA }}
+          REDIS_TLS_CA_PATH: /etc/langfuse/cache-server-ca/ca.crt
+    {{- end }}
+    {{- end }}
+          # The object store is addressed by a single endpoint the platform's S3
+          # client speaks to, the one the store publishes, resolved above. The
+          # bucket, region, prefixes and access-key identifier come from that
+          # edge's own values, so one store serves two platforms by wiring two
+          # buckets; a store publishing a bucket of its own was checked above
+          # to publish this one. Event bodies and media share the connection and
+          # differ only in their key prefix.
+          LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: "{{ $storeEndpoint }}"
+          LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: "{{ $storeEndpoint }}"
+    {{- range $alias, $edge := .context.uses }}
+    {{- if eq $edge.socket "event_store" }}
+          LANGFUSE_S3_EVENT_UPLOAD_BUCKET: "{{ $edge.values.bucket }}"
+          LANGFUSE_S3_EVENT_UPLOAD_REGION: "{{ $edge.values.region }}"
+          LANGFUSE_S3_EVENT_UPLOAD_PREFIX: "{{ $edge.values.event_prefix }}"
+          LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: "{{ $edge.values.access_key_id }}"
+          LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "{{ $edge.values.force_path_style }}"
+          LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: "{{ $edge.values.bucket }}"
+          LANGFUSE_S3_MEDIA_UPLOAD_REGION: "{{ $edge.values.region }}"
+          LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: "{{ $edge.values.media_prefix }}"
+          LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: "{{ $edge.values.access_key_id }}"
+          LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "{{ $edge.values.force_path_style }}"
+    {{- end }}
+    {{- end }}
+          # The analytics store's two addresses are operator-supplied pointer
+          # strings, resolved by the runtime rather than by the compiler. The
+          # HTTP address serves the console's queries; the native-protocol
+          # address is the one the platform applies its schema migrations over.
+          CLICKHOUSE_URL: "{{ .infra.analytics_store_url }}"
+          CLICKHOUSE_MIGRATION_URL: "{{ .infra.analytics_store_migration_url }}"
+          CLICKHOUSE_USER: "{{ .infra.analytics_store_user }}"
+          CLICKHOUSE_DB: "{{ .infra.analytics_store_database }}"
+          CLICKHOUSE_CLUSTER_ENABLED: "{{ .infra.analytics_store_cluster }}"
+    {{- if not $backendCredential }}
+          DATABASE_PASSWORD: apppass
+    {{- end }}
+    {{- if or $backendCredential $cacheCredential $eventStoreCredential (hasKey (default dict .features) "analytics_store_password") (hasKey (default dict .features) "session_secret") (hasKey (default dict .features) "encryption_key") (hasKey (default dict .features) "salt") $cacheCA }}
+        attachments:
+    {{- end }}
+    {{- with $backendCredential }}
+          DATABASE_PASSWORD:
+            connection: "{{ . }}"
+            from: credential
+            as: env
+    {{- end }}
+    {{- with $cacheCredential }}
+          REDIS_AUTH:
+            connection: "{{ . }}"
+            from: credential
+            as: env
+    {{- end }}
+    {{- with $eventStoreCredential }}
+          LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY:
+            connection: "{{ . }}"
+            from: credential
+            as: env
+          LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY:
+            connection: "{{ . }}"
+            from: credential
+            as: env
+    {{- end }}
+    {{- if hasKey (default dict .features) "analytics_store_password" }}
+          CLICKHOUSE_PASSWORD:
+            from: analytics_store_password
+            as: env
+    {{- end }}
+    {{- /* Always taken in a build: the Component requires the session_secret slot. The guard lets a
+      single-entity validate, which attaches nothing, still render the rest of this Recipe. */ -}}
+    {{- if hasKey (default dict .features) "session_secret" }}
+          NEXTAUTH_SECRET:
+            from: session_secret
+            as: env
+    {{- end }}
+    {{- /* Always taken in a build: the Component requires the encryption_key slot. The guard lets a
+      single-entity validate, which attaches nothing, still render the rest of this Recipe. */ -}}
+    {{- if hasKey (default dict .features) "encryption_key" }}
+          ENCRYPTION_KEY:
+            from: encryption_key
+            as: env
+    {{- end }}
+    {{- if hasKey (default dict .features) "salt" }}
+          SALT:
+            from: salt
+            as: env
+    {{- end }}
+    {{- with $cacheCA }}
+          # The cache connection's server_ca Secret mounts whole, read-only, one
+          # file per data key, so the cache client reads ca.crt from this
+          # directory.
+          cache-server-ca:
+            connection: "{{ . }}"
+            from: server_ca
+            as: file
+            path: /etc/langfuse/cache-server-ca
+    {{- end }}
+        ports:
+          http: {{ .infra.port }}
+        # The console reports readiness at /api/public/ready, which stops
+        # answering once the process receives a shutdown signal, and health at
+        # /api/public/health, which checks only that the API runs. The timings
+        # are the ones the platform's own chart gives these probes.
+        health:
+          ready:
+            http: /api/public/ready
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          live:
+            http: /api/public/health
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+      worker:
+        image: "{{ .locals.worker_image }}"
+        # The worker reads the same backing systems as the console — it drains the
+        # queue the console fills and writes what it drains to the analytics store
+        # — so its configuration is the console's, with its own listen port. The
+        # duplication is forced by the container boundary: two containers have two
+        # environments, and a template variable bound in one is not visible in the
+        # other.
+        variables:
+          PORT: "{{ .infra.worker_port }}"
+          LANGFUSE_LOG_LEVEL: "{{ .infra.log_level }}"
+          DATABASE_HOST: "{{ $env.DATABASE_HOST }}"
+          DATABASE_PORT: "{{ $env.DATABASE_PORT }}"
+          DATABASE_USERNAME: "{{ $env.DATABASE_USERNAME }}"
+          DATABASE_NAME: "{{ $env.DATABASE_NAME }}"
+          REDIS_HOST: "{{ $env.REDIS_HOST }}"
+          REDIS_PORT: "{{ $env.REDIS_PORT }}"
+    {{- range $alias, $edge := .context.uses }}
+    {{- if eq $edge.socket "cache" }}
+          REDIS_KEY_PREFIX: "{{ $edge.values.key_prefix }}"
+    {{- end }}
+    {{- end }}
+    {{- if $cacheTLS }}
+          REDIS_TLS_ENABLED: "true"
+    {{- if $cacheCA }}
+          REDIS_TLS_CA_PATH: /etc/langfuse/cache-server-ca/ca.crt
+    {{- end }}
+    {{- end }}
+          LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: "{{ $storeEndpoint }}"
+          LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: "{{ $storeEndpoint }}"
+    {{- range $alias, $edge := .context.uses }}
+    {{- if eq $edge.socket "event_store" }}
+          LANGFUSE_S3_EVENT_UPLOAD_BUCKET: "{{ $edge.values.bucket }}"
+          LANGFUSE_S3_EVENT_UPLOAD_REGION: "{{ $edge.values.region }}"
+          LANGFUSE_S3_EVENT_UPLOAD_PREFIX: "{{ $edge.values.event_prefix }}"
+          LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: "{{ $edge.values.access_key_id }}"
+          LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "{{ $edge.values.force_path_style }}"
+          LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: "{{ $edge.values.bucket }}"
+          LANGFUSE_S3_MEDIA_UPLOAD_REGION: "{{ $edge.values.region }}"
+          LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: "{{ $edge.values.media_prefix }}"
+          LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: "{{ $edge.values.access_key_id }}"
+          LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "{{ $edge.values.force_path_style }}"
+    {{- end }}
+    {{- end }}
+          CLICKHOUSE_URL: "{{ .infra.analytics_store_url }}"
+          CLICKHOUSE_MIGRATION_URL: "{{ .infra.analytics_store_migration_url }}"
+          CLICKHOUSE_USER: "{{ .infra.analytics_store_user }}"
+          CLICKHOUSE_DB: "{{ .infra.analytics_store_database }}"
+          CLICKHOUSE_CLUSTER_ENABLED: "{{ .infra.analytics_store_cluster }}"
+    {{- if not $backendCredential }}
+          DATABASE_PASSWORD: apppass
+    {{- end }}
+    {{- if or $backendCredential $cacheCredential $eventStoreCredential (hasKey (default dict .features) "analytics_store_password") (hasKey (default dict .features) "encryption_key") (hasKey (default dict .features) "salt") $cacheCA }}
+        attachments:
+    {{- end }}
+    {{- with $backendCredential }}
+          DATABASE_PASSWORD:
+            connection: "{{ . }}"
+            from: credential
+            as: env
+    {{- end }}
+    {{- with $cacheCredential }}
+          REDIS_AUTH:
+            connection: "{{ . }}"
+            from: credential
+            as: env
+    {{- end }}
+    {{- with $eventStoreCredential }}
+          LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY:
+            connection: "{{ . }}"
+            from: credential
+            as: env
+          LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY:
+            connection: "{{ . }}"
+            from: credential
+            as: env
+    {{- end }}
+    {{- if hasKey (default dict .features) "analytics_store_password" }}
+          CLICKHOUSE_PASSWORD:
+            from: analytics_store_password
+            as: env
+    {{- end }}
+    {{- /* Always taken in a build: the Component requires the encryption_key slot. The guard lets a
+      single-entity validate, which attaches nothing, still render the rest of this Recipe. */ -}}
+    {{- if hasKey (default dict .features) "encryption_key" }}
+          ENCRYPTION_KEY:
+            from: encryption_key
+            as: env
+    {{- end }}
+    {{- if hasKey (default dict .features) "salt" }}
+          SALT:
+            from: salt
+            as: env
+    {{- end }}
+    {{- with $cacheCA }}
+          cache-server-ca:
+            connection: "{{ . }}"
+            from: server_ca
+            as: file
+            path: /etc/langfuse/cache-server-ca
+    {{- end }}
+        ports:
+          health: {{ .infra.worker_port }}
+        # The worker reports its health at /api/health on its own port, failing
+        # while it cannot reach the database. It serves no requests, so it
+        # carries a liveness probe only: a readiness probe here would take the
+        # console out of the Service whenever the worker is unhealthy, since
+        # the two share one pod. The timing is the one the platform's own chart
+        # gives the worker.
+        health:
+          live:
+            http: /api/health
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+        resources:
+          requests:
+            cpu: "{{ .infra.worker_compute.cpu }}"
+            memory: "{{ .infra.worker_compute.memory }}"
+          limits:
+            cpu: "{{ .infra.worker_compute.cpu }}"
+            memory: "{{ .infra.worker_compute.memory }}"
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          http: {{ .infra.port }}

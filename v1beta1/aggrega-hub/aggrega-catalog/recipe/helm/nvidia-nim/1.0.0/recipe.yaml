@@ -1,0 +1,162 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: nvidia-nim
+  version: 1.0.0
+  license: Apache-2.0
+  # The model value is a deterministic pointer the container resolves at pod
+  # start; the compiler never fetches the profile. The server is told to listen
+  # on infra.port, the port its Services and probes use. With the ngc_api_key
+  # slot unattached the container starts without the key, byte-identically to a
+  # Recipe with no slot. provides.host carries no namespace, so a consumer in
+  # another namespace qualifies it on its own side. provides.metrics_endpoint
+  # names the server's metrics on the same Service while it runs one replica;
+  # above one it is empty and metrics_service names that Service for a scraper
+  # to discover every replica behind it.
+  description: >
+    NVIDIA Inference Microservice as a self-hosted, GPU-native inference server
+    on Kubernetes via the helm provider's Workload synthesis, running the NIM
+    container directly with no chart. Using it needs an NVIDIA account and an
+    NGC API key, under NVIDIA's licence terms: the serving image comes from
+    infra.image, a NIM image the reader must be entitled to pull, and the
+    catalog names none.
+
+    Renders a StatefulSet whose container resolves the model profile into a
+    per-replica model-cache volume at start and serves the OpenAI-compatible
+    API behind a ClusterIP Service. It always requests a GPU (nvidia.com/gpu),
+    and schedules the pod under infra.gpu.runtime_class when one is named. An
+    attached ngc_api_key reaches the container as an env secretKeyRef, so the
+    key never appears in the rendered manifest. provides.host is the bare
+    in-cluster Service name.
+
+    Reach for this realization where no NIM Operator runs and the build must
+    fetch nothing. Reach for `nvidia-nim-chart` where NVIDIA's nim-llm chart is
+    wanted and its repository is reachable from the build, and for
+    `nvidia-nim-service` where the NIM Operator runs or is declared beside the
+    model.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/ai-model/nvidia-nim:1.0.0
+  # This Recipe reads no infra.overrides keys.
+  #
+  # The metrics keys say where the server serves its Prometheus metrics:
+  # /v1/metrics on the serving port, as NVIDIA documents for its LLM images.
+  # The Service balances across replicas, so one address reaches a single
+  # replica per scrape. While infra.replicas is 1, metrics_endpoint is that
+  # address on the default Service, spelling the Service name out again
+  # because a provides entry cannot read another provides entry; above 1 it is
+  # empty, and metrics_service, metrics_service_port and metrics_path name the
+  # same Service, the name of its port, and the path, for a scraper that
+  # discovers each endpoint behind it. The port name is the one the services
+  # block below declares, which provides cannot read, so the two are edited
+  # together.
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ .infra.port }}"
+    endpoint: "http://{{ .context.rendered_name }}-default:{{ .infra.port }}/v1"
+    model: "{{ .values.model }}"
+    protocol: "http"
+    metrics_endpoint: "{{ if le (int .infra.replicas) 1 }}http://{{ .context.rendered_name }}-default:{{ .infra.port }}/v1/metrics{{ end }}"
+    metrics_service: "{{ if gt (int .infra.replicas) 1 }}{{ .context.rendered_name }}-default{{ end }}"
+    metrics_service_port: "{{ if gt (int .infra.replicas) 1 }}http{{ end }}"
+    metrics_path: "{{ if gt (int .infra.replicas) 1 }}/v1/metrics{{ end }}"
+  workload: |
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # form: stateful gives each replica a stable per-replica model-cache claim
+    # (persistentTemplate below); the NIM container resolves the model profile
+    # into it at start.
+    form: stateful
+    replicas: {{ .infra.replicas }}
+    {{- with (default dict .infra.gpu).runtime_class }}
+    runtimeClassName: "{{ . }}"
+    {{- end }}
+    {{- with .infra.image_pull_secret }}
+    imagePullSecrets:
+      - "{{ . }}"
+    {{- end }}
+    containers:
+      main:
+        # The serving image is operator-supplied and must be the NIM image for
+        # the model named in .values.model, which the runtime resolves at pod
+        # start. The compiler pipes both strings unresolved (AOT).
+        image: "{{ .infra.image }}"
+        # NIM_SERVER_PORT is the port the API server listens on, which is 8000
+        # unless the image is told otherwise. It carries .infra.port, the port
+        # the container port, both Services, the probes and provides.endpoint
+        # already use, so the server listens where everything else points; NIM
+        # serves its health endpoints on the same port unless told otherwise.
+        variables:
+          NIM_CACHE_PATH: /opt/nim/.cache
+          NIM_SERVER_PORT: "{{ .infra.port }}"
+    {{- if hasKey (default dict .features) "ngc_api_key" }}
+        # NGC API key, delivered as an env secretKeyRef so the value never lands
+        # in the manifest. Emitted only when the slot is attached.
+        attachments:
+          NGC_API_KEY:
+            from: ngc_api_key
+            as: env
+    {{- end }}
+        ports:
+          http: {{ .infra.port }}
+        # NIM documents /v1/health/ready, which answers once the model is
+        # loaded and inference is available, and /v1/health/live, which answers
+        # while the container runs and needs no model. Both are served on the
+        # API port NIM_SERVER_PORT sets above unless the image is given a health
+        # port of its own, and this Recipe gives it none. The container resolves
+        # its model profile itself at start, so the start-up probe carries the
+        # download and the load: every timing
+        # is the default NVIDIA's own operator gives these probes, readiness
+        # asked for up to 1230 s before the liveness probe takes over.
+        health:
+          startup:
+            http: /v1/health/ready
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 120
+          ready:
+            http: /v1/health/ready
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+          live:
+            http: /v1/health/live
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+            "nvidia.com/gpu": "{{ (default dict .infra.gpu).count | default 1 }}"
+        volumeMounts:
+          - name: model-cache
+            path: /opt/nim/.cache
+    volumes:
+      model-cache:
+        persistentTemplate:
+          size: "{{ .infra.model_cache.size }}"
+    {{- with .infra.model_cache.class }}
+          class: "{{ . }}"
+    {{- end }}
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          http: {{ .infra.port }}
+      headless:
+        type: Headless
+        ports:
+          http: {{ .infra.port }}

@@ -1,0 +1,96 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/observability/fluentd
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    A Fluentd log aggregator. Fluentd is the receiving end of a log pipeline:
+    it listens on the `forward` input protocol and accepts log records shipped
+    to it by upstream forwarders (a Fluent Bit or Fluentd forwarder), then
+    processes and routes them to its output. Because it is a sink rather than a
+    forwarder, Fluentd declares no downstream uses-socket; instead it exports
+    the host and port of its forward endpoint through `provides`, so any
+    forwarder that binds this component on its forward socket ships records to
+    it. The aggregator buffers records in memory by default and renders as a
+    stateful server; an optional data volume can back the buffer when durable
+    buffering is requested.
+
+    Realized for local development by a Compose Recipe, and on Kubernetes by
+    two realizations the Manifest chooses between, which run the same image,
+    configuration, port and buffer. `fluentd` synthesizes the aggregator as
+    native Kubernetes resources and fetches nothing, so it is the one to reach
+    for where the build must complete with no chart repository reachable.
+    `fluentd-chart` renders the Fluent project's own Helm chart configured as
+    that aggregator, so reach for it where a chart repository is reachable at
+    build time. The Fluentd server is Apache-2.0.
+  labels:
+    component.aggrega.ai/type: stateful-server
+    component.aggrega.ai/category: observability
+    component.aggrega.ai/upstream-licensing: osi-approved
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      output_match:
+        type: string
+        default: "**"
+        description: Tag-match pattern selecting which received log records are routed to the aggregator's output. Defaults to `**`, which routes every received record. This is the receiving-side counterpart to a forwarder's forward match.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 24224
+        description: TCP port the Fluentd forward input listens on for incoming log records. Most operators should omit this and let the Recipe assign the default (24224, the conventional Fluentd forward port).
+      engine_version:
+        type: string
+        default: "v1.19.3-debian-2.1"
+        description: Fluentd container image tag. Selects the image tag on container targets.
+      source_version:
+        type: string
+        description: Version of the Helm chart the chart-backed realization pulls. Read only by that realization; the workload-synthesis and Compose realizations pull no source artifact and ignore it. Changing it away from the Recipe's default does not guarantee value-mapping compatibility with the new chart.
+      compute:
+        cpu:
+          type: string
+          default: 500m
+        memory:
+          type: string
+          default: 512Mi
+      storage:
+        size:
+          type: string
+          description: Size of an optional persistent volume backing the Fluentd buffer. Omit for an ephemeral in-memory buffer (the default); set it to render a durable buffer volume.
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      # A forwarder binds this component on its forward socket and ships records
+      # to host:port on the forward protocol.
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name of the Service the aggregator receives log
+          records on. A forwarder shipping records upstream points its output
+          at this name together with `port`.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port the aggregator accepts incoming log records on. It follows
+          the port an operator set in the Release, so a forwarder reads it
+          rather than assuming a default.
+      protocol:
+        type: string
+        description: Wire protocol the published address speaks — `forward`, the shipping protocol a forwarder's output plugin must be configured for.

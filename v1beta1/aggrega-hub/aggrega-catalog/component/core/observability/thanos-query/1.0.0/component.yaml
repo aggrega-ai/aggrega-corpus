@@ -1,0 +1,124 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/observability/thanos-query
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    Thanos Query, the query front end of a Thanos metrics stack. Query answers
+    PromQL requests and fans them out over the StoreAPI to one or more Store
+    Gateways, deduplicating and merging the results. The Store Gateway it queries
+    is wired through its `store` uses-socket: the gateway's host and port arrive
+    on the injection context and compose the StoreAPI endpoint Query dials. Query
+    speaks the StoreAPI over gRPC, so a component wired there that publishes a
+    protocol other than grpc, or none, halts the build; Thanos Store publishes
+    grpc. Query serves its PromQL API and web UI on an HTTP port and exposes its
+    own StoreAPI on a gRPC port so queriers can be layered. Query holds no
+    persistent state of its own — it reads through the Store Gateway — so it
+    renders as a stateless server. Exports its HTTP host, port, and protocol to
+    consumers via the uses topology. Query serves its own metrics in the
+    Prometheus format at /metrics on its HTTP port and publishes that address
+    as `metrics_endpoint`.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: observability
+    component.aggrega.ai/upstream-licensing: osi-approved
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # Self-inject allowlist: the component may inject resolved uses-edge values
+  # into the env delivery mechanism.
+  inject: [env]
+
+  usesSchema:
+    # The Store Gateway Query fans PromQL requests out to. The selected
+    # component's provides host and port arrive on the injection context and
+    # compose the StoreAPI endpoint Query dials. The selector admits any server;
+    # one publishing a protocol other than grpc, or none, halts the build.
+    store:
+      selector: "component.aggrega.ai/type=server"
+      inject: [env]
+      required: true
+
+  schema:
+    # Query needs no developer values; the Store Gateway endpoint arrives on the
+    # `store` uses-edge.
+    values: {}
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      http_port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 10902
+        description: HTTP port serving the PromQL API and web UI; consumers connect here.
+      grpc_port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 10901
+        description: gRPC port exposing Query's own StoreAPI, reachable in-cluster only.
+      external_base_url:
+        type: string
+        description: >
+          Externally reachable base URL of the query front end, as assembled at
+          the ingress tier, including any path the ingress serves it under — for
+          example https://thanos.example.com or https://tools.example.com/thanos.
+          The web interface composes from this the link it writes beside every
+          rule expression and every alert it lists, back to its own query page.
+          Where the address carries a path, the links, asset paths and redirects
+          of the web interface's own pages carry that path too. On its own the
+          server would then also move its API and web interface under the path;
+          the Recipe keeps it serving at its root instead, so its health checks
+          and every consumer reaching it through its published host and port are
+          unaffected, and an ingress in front of it maps the address's path onto
+          that root. Omitted, those links point at localhost on the HTTP port,
+          which no browser outside the server's own pod can follow.
+      engine_version:
+        type: string
+        default: "v0.42.0"
+        description: Thanos container image tag.
+      compute:
+        cpu:
+          type: string
+          default: 250m
+        memory:
+          type: string
+          default: 512Mi
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name of the Service fronting the query front end. A
+          dashboard points its data-source address at this name rather than at
+          any single metrics server.
+      port:
+        type: integer
+        required: true
+        description: TCP port the query API and web UI are served on. It carries the HTTP port an operator set, never the internal gRPC port.
+      protocol:
+        type: string
+        description: How the published address is spoken to — `http`, so a consumer composes a data-source URL on that scheme.
+      # The address a Prometheus server scrapes Query's own metrics at. Every
+      # Thanos component serves them in the Prometheus format at /metrics on
+      # its HTTP port, always on, and the Recipe configures no credential for
+      # that port; for Query it is the published port. The Recipe publishes the
+      # address spelled out in full from its own host and port, because a
+      # provides entry cannot read another.
+      metrics_endpoint:
+        type: string
+        description: >
+          The full address Prometheus scrapes this component's metrics at —
+          scheme, host, port and path, `http://<host>:<port>/metrics` on the
+          HTTP port. Empty where the component serves none reachable.

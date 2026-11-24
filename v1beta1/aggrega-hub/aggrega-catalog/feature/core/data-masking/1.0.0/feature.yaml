@@ -1,0 +1,200 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Feature
+metadata:
+  name: core/data-masking
+  version: 1.0.0
+  description: >
+    Replaces sensitive text in the chat and completion traffic an AI gateway
+    routes with a placeholder before it travels past the gateway: in requests
+    before they reach the model provider, in replies before they reach the
+    caller, or both, as scope says. It attaches to a gateway declaring
+    dataplane.aggrega.ai/content-masking and masks what the attachment lists,
+    regular expressions under patterns and, under entities, entity types a
+    recognizer service detects, in the text of the conversation's messages;
+    which roles, turns and fields count as that text each realization states.
+
+    An attachment listing nothing to mask halts the build: no list is
+    assumed. action redact replaces a match for good; restore puts the
+    original back in the reply, where a realization can do so reliably;
+    refuse lets no text carrying a match travel on. An unreachable or erring
+    recognizer fails the request. By default, text a realization does
+    not mask is refused rather than forwarded, and what a masked reply carries
+    unread is withheld; allow_unmasked_text and allow_unmasked_reply_parts
+    relax that. It shares no component with core/semantic-caching nor a
+    gateway with values.log_masking. Its values refuse display_name,
+    description, severity and as.
+
+    Realized on core/gateway/litellm, kong-enterprise, agentgateway, higress
+    and traefik-hub, each refusing restore. Masking alone falls short: text no
+    pattern matches and no recognizer detects passes; the gateway and its
+    recognizers see the original; tool definitions, response formats, stop
+    sequences, reasoning a client sends back and the names of JSON keys pass
+    as sent; the gateway's log and a logging integration can hold unmasked
+    text; and traffic not crossing the gateway is untouched.
+  annotations:
+    security.aggrega.ai/class: "data_plane_guardrail"
+    security.aggrega.ai/guardrail: "data_masking"
+    routing.aggrega.ai/tier: "data"
+  maintainers:
+    - name: "Massimiliano Ferrero"
+      email: "m.ferrero@cognitio.it"
+spec:
+  # Selects on the capability's presence, not on its value: a gateway
+  # declaring dataplane.aggrega.ai/content-masking with whichever value can
+  # carry the attachment. Masking listed patterns works on every gateway able
+  # to mask at all; recognizing entity types and restoring originals ask for
+  # more, and a realization for a gateway that cannot do either refuses the
+  # value itself, naming the fidelity the gateway declares.
+  #
+  # Each realization's FeatureRecipe states which scopes it honours for
+  # entities, which roles, turns and fields it masks as message text, what
+  # its gateway leaves unmasked, which values it refuses by name, and what it
+  # keeps out of the gateway's own logs.
+  appliesTo: "dataplane.aggrega.ai/content-masking"
+  # A response cache keys a request after masking, so two requests differing
+  # only in what masking replaces become one entry and a caller is served the
+  # reply to another caller's request; and the cache keeps the provider's
+  # unmasked reply. So the two do not meet on one component.
+  #
+  # values.log_masking on core/gateway/litellm is the other choice for text the
+  # model must see: it leaves every request and reply as sent and masks only
+  # the copy the gateway writes to its logs. The two read alike, as one
+  # protection of the same text, and are not: this Feature changes what
+  # travels, that value only what is logged. And this Feature's realization on
+  # that gateway turns its logging of message contents off, so log masking
+  # would have nothing left to act on. So they do not meet on one gateway: the
+  # gateway's own assertion halts when its values.log_masking lists something
+  # while this Feature is attached to it, naming both.
+  interoperability:
+    conflictsWith: [core/semantic-caching]
+  # No list is assumed when none is given. A default set would decide on the
+  # reader's behalf what counts as sensitive in their traffic, and an
+  # attachment that masks nothing would read as protection it does not give.
+  assertions:
+    names_what_it_masks: >-
+      {{- if not (or (optional .values "patterns" list) (optional .values "entities" list)) -}}
+      {{- fail (printf "core/data-masking attachment %q on %q lists neither patterns nor entities, so it would mask nothing; list the regular expressions to mask under patterns, the entity types a recognizer detects under entities, or both" .metadata.feature_instance .metadata.instance_id) -}}
+      {{- end -}}
+  schema:
+    # patterns and entities are declared once, in the TextMaskingSchemas
+    # library, for this Feature and for values.log_masking on
+    # core/gateway/litellm, so a pattern or an entity type means the same thing
+    # on both. That fragment is the one library entry these values compose, so
+    # they carry no Feature base: display_name, description, severity and the
+    # injection key as, which a Feature base declares, are refused here. No
+    # realization of this Feature reads any of them.
+    values:
+      $ref: "TextMaskingSchemas#/schemas/MaskedTextParameter"
+      properties:
+        # With restore, a match is replaced by a numbered stand-in that the
+        # gateway maps back to the original in its reply, so the model provider
+        # receives the stand-in and the caller still gets the value back. A
+        # realization whose gateway cannot map every stand-in back to its own
+        # original refuses restore at build time rather than risk handing a
+        # caller one person's value where another's was written: the one for
+        # core/gateway/litellm refuses it, because that gateway numbers its
+        # stand-ins afresh in every text it masks, so two names in one request
+        # can share one.
+        #
+        # With refuse, nothing is replaced: text carrying a match is stopped
+        # where masking would have replaced it, so a request carrying one is
+        # not forwarded, and a reply carrying one is not delivered. A
+        # realization that could only refuse a reply after part of it had
+        # reached the caller, a streamed reply say, refuses that pairing by
+        # name rather than let the part through.
+        action:
+          type: string
+          enum: [redact, restore, refuse]
+          default: redact
+          description: "What becomes of text in which a listed pattern matches or a listed entity is detected. redact replaces each match for good. restore replaces it with a numbered stand-in the gateway maps back to the original in its reply to the caller; the mapping lives only for that request, only entity types a recognizer detected can be restored, and a restored reply reaches the caller unmasked. A realization whose gateway cannot map every stand-in back to its own original refuses restore at build time; the one for core/gateway/litellm does. refuse lets the text not travel on: a request carrying it is refused before it is forwarded and, where scope reaches replies, a reply carrying it is not delivered and the caller receives an error. A realization that cannot refuse on a scope refuses that pairing by name at build time."
+        # What masking acts on is the text of the conversation's messages, and
+        # each realization states which roles, turns and fields count as that
+        # text and what else it reaches: the arguments of tool calls, the
+        # results of earlier ones, the other text a request carries beside its
+        # messages, such as a system prompt, and the parts a model or its
+        # provider adds to a reply beside its text, such as a refusal,
+        # citations or a web search's results. Masking replies does not change
+        # what the provider already received.
+        #
+        # What a realization does not mask is governed by two infra values
+        # whose defaults are the protection, each of which says what it lets
+        # through. Request text its masking does not reach — a kind of request,
+        # a field, a part of the conversation or a kind of tool — is refused
+        # before it is forwarded unless
+        # allow_unmasked_text is set. And while replies are masked, what a reply
+        # carries that is neither masked nor withheld is kept from the caller
+        # unless allow_unmasked_reply_parts is set: what masking cannot read,
+        # such as spoken audio and its transcript, an image, and the
+        # probabilities of the tokens the model chose, and the message a model
+        # provider returns with a failed call, which can quote text from the
+        # request or from the reply; the request options asking for such
+        # output are refused with them. A realization whose gateway can do
+        # neither refuses the default by name at build time. The definitions
+        # of tools, a response format and stop sequences are the developer's
+        # own and pass as sent, and so does the reasoning of an earlier turn
+        # that a client sends back.
+        #
+        # Masking acts on what travels to the model provider and back to the
+        # caller. What the gateway records about a call is another matter: its
+        # own log, and a logging integration it hands records to, can still
+        # hold unmasked text, such as a provider's error message or the request
+        # as the caller sent it.
+        scope:
+          type: string
+          enum: [request, response, both]
+          default: request
+          description: "Where masking applies. request masks a request before it reaches the model provider; response masks the reply before it reaches the caller, after the provider has already received the request unmasked; both does the two. Entities are found over the whole reply, so while entities are masked in replies a request asking for a streamed reply is refused unless infra.allow_streamed_replies is set."
+        # A pattern's name is what the placeholder for one of its matches shows
+        # on most gateways, so a reader of the masked text can tell what kind of
+        # value stood there. A gateway that numbers its placeholders instead,
+        # and cannot show the name, can still carry an attachment that accepts
+        # that, so the choice is the developer's, beside the patterns.
+        placeholder_shows_name:
+          type: boolean
+          default: true
+          description: "Whether the placeholder replacing a pattern's match must show the pattern's name. On, the default, it does, so a reader of the masked text can tell what kind of value was there. Off, the attachment accepts a placeholder that does not, a numbered one say, and a realization whose gateway cannot show the name honours the attachment rather than refusing it. A realization whose placeholder always shows the name honours either."
+        # A realization never passes text on unmasked because a recognizer it
+        # depends on cannot be reached or answers with an error: it fails the
+        # request, or refuses at build time a combination its gateway cannot
+        # hold to that.
+      required: [action]
+    infra:
+      # Whether request text the realization does not mask may reach the model
+      # provider is decided where the Release lands, beside the clients that
+      # send it, so it is the operator's, and it stays off until a Release
+      # turns it on.
+      allow_unmasked_text:
+        type: boolean
+        default: false
+        description: "Whether request text the realization does not mask may reach the model provider while this attachment masks requests, with scope request or both: a field, a part of the conversation, a kind of request or a kind of tool its masking does not reach. Off, the default, a request carrying such text is refused before it is forwarded, or, where the gateway cannot refuse it, the attachment is refused at build time. On, that text reaches the model provider exactly as the caller sent it, unmasked, and the realization's FeatureRecipe lists exactly what. Content that is not text stays governed by allow_non_text_content. It has no effect on an attachment that masks replies only."
+      # Whether a masked reply may carry to the caller what masking leaves
+      # unread is decided where the Release lands, beside the clients that read
+      # it, and it stays off until a Release turns it on.
+      allow_unmasked_reply_parts:
+        type: boolean
+        default: false
+        description: "Whether what a masked reply carries that is neither masked nor withheld may reach the caller, wherever this attachment masks replies, with scope response or both: what masking cannot read, such as spoken audio, an image or the probabilities of the tokens the model chose, and the message a model provider returns with a failed call, which can quote text from the request or from the reply. Off, the default, they are kept from the caller and the request options asking for them are refused, or, where the gateway cannot keep them back, the attachment is refused at build time. On, they reach the caller as the provider sent them, unmasked, and the realization's FeatureRecipe lists exactly what. A reply's own text is never let through unmasked by it, but the parts it lets through can carry the reply's words: a spoken reply's transcript, the tokens behind the token probabilities, a provider's error message quoting the reply. It has no effect on an attachment that masks requests only."
+      # Whether callers may stream a reply whose entities are masked is decided
+      # where the Release lands, beside the traffic it serves, so it is operator
+      # sizing, and it stays off until a Release turns it on.
+      allow_streamed_replies:
+        type: boolean
+        default: false
+        description: "Whether a request may ask for a streamed reply while this attachment masks entities in replies, with entities listed and scope response or both. Off, such a request is refused before it is forwarded, and the caller asks for the reply in one piece. On, the gateway holds the whole streamed reply, masks it and sends it in one piece at the end, so the caller receives it all at once rather than as it is produced, and receives an error and none of the reply when masking it fails. It has no effect on patterns, or on an attachment that masks entities in requests only, and a realization still refuses a streamed request of a kind whose streamed reply its gateway cannot hold that way. A realization whose gateway cannot hold a streamed reply that way at all refuses the setting."
+      # Whether images, files and audio may reach the model provider beside
+      # masking is decided where the Release lands, beside the clients that send
+      # them, and it stays off until a Release turns it on.
+      allow_non_text_content:
+        type: boolean
+        default: false
+        description: "Whether a request may carry content that is not text while this attachment masks requests, with scope request or both: an image, a file, a document given as data or by address rather than as text, or audio. Masking reads text and cannot see into such content, and an address in it is not masked either. Off, a request carrying any of it is refused before it is forwarded, with an error naming what to remove. On, it reaches the model provider exactly as the caller sent it, unmasked, and the text around it is masked as usual. It has no effect on an attachment that masks replies only."
+      # Whether a reasoning model's reasoning text is masked is decided where the
+      # Release lands, beside the clients that read it, and it is on until a
+      # Release turns it off.
+      mask_reasoning:
+        type: boolean
+        default: true
+        description: "Whether a reply's reasoning text is masked as well as its message text, wherever this attachment masks replies. A reasoning model can return the reasoning behind its answer in fields of its own, and one reply can carry several copies of it. On, the default, the realization masks it with the listed patterns and entities as it masks the message text, in each field its FeatureRecipe names, and a realization whose gateway cannot reach reasoning text with some of the listed patterns or entities refuses the attachment at build time until this is turned off. Off, the reasoning text reaches the caller exactly as the provider sent it, unmasked. Some providers sign the reasoning they return, and refuse a signed block that comes back changed on a later turn of a conversation, so a client that must send such blocks back needs this off. It has no effect on an attachment that masks requests only."

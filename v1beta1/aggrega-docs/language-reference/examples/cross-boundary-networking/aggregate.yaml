@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Aggregate
+metadata:
+  name: cross-boundary-app
+  version: "1.0.0"
+  description: >
+    A two-component stack — an Adminer database UI and a PostgreSQL database —
+    that a Release splits across two boundaries. Adminer declares a `databases`
+    use of the database and injects the database host into
+    ADMINER_DEFAULT_SERVER. This single developer intent deploys two ways: the
+    compose Release adds core/compose-bridge to cross the network seam, and the
+    helm Release crosses the namespace seam with native cross-namespace DNS — no
+    bridge. The Aggregate is identical for both; only the Ops/Operator layer
+    (provider, catalog, Release) differs.
+spec:
+  components:
+    adminer:
+      type: core/devtool/adminer
+      uses:
+        databases:
+          primary:
+            target: db
+            inject:
+              env:
+                - in: ADMINER_DEFAULT_SERVER
+                  from: host
+    db:
+      type: core/datastore/postgres

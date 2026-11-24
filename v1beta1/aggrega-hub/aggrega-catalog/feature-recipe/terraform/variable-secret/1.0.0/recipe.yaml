@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: FeatureRecipe
+metadata:
+  name: variable-secret
+  version: 1.0.0
+  description: >
+    Terraform realization of core/secret-value, for the author-supplied
+    credential model. The material originates in the Aggregate or the Release —
+    the developer authors it in the attachment's values, an operator fulfils the
+    parameter that origin reads, or an operator writes it in the attachment's
+    infra — and this recipe delivers that value into the consuming node's
+    inject pipe under the chosen key. Nothing is
+    emitted from here; the delivery is the whole contribution, so the value
+    lands only where a Terraform Recipe reads that key and renders it into its
+    own configuration — as the value of an input variable, or directly as a
+    resource argument. A Recipe that does not read the key receives nothing. The
+    managed-database Recipes the standard library ships take no such value and
+    halt the build naming the slot: the RDS ones set the provider's
+    managed-password directive and take core/generated-secret on that slot
+    instead, and the Cloud SQL and flexible-server ones take
+    core/random-password.
+
+    This is the peer of terraform/generated-secret, not its replacement, and the
+    two serve opposite models. generated-secret is pure wiring for the model
+    where the target engine provisions and rotates the credential itself: it
+    binds the slot the component declares and carries no injectMapping, because
+    there is no authored value to hand over. Here the material is authored, so
+    there is a value to deliver and injectMapping is how it
+    travels. Satisfying a credential slot and injecting a value are different
+    acts — which is exactly why a pure-wiring recipe can bind a required slot
+    while rendering nothing at all.
+  maintainers:
+    - name: "Massimiliano Ferrero"
+      email: "m.ferrero@cognitio.it"
+spec:
+  capability: terraform
+  implements: core/secret-value:1.0.0
+
+  # Evaluated before the consuming node renders: deliver the value into that
+  # node's inject pipe under the key the attachment names. A Terraform Recipe
+  # reads it as .context.inject.env.<key> and places it where its own
+  # configuration needs it. The key is a delivery name, not the material; the
+  # value is routed as an opaque string and is never interpreted here.
+  #
+  # origin is read from whichever pillar carries it — values where the developer
+  # wrote it, infra where the operator did; the Feature halts the build when both
+  # or neither do. DELIBERATE NEAR-DUPLICATE: each realization of a credential
+  # Feature that reads the locator repeats this one expression, because it sits
+  # inside a template the realization owns, and no catalog kind holds a single
+  # template expression for several entities to share. values is read only
+  # through optional, and that is load-bearing: a template that also read
+  # .values.origin as a path would find the key present and empty, and never
+  # fall through to infra.
+  #
+  # The value is written through toJson, as a JSON string, which the mapping's
+  # YAML reads back exactly: a quote or a backslash in the value is delivered as
+  # authored rather than breaking the mapping.
+  injectMapping: |
+    env:
+      {{ .values.key }}: {{ optional .values "origin" (optional .infra "origin" "") | toJson }}

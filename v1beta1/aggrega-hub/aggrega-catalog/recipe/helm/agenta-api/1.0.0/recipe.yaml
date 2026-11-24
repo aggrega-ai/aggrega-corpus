@@ -1,0 +1,399 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: agenta-api
+  version: 1.0.0
+  license: MIT
+  # The identifier names the terms of the software this Recipe realizes: the
+  # image below is the platform's open core, published under the MIT Expat terms
+  # its repository states for everything outside one named subtree. That subtree
+  # is published under separate terms and is built into a different image, which
+  # this Recipe does not pin and offers no knob to select. No single identifier
+  # states both situations, so the coarse class covering the product as a whole
+  # is carried on the component's component.aggrega.ai/upstream-licensing label
+  # rather than asserted here.
+  description: >
+    The agent workspace's control-plane API on Kubernetes via the helm
+    provider's Workload synthesis: a stateless Deployment plus a ClusterIP
+    Service on the HTTP port other workloads of the platform call. The service
+    keeps no durable state of its own — the relational backend, the cache, the
+    queue and the object store are the systems of record — so it renders
+    stateless, with no persistent volume and no headless Service.
+
+    Each backing system's identity arrives on .context.inject.env and is
+    composed here into the single connection string its client reads. The two
+    relational connections are rendered password-free: the password is delivered
+    beside them as an env secret reference and named inside each URL in the
+    platform's own runtime-substitution form, so the plaintext never appears in
+    the rendered manifest even though the client receives one URL. With no
+    credential attached the Recipe uses inline development defaults, and with
+    one attached the value is supplied through the credential subsystem. A
+    cache or queue publishing valkey-tls or redis-tls is reached over TLS, trusting that
+    connection's server_ca or the image's store. The
+    object store's secret key is the exception: it has no default, so a store
+    connection carrying no credential halts the build, naming it, unless its
+    values set unauthenticated: true, and then no secret key is sent.
+
+    provides.host is the bare, self-contained in-cluster service name of the
+    synthesized Service — it carries no namespace, so the recipe is independent
+    of where it is deployed. A consumer in another namespace qualifies the host
+    with the target namespace on its own side (caller-side routing), and
+    assembles its own URL rather than reusing provides.endpoint.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/ai-agent/agenta-api:1.0.0
+  # This Recipe reads no infra.overrides keys.
+  #
+  # Target-expected names: the service reads each backing system as one
+  # connection string rather than as a host and a port —
+  # POSTGRES_URI_CORE and POSTGRES_URI_TRACING for the two relational
+  # databases, REDIS_URI and REDIS_URI_VOLATILE for the cache, REDIS_URI_DURABLE
+  # for the queue, AGENTA_STORE_ENDPOINT_URL for the object store,
+  # SUPERTOKENS_URI_CORE for the authentication core, and
+  # AGENTA_RUNNER_INTERNAL_URL for the runner. Composing the host, port and user
+  # that arrive on the edges into those strings is this Recipe's job. REDIS_URI
+  # and REDIS_URI_VOLATILE are both emitted with the same value because the
+  # service reads whichever it finds and its own published manifests set both;
+  # this is the documented pair rather than a second variable for insurance.
+  #
+  # Every Redis client the service builds — its cache, its locks and limits,
+  # its task brokers — is built from one of those URLs, so TLS is a matter of
+  # the URL: the rediss scheme turns it on, and an ssl_ca_certs query argument
+  # names the authority to check the store's certificate against. The client
+  # then requires a certificate and checks the name dialed by default. Read
+  # from the service's source and the Redis client it locks, at the release
+  # the Component pins.
+  #
+  # The names the edges deliver on are read here as BACKEND_HOST, BACKEND_PORT,
+  # BACKEND_USER, CACHE_HOST, CACHE_PORT, QUEUE_HOST, QUEUE_PORT,
+  # AUTH_CORE_ENDPOINT and RUNNER_ENDPOINT. Those are the `in:` keys each
+  # uses-edge must be set to, and the component's socket comments state the
+  # same contract on the authoring side. The object store's address is read
+  # from its edge instead: AGENTA_STORE_ENDPOINT_URL is the endpoint the store
+  # publishes, scheme included, and a store publishing none halts the build.
+  # AGENTA_STORE_BUCKET is the edge's own bucket value; a store that publishes
+  # a bucket of its own must publish that one, or the build halts naming both.
+  #
+  # POSTGRES_PASSWORD is named inside both relational URLs in the
+  # $(POSTGRES_PASSWORD) form, which the platform's own container runtime
+  # expands from the variable of that name delivered beside it. That is what
+  # lets one URL carry the credential while the credential itself stays a secret
+  # reference — a password written into the URL literal could not be.
+  #
+  # provides is evaluated before the workload and cannot read it, so the port has
+  # one authored home in .infra.port that every reader dereferences — provides.port
+  # and provides.endpoint here, and below the service's own bind address, the
+  # container port and the Service; the literal is never repeated.
+  #
+  # host and endpoint spell the Service name out twice on purpose. A provides
+  # entry cannot read another provides entry, and the name has to match the
+  # Service the helm provider derives from the service key below, so there is no
+  # home either could dereference instead — the repetition is forced, not a
+  # choice, and the two must be edited together.
+  #
+  # The external base URL has no sensible default: it is the address a browser
+  # reaches this platform on, which depends on the cluster's own ingress and
+  # which an ahead-of-time compiler cannot discover. A build that has not
+  # supplied it halts here rather than rendering a service that hands out empty
+  # links.
+  assertions:
+    external_base_url_supplied: >-
+      {{- if not (and (hasKey .infra "external_base_url") (index .infra "external_base_url")) -}}
+      {{- fail "infra.external_base_url must name the externally reachable base URL of the platform, as a browser reaches it through the ingress tier (for example https://agenta.example.com); set it in the Release" -}}
+      {{- end -}}
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ .infra.port }}"
+    endpoint: "http://{{ .context.rendered_name }}-default:{{ .infra.port }}"
+    protocol: "http"
+  workload: |
+    {{- /*
+      The alias of each connection carrying a credential this component
+      presents, or empty: the backend's password, the runner's token, the
+      object store's access-key identifier, the object store's secret key, the
+      authentication core's API key.
+    */ -}}
+    {{- $backendCredential := "" -}}
+    {{- $runnerCredential := "" -}}
+    {{- $storeCredentialId := "" -}}
+    {{- $storeCredential := "" -}}
+    {{- $authCoreCredential := "" -}}
+    {{- range $alias, $edge := .context.uses -}}
+    {{- if and (eq $edge.socket "backend") (hasKey (default dict $edge.features) "credential") -}}{{- $backendCredential = $alias -}}{{- end -}}
+    {{- if and (eq $edge.socket "runner") (hasKey (default dict $edge.features) "credential") -}}{{- $runnerCredential = $alias -}}{{- end -}}
+    {{- if and (eq $edge.socket "store") (hasKey (default dict $edge.features) "credential_id") -}}{{- $storeCredentialId = $alias -}}{{- end -}}
+    {{- if and (eq $edge.socket "store") (hasKey (default dict $edge.features) "credential") -}}{{- $storeCredential = $alias -}}{{- end -}}
+    {{- if and (eq $edge.socket "auth_core") (hasKey (default dict $edge.features) "credential") -}}{{- $authCoreCredential = $alias -}}{{- end -}}
+    {{- end -}}
+    {{- /*
+      The object store's secret key has no default to fall back on: a store
+      connection carrying no credential halts the build, naming the connection
+      and the slot to fill, unless the connection says its store takes none.
+    */ -}}
+    {{- range $alias, $edge := .context.uses -}}
+    {{- if and (eq $edge.socket "store") (not (hasKey (default dict $edge.features) "credential")) (not (optional (default dict $edge.values) "unauthenticated" false)) -}}
+    {{- fail (printf "the store connection %s of %q reaches %q with nothing in its credential slot, and the secret key the service presents to the object store has no default; attach the store's secret key under credential on that connection, or set unauthenticated: true in its values if the store takes no credential" $alias $.context.instance_id $edge.target) -}}
+    {{- end -}}
+    {{- end -}}
+    {{- /*
+      The connection variables this Recipe reads off the inject pipe, under the
+      socket whose edge delivers them, each beside the provides key the edge's
+      inject block names it from. The pipe is read as a map, and every read of
+      these variables below goes through it, so a variable nothing delivered is
+      told apart from one delivered empty: an edge on one of these sockets
+      leaving any of its variables missing halts the build, naming the edge, the
+      variables and the inject block to write, rather than rendering a
+      connection setting with an empty value. A socket in $required is read
+      whether or not anything is wired to it, so leaving it empty halts too.
+    */ -}}
+    {{- $env := optional (default dict .context.inject) "env" dict -}}
+    {{- $reads := dict "backend" (dict "BACKEND_HOST" "host" "BACKEND_PORT" "port" "BACKEND_USER" "user") "cache" (dict "CACHE_HOST" "host" "CACHE_PORT" "port") "queue" (dict "QUEUE_HOST" "host" "QUEUE_PORT" "port") "auth_core" (dict "AUTH_CORE_ENDPOINT" "endpoint") "runner" (dict "RUNNER_ENDPOINT" "endpoint") -}}
+    {{- $required := list "auth_core" "runner" -}}
+    {{- $gaps := list }}{{ $wired := list -}}
+    {{- range $alias, $edge := .context.uses }}{{ with get $reads $edge.socket -}}
+    {{- $wired = append $wired $edge.socket }}{{ $missing := list }}{{ $shape := list -}}
+    {{- range $var, $from := . }}{{ if not (hasKey $env $var) }}{{ $missing = append $missing $var }}{{ end }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- if $missing }}{{ $gaps = append $gaps (printf "the edge %q on its %s socket delivers no %s, so give that edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $alias $edge.socket (join " or " $missing) (join ", " $shape)) }}{{ end -}}
+    {{- end }}{{ end -}}
+    {{- range $socket := $required }}{{ if not (has $socket $wired) -}}
+    {{- $vars := list }}{{ $shape := list }}{{ range $var, $from := get $reads $socket }}{{ $vars = append $vars $var }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- $gaps = append $gaps (printf "nothing is wired to its %s socket to deliver %s, so wire one and give its edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $socket (join " and " $vars) (join ", " $shape)) -}}
+    {{- end }}{{ end -}}
+    {{- if $gaps }}{{ fail (printf "core/ai-agent/agenta-api %q composes its connection settings from variables its edges deliver on its inject pipe, but %s" .context.instance_id (join "; and " $gaps)) }}{{ end -}}
+    {{- /*
+      The cache and queue connections over TLS, each on its own. A store
+      publishing valkey-tls or redis-tls accepts TLS connections alone, so its URL takes the
+      rediss scheme, which the service's Redis client reads as TLS; any other
+      value ending in -tls names a store served over TLS the service is not
+      taught to reach, and halts rather than connecting in plaintext. A
+      server_ca on a connection is the authority the client checks that
+      store's certificate against: it is mounted, and the URL names its ca.crt
+      in the client's ssl_ca_certs setting, so its attachment must name a
+      Secret, and it is refused on a store served without TLS, where no
+      handshake takes place to check a certificate in. DELIBERATE
+      NEAR-DUPLICATE: the services, cron and two worker Recipes repeat this
+      block inside templates of their own, and no catalog kind holds a
+      template fragment for several Recipes to share; change all five
+      together.
+    */ -}}
+    {{- $redisTLS := dict }}{{ $redisCA := dict -}}
+    {{- range $alias, $edge := .context.uses }}{{ if has $edge.socket (list "cache" "queue") -}}
+    {{- $proto := toString (optional (default dict $edge.provides) "protocol" "") -}}
+    {{- $edgeTLS := has $proto (list "valkey-tls" "redis-tls") -}}
+    {{- if $edgeTLS }}{{ $_ := set $redisTLS $edge.socket true }}{{ else if hasSuffix "-tls" $proto -}}
+    {{- fail (printf "the %s connection %s of %q reaches %q, which publishes protocol %s, a store served over TLS that the agent workspace's API does not reach: it speaks the Redis protocol, over TLS to a store publishing valkey-tls or redis-tls; wire a Redis-protocol store to the %s socket" $edge.socket $alias $.context.instance_id $edge.target $proto $edge.socket) -}}
+    {{- end -}}
+    {{- if hasKey (default dict $edge.features) "server_ca" -}}
+    {{- $caProvides := optional (optional (default dict $edge.features) "server_ca" dict) "provides" dict -}}
+    {{- if not (and (kindIs "map" $caProvides) (optional $caProvides "name" "")) -}}
+    {{- fail (printf "the server_ca on the %s connection %s of %q publishes no Secret name, so no Secret could be mounted into the service's container: attach a server_ca publishing one, such as core/referenced-secret" $edge.socket $alias $.context.instance_id) -}}
+    {{- end -}}
+    {{- if not $edgeTLS -}}
+    {{- fail (printf "the %s connection %s of %q holds a server_ca, but the store it reaches, %q, publishes protocol %s, served without TLS, so no TLS handshake takes place to check a certificate in: turn client_tls on for that store, or remove the server_ca" $edge.socket $alias $.context.instance_id $edge.target (default "none" $proto)) -}}
+    {{- end -}}
+    {{- $_ := set $redisCA $edge.socket $alias -}}
+    {{- end -}}
+    {{- end }}{{ end -}}
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # The service holds no durable state, so the default stateless form (a
+    # Deployment on the helm provider) is correct: no form: stateful, no
+    # persistentTemplate volume, no PVC.
+    form: stateless
+    replicas: 1
+    containers:
+      main:
+        image: "ghcr.io/agenta-ai/agenta-api:{{ .infra.engine_version }}"
+        # The image ships several entry points and runs whichever the command
+        # names. This one serves the HTTP API; the worker tiers, the scheduler
+        # and the schema-migration task run the same image under their own
+        # commands, which is why all six pin the same engine_version.
+        command:
+          - gunicorn
+          - entrypoints.routers:app
+          - --bind
+          - "0.0.0.0:{{ .infra.port }}"
+          - --worker-class
+          - uvicorn.workers.UvicornWorker
+          - --workers
+          - "{{ .infra.web_workers }}"
+          - --log-level
+          - info
+          - --access-logfile
+          - "-"
+          - --error-logfile
+          - "-"
+        variables:
+          # Which build of the platform this is. The pinned image is
+          # the open core, so the value states that rather than being a knob.
+          AGENTA_LICENSE: oss
+          AGENTA_LOG_LEVEL: "{{ .infra.log_level }}"
+          # The addresses handed out in links and mail. All three are derived
+          # from one authored value so they cannot disagree, and the two path
+          # suffixes match the routes the ingress tier assembles.
+          AGENTA_WEB_URL: "{{ .infra.external_base_url }}"
+          AGENTA_API_URL: "{{ .infra.external_base_url }}/api"
+          AGENTA_SERVICES_URL: "{{ .infra.external_base_url }}/services"
+          # The path prefix this service is mounted under at the ingress tier.
+          # It matches the AGENTA_API_URL suffix above.
+          SCRIPT_NAME: /api
+          AGENTA_ACCESS_EMAIL_DISABLED: "{{ if .values.email_sign_in_enabled }}false{{ else }}true{{ end }}"
+          SUPERTOKENS_PASSWORD_MIN_LENGTH: "{{ .values.password_min_length }}"
+    {{- with .values.allowed_email_domains }}
+          AGENTA_ACCESS_ALLOWED_DOMAINS: "{{ . }}"
+    {{- end }}
+    {{- range $alias, $edge := .context.uses }}
+    {{- if eq $edge.socket "backend" }}
+          # One relational server, two databases named on the edge. The
+          # credential is named rather than embedded: see the header comment.
+          POSTGRES_URI_CORE: "postgresql+asyncpg://{{ $env.BACKEND_USER }}:$(POSTGRES_PASSWORD)@{{ $env.BACKEND_HOST }}:{{ $env.BACKEND_PORT }}/{{ $edge.values.core_database }}"
+          POSTGRES_URI_TRACING: "postgresql+asyncpg://{{ $env.BACKEND_USER }}:$(POSTGRES_PASSWORD)@{{ $env.BACKEND_HOST }}:{{ $env.BACKEND_PORT }}/{{ $edge.values.tracing_database }}"
+    {{- end }}
+    {{- if eq $edge.socket "cache" }}
+          # Both names carry the same address. The service reads whichever it
+          # finds; its own published manifests set both. Over TLS the client
+          # checks the store's certificate and the name dialed, against the
+          # authority the URL names where the connection holds a server_ca and
+          # otherwise against the image's default trust store.
+          REDIS_URI: "{{ if hasKey $redisTLS "cache" }}rediss{{ else }}redis{{ end }}://{{ $env.CACHE_HOST }}:{{ $env.CACHE_PORT }}/{{ $edge.values.db_index }}{{ if hasKey $redisCA "cache" }}?ssl_ca_certs=/etc/agenta/cache-server-ca/ca.crt{{ end }}"
+          REDIS_URI_VOLATILE: "{{ if hasKey $redisTLS "cache" }}rediss{{ else }}redis{{ end }}://{{ $env.CACHE_HOST }}:{{ $env.CACHE_PORT }}/{{ $edge.values.db_index }}{{ if hasKey $redisCA "cache" }}?ssl_ca_certs=/etc/agenta/cache-server-ca/ca.crt{{ end }}"
+    {{- end }}
+    {{- if eq $edge.socket "queue" }}
+          REDIS_URI_DURABLE: "{{ if hasKey $redisTLS "queue" }}rediss{{ else }}redis{{ end }}://{{ $env.QUEUE_HOST }}:{{ $env.QUEUE_PORT }}/{{ $edge.values.db_index }}{{ if hasKey $redisCA "queue" }}?ssl_ca_certs=/etc/agenta/queue-server-ca/ca.crt{{ end }}"
+    {{- end }}
+    {{- if eq $edge.socket "store" }}
+    {{- $storeEndpoint := toString (optional (default dict $edge.provides) "endpoint" "") }}
+    {{- if not $storeEndpoint }}
+    {{- fail (printf "the store connection %s of %q is wired to %q, which publishes no endpoint, but the service's S3 client is pointed at the full address of the object store it keeps agent files in, scheme included; wire a store publishing endpoint, such as core/storage/s3-object-store, to the store socket instead" $alias $.context.instance_id $edge.target) }}
+    {{- end }}
+    {{- $storeBucket := toString (optional (default dict $edge.provides) "bucket" "") }}
+    {{- if and $storeBucket (ne $storeBucket (toString $edge.values.bucket)) }}
+    {{- fail (printf "the store connection %s of %q names the bucket %q, but %q, the store it is wired to, publishes the bucket %q, so the service would keep agent files in a bucket other than the one the store publishes; set bucket in that connection's values to %q" $alias $.context.instance_id (toString $edge.values.bucket) $edge.target $storeBucket $storeBucket) }}
+    {{- end }}
+          AGENTA_STORE_ENDPOINT_URL: "{{ $storeEndpoint }}"
+          AGENTA_STORE_BUCKET: "{{ $edge.values.bucket }}"
+          AGENTA_STORE_REGION: "{{ $edge.values.region }}"
+    {{- end }}
+    {{- end }}
+          # The authentication core's own base URL, resolved from the auth_core
+          # edge. The service names that core's URI rather than a protocol
+          # endpoint, which is why the edge carries an endpoint.
+          SUPERTOKENS_URI_CORE: "{{ $env.AUTH_CORE_ENDPOINT }}"
+          # The runner's in-cluster base URL, taken straight from its edge.
+          AGENTA_RUNNER_INTERNAL_URL: "{{ $env.RUNNER_ENDPOINT }}"
+    {{- if not $backendCredential }}
+          POSTGRES_PASSWORD: apppass
+    {{- end }}
+    {{- if not (hasKey (default dict .features) "services_internal_key") }}
+          AGENTA_SERVICES_INTERNAL_KEY: dev-agenta-internal-change-me
+    {{- end }}
+    {{- if not $runnerCredential }}
+          AGENTA_RUNNER_TOKEN: dev-agenta-runner-change-me
+    {{- end }}
+    {{- if not $storeCredentialId }}
+          AGENTA_STORE_ACCESS_KEY: admin
+    {{- end }}
+    {{- $attached := or $backendCredential $runnerCredential $storeCredentialId $storeCredential $authCoreCredential $redisCA }}
+    {{- range $slot := list "auth_key" "crypt_key" "services_internal_key" }}
+    {{- if hasKey (default dict $.features) $slot }}{{ $attached = true }}{{ end }}
+    {{- end }}
+    {{- if $attached }}
+        attachments:
+    {{- end }}
+    {{- with $backendCredential }}
+          POSTGRES_PASSWORD:
+            connection: "{{ . }}"
+            from: credential
+            as: env
+    {{- end }}
+    {{- if hasKey (default dict .features) "auth_key" }}
+          AGENTA_AUTH_KEY:
+            from: auth_key
+            as: env
+    {{- end }}
+    {{- if hasKey (default dict .features) "crypt_key" }}
+          AGENTA_CRYPT_KEY:
+            from: crypt_key
+            as: env
+    {{- end }}
+    {{- if hasKey (default dict .features) "services_internal_key" }}
+          AGENTA_SERVICES_INTERNAL_KEY:
+            from: services_internal_key
+            as: env
+    {{- end }}
+    {{- with $runnerCredential }}
+          AGENTA_RUNNER_TOKEN:
+            connection: "{{ . }}"
+            from: credential
+            as: env
+    {{- end }}
+    {{- with $storeCredentialId }}
+          AGENTA_STORE_ACCESS_KEY:
+            connection: "{{ . }}"
+            from: credential_id
+            as: env
+    {{- end }}
+    {{- with $storeCredential }}
+          AGENTA_STORE_SECRET_KEY:
+            connection: "{{ . }}"
+            from: credential
+            as: env
+    {{- end }}
+    {{- with $authCoreCredential }}
+          SUPERTOKENS_API_KEY:
+            connection: "{{ . }}"
+            from: credential
+            as: env
+    {{- end }}
+          # Each store connection's server_ca Secret mounts whole, read-only, one
+          # file per data key, so the client reads ca.crt from its directory.
+    {{- range $socket := list "cache" "queue" }}{{ with get $redisCA $socket }}
+          {{ $socket }}-server-ca:
+            connection: "{{ . }}"
+            from: server_ca
+            as: file
+            path: /etc/agenta/{{ $socket }}-server-ca
+    {{- end }}{{ end }}
+        ports:
+          http: {{ .infra.port }}
+        # The API answers GET /health, the health check its own API reference
+        # documents, and the platform's own Helm chart probes it for start-up,
+        # readiness and liveness on this port with the timing below. The start-up
+        # probe allows up to 155 s before liveness takes over.
+        health:
+          startup:
+            http: /health
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 30
+          ready:
+            http: /health
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          live:
+            http: /health
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+        # The resource quantities are quoted so the rendered value stays a
+        # string whatever the Release supplies.
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          http: {{ .infra.port }}

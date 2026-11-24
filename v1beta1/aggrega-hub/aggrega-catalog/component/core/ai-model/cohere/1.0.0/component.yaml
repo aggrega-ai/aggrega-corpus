@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/ai-model/cohere
+  version: 1.0.0
+  description: >
+    Cohere's managed Command API, reached as an external reference: no compute
+    runs in-cluster and the compiler never calls the provider. Its host is
+    fixed, so the realization publishes the endpoint itself and a Release
+    supplies none; beyond the model name the component exposes the connectors
+    a request may consult, which is how this provider lets a generation draw
+    on an external source while it is being produced. Consumers read the
+    endpoint and the model name over a `uses` edge, the contract every model
+    here publishes. The API key is the consumer's to attach: the
+    environment-variable name it arrives under belongs to the application
+    rather than to the model.
+  labels:
+    component.aggrega.ai/type: resource
+    component.aggrega.ai/category: ai-model
+    model.aggrega.ai/capability: generative
+    # Model API: Cohere's own API answers at the host published here. It is not
+    # the OpenAI API, so a consumer reaches it through Cohere's client or
+    # request shape.
+    model.aggrega.ai/api: native
+    component.aggrega.ai/hosting: managed
+    component.aggrega.ai/upstream-licensing: proprietary
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  schema:
+    values:
+      $ref: "BaseComponents#/schemas/BaseModelParameter"
+      properties:
+        connectors: { type: array, items: { type: string } }
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      # endpoint and model are the family contract an ai-agent consumer reads.
+      endpoint:
+        type: string
+        required: true
+        description: >
+          Base URL of the Cohere API. The host is fixed, so the realization
+          publishes it and a consumer points its client here without a Release
+          supplying anything.
+      model:
+        type: string
+        required: true
+        description: Name of the Command model a request asks for, carried through from the model the Aggregate declared.

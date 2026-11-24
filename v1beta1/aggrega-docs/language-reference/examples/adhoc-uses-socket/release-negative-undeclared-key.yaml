@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Release
+metadata:
+  name: adhoc-uses-socket-undeclared-key
+  environment: development
+  version: "1.0.0"
+spec:
+  aggregate: adhoc-uses-socket-undeclared-key
+  manifest: adhoc-uses-socket-manifest
+  components:
+    db:
+      infra:
+        engine_version: "11.4"
+        storage:
+          size: 2Gi
+    # Placed like every other component the Aggregate declares. It carries no
+    # infra: no compute is deployed for a reference-form realization, so there
+    # is no physical sizing to give it.
+    model:
+      description: >
+        The model endpoint, in the same single scope as the components that run.
+    web:
+      infra:
+        port: 8080

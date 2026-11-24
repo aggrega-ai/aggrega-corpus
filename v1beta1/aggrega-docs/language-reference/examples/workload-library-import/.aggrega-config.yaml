@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+workspace:
+  catalog_dirs:
+    # The example carries a local Recipe + Component that import a shared
+    # Workload body from the hub.
+    - ./catalog
+# The hub registry supplies the WorkloadLibrary (BaseWorkloads) and the helm
+# provider.
+default_registry: hub.aggrega.ai

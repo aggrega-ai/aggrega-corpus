@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Release
+metadata:
+  name: k8s-synth
+  environment: development
+  version: "1.0.0"
+spec:
+  aggregate: aggregate
+  manifest: manifest-helm-synth
+  boundaries:
+    app:
+      directory: app
+      components:
+        db:
+          infra:
+            engine_version: "11.6"
+            # storage.size intentionally omitted — the DbSizing SchemaLibrary
+            # default (10Gi) materializes into the rendered PVC unauthored.
+        web:
+          infra:
+            port: 8080

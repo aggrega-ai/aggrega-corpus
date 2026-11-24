@@ -1,0 +1,301 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: livekit-sip
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    A LiveKit SIP bridge on Kubernetes via the helm provider's Workload
+    synthesis, running the upstream sip image (no external Helm chart, because
+    the project publishes none for this service). It renders a stateless
+    Deployment plus a ClusterIP Service and declares no volume, because the
+    bridge keeps the state of a call in progress in the shared store rather than
+    on disk.
+
+    The Service publishes the signalling port over datagrams and over a stream,
+    and fronts signalling and not media: the RTP media range reaches a peer only
+    where the pod uses the node's own network. The bridge reaches the media
+    server and the store over its two edges, the store over TLS when it
+    publishes valkey-tls or redis-tls, checked against the connection's server_ca, mounted,
+    or the image's trust store; the token-signing secret
+    arrives by reference from the credential on the media_server connection,
+    so the plaintext never appears in the rendered manifest.
+
+    It publishes an in-cluster address only, with external-IP discovery off.
+
+    With `values.metrics_enabled` true the bridge's metrics are switched on,
+    on port 6789, which joins the container and the ClusterIP Service and
+    checks no caller, and their address is published as
+    provides.metrics_endpoint; false, that key is empty.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/messaging/livekit-sip:1.0.0
+  # This Recipe reads no infra.overrides keys.
+  #
+  # This Recipe reads five values delivered on the env pipe by the component's
+  # two required uses edges, under the names the component's usesSchema
+  # documents: LIVEKIT_MEDIA_SERVER_HOST, LIVEKIT_MEDIA_SERVER_PORT and
+  # LIVEKIT_MEDIA_SERVER_API_KEY from the media_server edge, and
+  # LIVEKIT_STATE_STORE_HOST and LIVEKIT_STATE_STORE_PORT from the state_store
+  # edge.
+  #
+  # provides.host is the bare Service name "<rendered_name>-default" — the helm
+  # provider names the synthesized ClusterIP Service "<rendered_name>-<service-key>"
+  # (here "<rendered_name>-default"), with no namespace segment, so the Recipe is
+  # independent of where it is deployed. A same-namespace consumer reaches it
+  # under this name directly; a consumer in another namespace qualifies the host
+  # with the target namespace on its own side (caller-side routing).
+  #
+  # provides publishes the signalling coordinates, and, while
+  # values.metrics_enabled is true, the address of the bridge's metrics:
+  # /metrics on port 6789 of the same Service, empty while the value is false.
+  # The bridge's media ports are not fronted by the Service, so publishing them
+  # would hand a consumer an address that routes nowhere. metrics_endpoint is
+  # spelled out in full on purpose: a provides entry cannot read another.
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ .infra.sip_port }}"
+    protocol: "sip"
+    metrics_endpoint: "{{ if .values.metrics_enabled }}http://{{ .context.rendered_name }}-default:6789/metrics{{ end }}"
+  # The bridge is configured from a YAML body delivered on the environment,
+  # which sets the signalling port, the RTP media range, the health port, the
+  # address of the media server the bridge opens its client session with, and
+  # the address of the shared store. The signalling port is emitted twice as a
+  # container port, once for each transport the bridge binds it for, and the
+  # Service publishes both — so a peer reaches SIP over datagrams or over a
+  # stream on one number. The RTP range is a span of ports rather than one
+  # number, which a declared container port does not express, so it appears in
+  # the configuration body and in no port declaration; the Service therefore
+  # fronts signalling and not media, and the range reaches a peer where the pod
+  # uses the node's own network.
+  #
+  # External-IP discovery is off: this realization publishes an in-cluster
+  # ClusterIP endpoint, and advertising a node address the Service does not
+  # route to would put an unreachable address in the session description the
+  # bridge offers.
+  #
+  # A store publishing valkey-tls or redis-tls is reached over TLS through the body's
+  # redis.tls, the bridge checking the store's certificate and the name dialed
+  # against the authority in the connection's server_ca, its ca_cert_file,
+  # where one is attached, and against the image's default trust store where
+  # not. Read from the Redis settings of the LiveKit protocol library the
+  # bridge builds against, at the commit its release pins.
+  #
+  # The token-signing secret arrives from the credential on the media_server
+  # connection as an env secretKeyRef, and the bridge reads it from the
+  # environment rather than from the configuration body, so the plaintext secret
+  # never appears in the rendered manifest. The public key identifier travels
+  # over the same edge, so one key pair is authored once.
+  #
+  # With values.metrics_enabled true the body names a port for the bridge's
+  # metrics, 6789, under prometheus_port. The bridge then serves its metrics on
+  # a listener of their own on that port, on every interface, and nothing else
+  # there, checking no caller; the port is declared on the container and the
+  # Service. With the value false none of the three is rendered and the metrics
+  # stay off. The probes keep the health port, `health` still sorting first.
+  workload: |
+    {{- /* The alias of the `media_server` connection carrying the credential.
+           The slot is required, so a build reaching this template has one. */ -}}
+    {{- $mediaServerCredential := "" -}}
+    {{- range $alias, $edge := .context.uses -}}
+    {{- if and (eq $edge.socket "media_server") (hasKey (default dict $edge.features) "credential") -}}
+    {{- $mediaServerCredential = $alias -}}
+    {{- end -}}
+    {{- end -}}
+    {{- /*
+      The connection variables this Recipe reads off the inject pipe, under the
+      socket whose edge delivers them, each beside the provides key the edge's
+      inject block names it from. The pipe is read as a map, and every read of
+      these variables below goes through it, so a variable nothing delivered is
+      told apart from one delivered empty: an edge on one of these sockets
+      leaving any of its variables missing halts the build, naming the edge, the
+      variables and the inject block to write, rather than rendering a
+      connection setting with an empty value. A socket in $required is read
+      whether or not anything is wired to it, so leaving it empty halts too.
+    */ -}}
+    {{- $env := optional (default dict .context.inject) "env" dict -}}
+    {{- $reads := dict "media_server" (dict "LIVEKIT_MEDIA_SERVER_HOST" "host" "LIVEKIT_MEDIA_SERVER_PORT" "port" "LIVEKIT_MEDIA_SERVER_API_KEY" "api_key") "state_store" (dict "LIVEKIT_STATE_STORE_HOST" "host" "LIVEKIT_STATE_STORE_PORT" "port") -}}
+    {{- $required := list "media_server" "state_store" -}}
+    {{- $gaps := list }}{{ $wired := list -}}
+    {{- range $alias, $edge := .context.uses }}{{ with get $reads $edge.socket -}}
+    {{- $wired = append $wired $edge.socket }}{{ $missing := list }}{{ $shape := list -}}
+    {{- range $var, $from := . }}{{ if not (hasKey $env $var) }}{{ $missing = append $missing $var }}{{ end }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- if $missing }}{{ $gaps = append $gaps (printf "the edge %q on its %s socket delivers no %s, so give that edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $alias $edge.socket (join " or " $missing) (join ", " $shape)) }}{{ end -}}
+    {{- end }}{{ end -}}
+    {{- range $socket := $required }}{{ if not (has $socket $wired) -}}
+    {{- $vars := list }}{{ $shape := list }}{{ range $var, $from := get $reads $socket }}{{ $vars = append $vars $var }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- $gaps = append $gaps (printf "nothing is wired to its %s socket to deliver %s, so wire one and give its edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $socket (join " and " $vars) (join ", " $shape)) -}}
+    {{- end }}{{ end -}}
+    {{- if $gaps }}{{ fail (printf "core/messaging/livekit-sip %q composes its connection settings from variables its edges deliver on its inject pipe, but %s" .context.instance_id (join "; and " $gaps)) }}{{ end -}}
+    {{- /*
+      The state store over TLS. A store publishing valkey-tls or redis-tls accepts TLS
+      connections alone, so the bridge reaches it over TLS; any other value
+      ending in -tls names a store served over TLS the bridge is not taught to
+      reach, and halts rather than connecting in plaintext. A server_ca on the
+      connection is the authority the bridge checks the store's certificate
+      against; it is mounted, so its attachment must name a Secret, and it is
+      refused on a store served without TLS, where no handshake takes place to
+      check a certificate in. DELIBERATE NEAR-DUPLICATE of the same block in the
+      media server's Recipe: no catalog kind holds a template fragment for
+      several Recipes to share; change both together.
+    */ -}}
+    {{- $storeTLS := false }}{{ $storeCA := "" -}}
+    {{- range $alias, $edge := .context.uses }}{{ if eq $edge.socket "state_store" -}}
+    {{- $proto := toString (optional (default dict $edge.provides) "protocol" "") -}}
+    {{- $edgeTLS := has $proto (list "valkey-tls" "redis-tls") -}}
+    {{- if $edgeTLS }}{{ $storeTLS = true }}{{ else if hasSuffix "-tls" $proto -}}
+    {{- fail (printf "the state_store connection %s of %q reaches %q, which publishes protocol %s, a store served over TLS that the LiveKit SIP bridge does not reach: it speaks the Redis protocol, over TLS to a store publishing valkey-tls or redis-tls; wire a Redis-protocol store to the state_store socket" $alias $.context.instance_id $edge.target $proto) -}}
+    {{- end -}}
+    {{- if hasKey (default dict $edge.features) "server_ca" -}}
+    {{- $caProvides := optional (optional (default dict $edge.features) "server_ca" dict) "provides" dict -}}
+    {{- if not (and (kindIs "map" $caProvides) (optional $caProvides "name" "")) -}}
+    {{- fail (printf "the server_ca on the state_store connection %s of %q publishes no Secret name, so no Secret could be mounted into the bridge's container: attach a server_ca publishing one, such as core/referenced-secret" $alias $.context.instance_id) -}}
+    {{- end -}}
+    {{- if not $edgeTLS -}}
+    {{- fail (printf "the state_store connection %s of %q holds a server_ca, but the store it reaches, %q, publishes protocol %s, served without TLS, so no TLS handshake takes place to check a certificate in: turn client_tls on for that store, or remove the server_ca" $alias $.context.instance_id $edge.target (default "none" $proto)) -}}
+    {{- end -}}
+    {{- $storeCA = $alias -}}
+    {{- end -}}
+    {{- end }}{{ end -}}
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    {{- /* Both of this component's uses sockets are required, so an edge always
+           exists — but which of the target's keys an edge carries, and under
+           which environment names, is decided where the topology is authored.
+           A name the edge does not deliver halts above; one delivered empty
+           would configure the bridge with an empty server address, an empty
+           store address or an empty key identifier: it would deploy, reach
+           neither the media server nor the shared store, and report no reason.
+           So the five names this body reads are also checked for a value
+           before anything is rendered, and an empty one halts here naming
+           itself, where the fix is one line of topology. */}}
+    {{- range $name := list "LIVEKIT_MEDIA_SERVER_HOST" "LIVEKIT_MEDIA_SERVER_PORT" "LIVEKIT_MEDIA_SERVER_API_KEY" "LIVEKIT_STATE_STORE_HOST" "LIVEKIT_STATE_STORE_PORT" }}
+    {{- if not (optional $env $name "") }}
+    {{- fail (printf "the SIP bridge is wired without %s, so the bridge would start with that value empty and could not carry a call: bind the socket that publishes it and carry the target's key into this environment name on that edge, as the component's own socket documentation lists" $name) }}
+    {{- end }}
+    {{- end }}
+    # The bridge holds no durable disk — the state of a call in progress lives
+    # in the shared store reached over the state_store edge — so the default
+    # stateless form (a Deployment on the helm provider) is correct: no
+    # form: stateful, no persistentTemplate volume, no PVC.
+    replicas: 1
+    containers:
+      main:
+        image: "livekit/sip:{{ .infra.engine_version }}"
+        variables:
+          # The bridge reads its whole configuration from this YAML body. Ports
+          # appear here as well as on the container ports below: the container
+          # ports declare what the pod exposes, this body tells the process what
+          # to open, and both are driven by the same infra keys. The RTP range is
+          # the one exception and it is stated at the ports block below: a span
+          # of ports has no container-port counterpart, so it lives here alone.
+          #
+          # The API secret is deliberately absent from this body. The bridge
+          # seeds its api secret from the environment before it parses the body,
+          # so omitting the key here leaves the value delivered by the credential
+          # attachment in force and keeps the plaintext out of the rendered
+          # manifest.
+          SIP_CONFIG_BODY: |
+            api_key: "{{ $env.LIVEKIT_MEDIA_SERVER_API_KEY }}"
+            ws_url: "ws://{{ $env.LIVEKIT_MEDIA_SERVER_HOST }}:{{ $env.LIVEKIT_MEDIA_SERVER_PORT }}"
+            redis:
+              address: "{{ $env.LIVEKIT_STATE_STORE_HOST }}:{{ $env.LIVEKIT_STATE_STORE_PORT }}"
+    {{- if $storeTLS }}
+              tls:
+                enabled: true
+    {{- if $storeCA }}
+                ca_cert_file: /etc/livekit-sip/state-store-server-ca/ca.crt
+    {{- end }}
+    {{- end }}
+            sip_port: {{ .infra.sip_port }}
+            rtp_port: "{{ .infra.rtp_port_start }}-{{ .infra.rtp_port_end }}"
+            health_port: {{ .infra.health_port }}
+    {{- if .values.metrics_enabled }}
+            prometheus_port: 6789
+    {{- end }}
+            use_external_ip: false
+            logging:
+              level: {{ .infra.log_level }}
+    {{- if or $mediaServerCredential $storeCA }}
+        attachments:
+    {{- end }}
+    {{- with $mediaServerCredential }}
+          LIVEKIT_API_SECRET:
+            connection: "{{ . }}"
+            from: credential
+            as: env
+    {{- end }}
+    {{- with $storeCA }}
+          # The state_store connection's server_ca Secret mounts whole,
+          # read-only, one file per data key, so the bridge reads ca.crt from
+          # this directory.
+          state-store-server-ca:
+            connection: "{{ . }}"
+            from: server_ca
+            as: file
+            path: /etc/livekit-sip/state-store-server-ca
+    {{- end }}
+        ports:
+          # The health endpoint is a container port and not a service port: the
+          # probes below reach it on the pod address, and nothing outside the pod
+          # has a reason to.
+          #
+          # The signalling port is declared once per transport, because the
+          # bridge binds it for both and a datagram port opened as a stream port
+          # accepts no traffic from its peer. Both carry the same number, which
+          # is the number the bridge announces in the SIP headers it sends.
+          #
+          # The RTP media range is absent by construction. It is a span of ports,
+          # which a declared port does not express, so there is nothing here to
+          # declare and the Service below fronts signalling only.
+          health: {{ .infra.health_port }}
+          sip-tcp:
+            port: {{ .infra.sip_port }}
+            protocol: TCP
+          sip-udp:
+            port: {{ .infra.sip_port }}
+            protocol: UDP
+    {{- if .values.metrics_enabled }}
+          metrics: 6789
+    {{- end }}
+        # The bridge's own health endpoint reports the load state of the
+        # process, answering unhealthy while it is saturated. That is the right
+        # answer for readiness — a saturated bridge should stop being handed new
+        # calls — and the wrong one for liveness, where it would restart a
+        # process whose only fault is being busy. So readiness reads the
+        # endpoint and liveness opens a socket to it. The http probe resolves its
+        # target from the container's first port name in alphabetical order,
+        # which is the health port here — a port renamed to sort ahead of it
+        # would move the probe onto a port that speaks no HTTP.
+        health:
+          ready:
+            http: /
+          live:
+            tcp: {{ .infra.health_port }}
+            initialDelaySeconds: 10
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+    services:
+      default:
+        type: ClusterIP
+        # A service port takes the transport of the container port its name
+        # resolves to, so each signalling port carries its own transport without
+        # restating it here. The health port is not published: it is a probe
+        # target on the pod address.
+        ports:
+          sip-tcp: {{ .infra.sip_port }}
+          sip-udp: {{ .infra.sip_port }}
+    {{- if .values.metrics_enabled }}
+          metrics: 6789
+    {{- end }}

@@ -1,0 +1,147 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/observability/tempo
+  version: 1.0.0
+  # The packaged Tempo server is AGPL-3.0.
+  license: AGPL-3.0
+  description: >
+    A Grafana Tempo distributed-tracing server in its single-binary shape: every
+    subsystem runs inside one process backed by a local trace store, so it
+    renders as a single stateful server with a data volume. It receives trace
+    spans over the OpenTelemetry protocol and other tracing wire formats, and
+    answers trace-lookup and search queries over its HTTP API, on its own port,
+    which a dashboards server reads to display traces. It serves its own
+    metrics in the Prometheus format at /metrics on that HTTP port, 3200, on by
+    default, and every Recipe publishes that address as `metrics_endpoint`.
+
+    Its primary contract to consumers is the OTLP gRPC receiver: a trace
+    producer wires to it and pushes spans there, and the component exports that
+    receiver's host and port. It carries `observability.aggrega.ai/traces:
+    otlp-grpc`, so an OpenTelemetry Collector's `traces` socket takes it and
+    exports spans to that receiver.
+
+    Realized on helm by two realizations the Manifest chooses between, and on
+    compose by one. `tempo` synthesizes the server as a workload and fetches
+    nothing, so it is the one to reach for where the build must complete with no
+    chart repository reachable. `tempo-chart` renders the community-maintained
+    Tempo Helm chart, which assembles the server's configuration from named
+    settings rather than from a hand-written file and additionally accepts spans
+    in the Jaeger and Zipkin wire formats, so reach for it where a chart
+    repository is reachable at build time. On compose, `tempo` runs the same
+    image and configuration as its helm namesake, as a service publishing nothing
+    to the host.
+  labels:
+    component.aggrega.ai/type: stateful-server
+    component.aggrega.ai/category: observability
+    component.aggrega.ai/upstream-licensing: osi-approved
+    # Signal: every realization serves Tempo's OTLP gRPC receiver at the host
+    # and port this component publishes, so it carries traces: otlp-grpc. An
+    # OpenTelemetry Collector's traces socket selects the key and writes a gRPC
+    # exporter to that address. The value names what the server receives, not a
+    # configured state: the receiver is on whether or not a collector is wired
+    # to it.
+    observability.aggrega.ai/traces: otlp-grpc
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # Tempo receives trace spans over the OpenTelemetry protocol and other
+  # tracing wire formats, stores them in a trace object store, and answers
+  # trace-lookup and search queries over its HTTP API. This component models
+  # Tempo in its single-binary shape: every Tempo subsystem — distributor,
+  # ingester, querier, compactor — runs inside one process backed by a local
+  # trace store, so it renders as a single stateful server with a data volume
+  # rather than a set of microservices.
+  #
+  # Self-inject allowlist: the component may inject resolved uses-edge values
+  # into the env delivery mechanism.
+  inject: [env]
+
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      retention_period:
+        type: string
+        default: "168h"
+        description: How long stored trace blocks are kept before the in-process compactor deletes them. Expressed as a Go duration (e.g. `168h` for seven days).
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      #
+      # The helm `tempo` realization synthesizes native Kubernetes resources (a
+      # StatefulSet, a config ConfigMap, and Services) from the platform
+      # Workload abstraction running the official grafana/tempo image, rather
+      # than sourcing an upstream chart; the compose `tempo` realization
+      # synthesizes one compose service from the same image and configuration.
+      # Two realizations are helm Recipes and the third a compose Recipe.
+      engine_version:
+        type: string
+        default: "2.9.0"
+        description: Tempo container image tag. Selects the grafana/tempo image tag the workload-synthesis realizations run, on helm and on compose; the chart-backed realization pins its own image tag.
+      # `tempo-chart` assembles the server's whole configuration from named
+      # settings rather than from a hand-written file, so retention, receivers,
+      # storage layout and query tuning arrive with the chart when they move
+      # upstream.
+      source_version:
+        type: string
+        description: Version of the Helm chart the chart-backed realization pulls. Read only by that realization; the workload-synthesis realizations, on helm and on compose, pull no source artifact and ignore it. Changing it away from the Recipe's default does not guarantee value-mapping compatibility with the new chart.
+      compute:
+        cpu:
+          type: string
+          default: 500m
+        memory:
+          type: string
+          default: 512Mi
+      storage:
+        size:
+          type: string
+          default: 10Gi
+          description: Size of the persistent volume backing the Tempo single-binary trace store. Docker Compose sets no size on a volume, so the compose realization creates the volume without honouring it.
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      # The OTLP receiver's host and port are what is published; the HTTP query
+      # API a dashboards server reads sits on its own port. Every realization
+      # asks the server's readiness endpoint — on helm as a readiness probe, on
+      # compose as the service's healthcheck — so the server is reported ready
+      # only once it can serve traffic.
+      host:
+        type: string
+        required: true
+        description: >
+          Name the server receiving trace spans is reached at — the in-cluster
+          Service on helm, the service name on compose. An application
+          exporting spans points its exporter at this name together with
+          `port`.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port spans are ingested on. It carries the OpenTelemetry gRPC
+          receiver port, not the query API port, so a consumer wires its
+          exporter rather than its dashboard.
+      protocol:
+        type: string
+        description: How the published address is spoken to — `grpc`, so an exporter is configured for the gRPC transport rather than the HTTP one.
+      # The address a Prometheus server scrapes Tempo's own metrics at. Tempo
+      # serves them in the Prometheus format at /metrics on its HTTP port,
+      # 3200 in every realization and on the Service each one renders, always
+      # on, and no Recipe configures a credential for that port. It is not the
+      # published port, which is the OTLP gRPC receiver's, so the address is
+      # not the published host and port. Every Recipe publishes it spelled out
+      # in full from its own host and that port, because a provides entry
+      # cannot read another.
+      metrics_endpoint:
+        type: string
+        description: >
+          The full address Prometheus scrapes this component's metrics at —
+          scheme, host, port and path, `http://<host>:3200/metrics` on the HTTP
+          API's port, which is not the published `port`. Empty where the
+          component serves none reachable.

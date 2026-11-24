@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Release
+metadata:
+  name: model-api-key-sharing-shared
+  environment: production
+  version: "1.0.0"
+spec:
+  aggregate: model-api-key-sharing-shared
+  # The existing-secret mapping: each connection's credential names a Secret
+  # already in the namespace, so this release renders a reference and no Secret.
+  manifest: model-api-key-sharing-existing-secret-manifest
+  boundaries:
+    main:
+      directory: shared
+      components:
+        gateway:
+          infra:
+            endpoint: https://gateway.internal.example:8080/v1
+        researcher:
+          infra:
+            image: registry.example/crew-researcher:1.4.0
+        writer:
+          infra:
+            image: registry.example/crew-writer:1.4.0

@@ -1,0 +1,124 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/datastore/documentdb
+  version: 1.0.0
+  license: MIT
+  description: >
+    A PostgreSQL-backed document store: PostgreSQL 17 with the DocumentDB
+    extension. It presents the standard PostgreSQL wire contract
+    (POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB) and persists data on a
+    volume, so it is a stateful server. It is the storage backend for a
+    document proxy that speaks a document-database wire protocol on top of it;
+    the proxy connects over the exported host, port, user, and database. Exports
+    its host, port, user, database, and protocol to consumers via the uses
+    topology.
+  labels:
+    component.aggrega.ai/type: stateful-server
+    component.aggrega.ai/category: datastore
+    component.aggrega.ai/upstream-licensing: osi-approved
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # Self-inject allowlist: the component may inject its own provides keys into
+  # the env delivery mechanism.
+  inject: ["env"]
+  featuresSchema:
+    # Optional password credential slot. When a credential is attached
+    # here, the Recipe wires the database password through the credential
+    # subsystem; when unattached, the Recipe falls back to its inline default.
+    # `required` omitted → optional, so a bare `backend: {}` still
+    # loads. Transparent (inject: [env]) so a synthesized Workload may reference
+    # it as an env secret; the selector is secret-kind-pinned but family-agnostic
+    # so either an inject-value or a referenceable credential may fill it.
+    # To replace the Recipe's development default, attach core/random-password: the
+    # cluster generates it, and slots sharing it take it by core/referenced-secret.
+    password:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      description: "Optional database password credential. When attached, supplies POSTGRES_PASSWORD via the credential subsystem. Unattached, compose/documentdb and helm/documentdb set POSTGRES_PASSWORD to the development literal `apppass`, which this catalog publishes, so every Release that leaves the slot unattached shares that password."
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      user:
+        type: string
+        default: postgres
+        description: Application database user created on startup (POSTGRES_USER).
+      database:
+        type: string
+        default: postgres
+        description: Logical database name created on startup (POSTGRES_DB).
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 5432
+        description: Server listen port. Most operators should omit this and let the Recipe assign the default (5432).
+      engine_version:
+        type: string
+        default: "17-0.107.0-ferretdb-2.7.0"
+        description: Backend image tag (PostgreSQL major version plus the DocumentDB extension build).
+      compute:
+        cpu:
+          type: string
+          default: 250m
+        memory:
+          type: string
+          default: 512Mi
+      storage:
+        type: object
+        properties:
+          size:
+            type: string
+            default: 10Gi
+          type:
+            type: string
+            description: >
+              Storage class the database volume is provisioned from on
+              Kubernetes. Leave it unset to take the cluster's default storage
+              class; set it to name another class the cluster offers. The Compose
+              Recipe names no class.
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      host:
+        type: string
+        required: true
+        description: Address a client opens its database connection to. On the in-cluster realizations it is the Service's DNS name.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port the server accepts connections on. It follows the port an
+          operator set in the Release, so a consumer reads it rather than
+          assuming a default.
+      user:
+        type: string
+        description: >
+          Name of the application login role created at startup. A consumer
+          authenticates as this role; the matching password arrives through
+          the credential attached to the component, never through this
+          contract.
+      database:
+        type: string
+        description: >
+          Name of the logical database created at startup. A consumer names it
+          in its connection string to land in the right database rather than
+          the server's default.
+      protocol:
+        type: string
+        description: >
+          Wire protocol the published address speaks — `postgres`, so a
+          consumer chooses a PostgreSQL client even though what it stores is
+          documents.

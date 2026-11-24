@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Aggregate
+metadata:
+  name: aggregate
+  version: "1.0.0"
+  description: >
+    A MariaDB database with an Adminer web UI in front of it. This is the
+    single Developer-authored intent surface; the Release places the two
+    components in separate boundaries on Kubernetes/Helm.
+spec:
+  # ── Parameter hoisting ──────────────────────────────────────────────
+  # A typed parameter the Release fulfils per environment: app_design hoists
+  # into web.values.design (the Adminer theme), flowing a typed parameter into
+  # a standard developer value. (The database's chart/source version is the
+  # operator's infra.source_version knob, set Release-side — not hoisted into.)
+  parameters:
+    app_design:
+      type: string
+      default: pepa-linha-dark
+      description: >
+        Adminer UI theme. Hoisted into web.values.design — a typed parameter
+        flowing into a standard developer value, fulfilled per environment.
+  components:
+    # ── Database ────────────────────────────────────────────────────────
+    db:
+      type: core/datastore/mariadb
+      values:
+        database: appdb
+        user: appuser
+        charset: utf8mb4
+        collation: utf8mb4_general_ci
+      # Credentials are attachments on the features: pillar like any other
+      # Feature; the feature.aggrega.ai/kind: secret label names what they
+      # produce. The two slots the Component's featuresSchema declares
+      # demonstrate both delivery models:
+      #
+      #   - root_password is a BLACK-BOX slot (featuresSchema inject: []): the
+      #     FeatureRecipe controls delivery, injecting the value straight into
+      #     the component's pipe. The developer may not dictate delivery.
+      #   - user_password is a TRANSPARENT slot (featuresSchema inject:
+      #     [env, file]): the credential exposes its value as a `provides` key,
+      #     and the developer dictates delivery with the attachment's inject:
+      #     block below.
+      #
+      # Either way the value lands on .context.inject.env.<VAR>, which the
+      # database Recipe reads.
+      features:
+        root_password:
+          type: core/secret-value
+          values:
+            key: MARIADB_ROOT_PASSWORD
+            origin: dev-root-pw-change-me
+        user_password:
+          type: core/secret-provided
+          values:
+            origin: dev-app-pw-change-me
+          inject:
+            env:
+              - in: MARIADB_PASSWORD
+                from: value
+
+    # ── Web UI ──────────────────────────────────────────────────────────
+    web:
+      type: core/devtool/adminer
+      values:
+        design: "{{ .parameters.app_design }}"
+      # The database connection is wired through a reusable binding Feature
+      # rather than an inline component `uses:`. The feature carries the
+      # `databases` uses-edge AND its delivery: db.provides.host lands on
+      # Adminer's ADMINER_DEFAULT_SERVER. The edge is therefore attributed to
+      # the binding feature (its origin feature) — a feature-carried
+      # dependency, distinct from an inline component edge. The String Pipe is
+      # unchanged: the compiler does not interpret the string; it routes
+      # whatever the database Recipe's `provides.host` emits (a compose service
+      # name, or a Kubernetes service DNS name) across the boundary into the
+      # consumer's environment.
+      features:
+        db_binding:
+          type: example/db-binding
+          uses:
+            databases:
+              db:
+                target: db
+                inject:
+                  env:
+                    - in: ADMINER_DEFAULT_SERVER
+                      from: host

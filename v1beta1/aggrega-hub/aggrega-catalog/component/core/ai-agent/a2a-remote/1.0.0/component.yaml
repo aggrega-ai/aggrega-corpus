@@ -1,0 +1,203 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/ai-agent/a2a-remote
+  version: 1.0.0
+  # metadata.license carries the SPDX identifier of the software a Component
+  # packages, and this Component packages none: it stands for an agent another
+  # party runs and publishes over the Agent2Agent (A2A) protocol, whichever
+  # software that party runs it on. There is no upstream product whose licence
+  # could be stated, which is the same fact
+  # component.aggrega.ai/upstream-licensing records as not-applicable.
+  description: >
+    An agent another party runs and publishes over the Agent2Agent (A2A)
+    protocol, reached at the address its Agent Card lists. Nothing is
+    provisioned or run. Both realizations are references publishing what a
+    consumer needs: the agent's address, where its card is read, the URL
+    scheme, the header a caller's credential goes under, and where a caller
+    obtains a token.
+
+    The Release names the address in infra.endpoint, which carries no default:
+    the URL of an interface the card lists for a binding served over HTTP,
+    without any part carrying a key. The card is read at the well-known
+    location on that address's scheme and host, and the header is
+    Authorization, unless infra.agent_card_url and infra.credential_header name
+    others; infra.token_url, infra.oidc_discovery_url and infra.scopes, each
+    optional, copy what the card declares for OAuth 2.0 client credentials or
+    OpenID Connect.
+
+    No credential is held here: each consumer holds its own on its
+    connection, as it belongs to the consumer, not the address.
+    core/ai-tool/agent-invocation's container presents under that header the
+    whole value a Secret holds, for an API key in a header or cookie or an
+    HTTP scheme such as Bearer or Basic; a token it obtains with a client
+    secret by the OAuth 2.0 client-credentials grant, directly or through
+    OpenID Connect; and, for mutual TLS, a client certificate mounted from a
+    Secret its connection names, the card naming none to publish here. That
+    tool halts the build on a credential or client secret for an http
+    endpoint. Not covered: a key in the query string, an HTTP scheme answering
+    a challenge, such as Digest, and other OAuth 2.0 grants. Reach for
+    helm/a2a-remote on Kubernetes, compose/a2a-remote under Docker Compose.
+  labels:
+    component.aggrega.ai/type: resource
+    component.aggrega.ai/category: ai-agent
+    # Someone else runs the agent, and the Release neither provisions nor
+    # operates it: the realizations emit only the wiring to reach it.
+    component.aggrega.ai/hosting: external
+    component.aggrega.ai/upstream-licensing: not-applicable
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  schema:
+    # values — Developer Intent
+    # Filled by the Developer in the Aggregate. The agent's behaviour is the
+    # other party's, published in its card as skills, so there is nothing here
+    # for a developer to declare about it beyond the shared agent contract.
+    values:
+      $ref: "BaseComponents#/schemas/BaseAgentParameter"
+
+    # infra — Operational Sizing
+    # Filled by Ops in the Release. Developer never sees this. Each address is a
+    # deterministic pointer string the runtime resolves; the compiler never
+    # contacts it.
+    infra:
+      # The agent is the other party's, so no address exists for the catalog to
+      # hold as a default: each realization halts the build naming this key
+      # while it is unset, and halts on an address that is not an http or https
+      # URL naming a host, or one carrying a user name or password. An interface
+      # served over gRPC is addressed as a host and port rather than a URL, and
+      # is not reached through these realizations.
+      endpoint:
+        type: string
+        description: >
+          The http or https URL of an interface the agent's card lists in
+          supportedInterfaces for a binding served over HTTP (protocolBinding
+          JSONRPC or HTTP+JSON),
+          for example https://agent.example.com/a2a/v1, without any part that
+          carries a key: at least its scheme and host. The realizations publish
+          it as written. An http address is published too, but
+          core/ai-tool/agent-invocation halts the build on a credential or
+          client_secret held on its connection to an agent published at one,
+          since the credential, or the token obtained with the secret, would
+          reach the agent unencrypted.
+      # The protocol places the card at /.well-known/agent-card.json on the
+      # agent's own host, so an agent published there needs nothing set here.
+      # The realizations halt on a value that is not an http or https URL
+      # naming a host, or one carrying a user name or password.
+      agent_card_url:
+        type: string
+        description: >
+          The URL the agent's card is read at, where it is not the well-known
+          location /.well-known/agent-card.json on infra.endpoint's scheme and
+          host, which the realizations publish when this is unset.
+      # Which header the agent reads a caller's credential from is named by the
+      # security scheme its card declares: an API key's scheme names its header,
+      # and an HTTP authentication scheme such as Bearer is read from
+      # Authorization. The Release states it, and the default is the latter.
+      credential_header:
+        type: string
+        default: Authorization
+        description: >
+          The request header the agent reads a caller's credential from, which
+          the realizations publish for a consumer to present its credential
+          under: the header an API-key security scheme in the agent's card
+          names, Cookie where that scheme places its key in a cookie, or
+          Authorization for an HTTP authentication scheme.
+          core/ai-tool/agent-invocation presents under it the whole value the
+          Secret on its connection holds, so it reaches an API key in a header;
+          one in a cookie, the Secret holding the cookie's name, "=" and the
+          key; and an HTTP scheme whose value is fixed, the Secret holding the
+          scheme's name, a space and the credential, as "Bearer " and a token,
+          or "Basic " and the Base64 encoding of the user name and password
+          joined by a colon. It does not reach an API key the card places in
+          the query string, nor an HTTP scheme whose value answers a challenge
+          from the agent, such as Digest.
+      # An OAuth 2.0 security scheme in the card names where a caller obtains a
+      # token: its clientCredentials flow carries a tokenUrl and the scopes it
+      # offers. An OpenID Connect scheme carries only the provider's discovery
+      # address, from which a caller reads the token endpoint, and the scopes
+      # come from the card's security requirements. These three hold what the
+      # card declares, so they belong to the agent and are the same for every
+      # caller; the client id and the client secret a caller obtains a token
+      # with are each caller's own, held on its connection. An agent checking a
+      # key or a token obtained beforehand needs none of the three, so each is
+      # optional, holds no default, and is published empty while unset. Each
+      # realization halts the build on a token_url or oidc_discovery_url that is
+      # not an https URL naming a host, or that carries a user name or password,
+      # whichever consumer reads it, and publishes the three as written
+      # otherwise.
+      token_url:
+        type: string
+        description: >
+          The https URL a caller obtains an access token from with the OAuth 2.0
+          client-credentials grant: the tokenUrl of the clientCredentials flow in
+          an oauth2 security scheme the agent's card declares.
+      oidc_discovery_url:
+        type: string
+        description: >
+          The https OpenID Connect discovery URL an openIdConnect security
+          scheme in the agent's card names as its openIdConnectUrl, from which a
+          caller reads the provider's token endpoint.
+      # A string rather than a list, because a published value is a scalar
+      # delivered as a string: the scopes are written separated by spaces, the
+      # form OAuth 2.0's own scope parameter takes, so a caller sends them as
+      # written.
+      scopes:
+        type: string
+        description: >
+          The scopes a caller requests its token for, separated by spaces as in
+          OAuth 2.0's scope parameter, for example "agent.read agent.invoke":
+          those the card's security requirements list for its OAuth 2.0 or
+          OpenID Connect scheme.
+
+    # provides — Public API Contract
+    # Keys exported to consumers via `uses` topology edges. Both realizations
+    # publish all seven, the last three empty where the Release sets none. No
+    # host or port is published: a consumer reaches the agent at endpoint, the
+    # address the card lists.
+    provides:
+      endpoint:
+        type: string
+        required: true
+        description: >
+          The URL a caller sends A2A requests to: infra.endpoint as the Release
+          wrote it, the address without any part that carries a key.
+      agent_card_url:
+        type: string
+        required: true
+        description: >
+          The URL the agent's card is read at, which describes the agent's
+          skills, interfaces and security schemes: infra.agent_card_url where
+          the Release sets it, otherwise /.well-known/agent-card.json on the
+          endpoint's scheme and host.
+      protocol:
+        type: string
+        description: URL scheme of `endpoint`, http or https.
+      credential_header:
+        type: string
+        description: >
+          The request header a consumer presents its credential under, where
+          the agent checks one: Authorization unless the Release names another
+          in infra.credential_header. The credential itself is the consumer's,
+          held on its own connection to the agent.
+      token_url:
+        type: string
+        description: >
+          The URL a caller obtains an access token from with the OAuth 2.0
+          client-credentials grant: infra.token_url as the Release wrote it, or
+          empty where the agent's card declares no such scheme.
+      oidc_discovery_url:
+        type: string
+        description: >
+          The OpenID Connect discovery URL a caller reads the provider's token
+          endpoint from: infra.oidc_discovery_url as the Release wrote it, or
+          empty where the agent's card declares no such scheme.
+      scopes:
+        type: string
+        description: >
+          The scopes a caller requests its token for, separated by spaces:
+          infra.scopes as the Release wrote it, or empty.

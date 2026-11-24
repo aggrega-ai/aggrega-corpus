@@ -1,0 +1,501 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/gateway/apisix
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    Apache APISIX, an API gateway. APISIX terminates client HTTP traffic on
+    its proxy port and publishes that port's host, port and protocol. While
+    nothing is wired to its models socket it routes by configuration held in
+    the etcd store wired to its `etcd` socket, written through an Admin API
+    reachable in-cluster only and authenticated by the key attached to
+    `admin_key`; both are then required. It holds no state of its own.
+
+    It also serves models: each one wired to its models socket gets a chat
+    route, and a completion route unless a period budget or a prompt guard is
+    attached, through APISIX's AI proxy, at /<alias>/v1 under the connection's
+    alias, sent to the endpoint and model name the model publishes and
+    presenting that connection's credential. Those routes are rendered into a
+    file the gateway reads, so with a model wired it reads no etcd and runs no
+    Admin API, and an `etcd` connection or an `admin_key` attachment halts the
+    build. It publishes values.model's route as its endpoint and that alias as
+    its model, so an agent's model socket takes it in place of a model; with
+    nothing wired both are empty.
+
+    On Kubernetes the Manifest chooses between two realizations. `apisix`
+    synthesizes a workload with a hand-written configuration file and fetches
+    nothing; it serves no model and halts on a models connection.
+    `apisix-chart` renders the project's own Helm chart, which assembles that
+    configuration from named settings; it serves the models, their callers and
+    the controls attached to them. With `values.metrics_enabled` true, both
+    serve the gateway's own metrics, asking no credential, and publish their
+    address as `metrics_endpoint`; false, that key is empty.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: gateway
+    component.aggrega.ai/upstream-licensing: osi-approved
+    # Model API: the endpoint this gateway publishes answers the OpenAI API —
+    # the chat and completion routes its AI proxy serves for each model wired
+    # to its models socket, under that connection's alias in the path — so a
+    # consumer drives it with an OpenAI client whichever model answers behind
+    # it. It is what lets a model socket selecting this key admit the gateway
+    # beside the models themselves; the gateway publishes the endpoint and the
+    # model name such a socket's consumers read. The value names what the
+    # product serves, not a configured state: with nothing wired to the models
+    # socket the gateway serves no model, and both of those are empty. The
+    # routes are rendered by `apisix-chart`, which runs APISIX 3.18.0 from a
+    # routes file; `apisix`, whose default image is APISIX 3.17.0 configured
+    # through etcd at run time, renders no route and halts on a models
+    # connection, so with that realization both stay empty.
+    model.aggrega.ai/api: openai
+    # The gateway capability dimension: on a route serving a model, APISIX's AI
+    # proxy reads the request body — the model it names, the protocol it
+    # speaks, whether it streams — and the tokens the model's reply reports, so
+    # a runtime control that has to parse a model payload can attach here. The
+    # value names what the product does on such a route, at 3.17.0 and 3.18.0
+    # alike, not a configured state: with nothing wired to the models socket no
+    # route parses a model payload, and each Feature selecting this value
+    # says, through its realization, what this gateway honours of it.
+    gateway.aggrega.ai/intelligence: semantic
+    # Data-path capability label: what this gateway is able to do, never what
+    # a given Release has switched on.
+    #
+    # Period budget: the gateway can refuse model requests once the tokens it
+    # has counted over a period reach a limit set in its configuration — the
+    # tokens each model's reply reports reading, writing or both — which is the
+    # fidelity this value names. It prices nothing, so it counts no cost. It
+    # refuses nothing until core/period-budget is attached; `apisix-chart`
+    # writes the budget onto the chat routes of the models wired to the models
+    # socket, and `apisix`, which renders no route, halts on the attachment.
+    dataplane.aggrega.ai/period-budget: tokens
+    # Prompt guard: on a route serving a model, APISIX's ai-prompt-guard
+    # matches the text of the request's messages against regular expressions
+    # in its configuration and refuses with HTTP 400 a request one of its deny
+    # patterns matches, or that none of its allow patterns matches — the
+    # fidelity this value names, read off ai-prompt-guard's own reference at
+    # APISIX 3.18.0. It matches nothing until a list is supplied, which is what
+    # attaching core/prompt-deny-patterns does; `apisix-chart` writes the list
+    # onto the chat routes of the models wired to the models socket, and
+    # `apisix`, which renders no route, halts on the attachment.
+    dataplane.aggrega.ai/prompt-guard: pattern-list
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # Self-inject allowlist: the component may inject resolved uses-edge values
+  # into the env delivery mechanism.
+  inject: [env]
+
+  usesSchema:
+    # The etcd store APISIX holds its configuration in. The selected component's
+    # provides host and port arrive on the injection context and compose
+    # APISIX's configuration-store connection. Required while nothing is wired
+    # to the models socket, and refused while a model is, by the assertion
+    # store_and_admin_key_follow_the_models_socket below rather than by a
+    # required flag, because which of the two holds depends on another socket.
+    etcd:
+      selector: "component.aggrega.ai/type=stateful-server"
+      inject: [env]
+    # The models the gateway serves through its AI proxy, each wired as a
+    # connection: any ai-model Component, managed or self-hosted, one or
+    # several. Each connection becomes a chat route at
+    # /<alias>/v1/chat/completions and a completion route at
+    # /<alias>/v1/completions — the chat route alone while core/period-budget
+    # is attached, because APISIX counts no tokens on a completion request, so
+    # that route would serve traffic the budget never counts — sent to the
+    # endpoint the model publishes with the operation's path appended and
+    # asking for the model name it publishes — pointers the compiler pipes
+    # into the configuration and never resolves. A
+    # route asks for the model it was written for whatever model name a request
+    # carries, so the path chooses the model. The gateway writes a wired model's
+    # route for the OpenAI API alone, so a connection whose target's
+    # model.aggrega.ai/api is not openai halts the build, naming it. The alias
+    # names the route's path and its id; every character an alias can carry is
+    # one APISIX accepts in both, and an alias making an id longer than the 64
+    # characters APISIX accepts halts the build where the routes are rendered.
+    #
+    # The routes are rendered into the file the gateway reads its whole routing
+    # configuration from, so while a model is wired it reads no etcd and runs no
+    # Admin API: the etcd connection and the admin_key attachment are then
+    # refused, and a route whose connection is removed is gone from the next
+    # render. `apisix-chart` renders the routes; `apisix` renders none and halts
+    # on a connection here.
+    #
+    # The credential the gateway presents to a wired model is the one its
+    # connection carries in the credential slot, sent as a bearer token in the
+    # Authorization header; the configuration names the variable holding it
+    # through APISIX's environment reference, never the value, and it replaces
+    # any Authorization header the request carried. A connection carrying none
+    # adds no credential, and the request's own headers pass on as they came. A
+    # connection to a target labelled component.aggrega.ai/hosting: managed with
+    # no credential halts the build unless its values set unauthenticated: true.
+    # A self-hosted server that checks a key holds it in a slot of its own, and
+    # its connection carries a credential holding the same key.
+    #
+    # Optional: with nothing wired, the gateway serves no model and its rendered
+    # output is the same as a gateway without this socket.
+    models:
+      selector: "component.aggrega.ai/category=ai-model"
+      valueSchema:
+        unauthenticated:
+          type: boolean
+          default: false
+          description: Declares that the model this connection reaches takes no credential, so a connection carrying none is intended rather than an omission. It changes nothing this component renders.
+      featuresSchema:
+        credential:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [env]
+          description: "Optional credential the gateway presents to the model this connection reaches, as a bearer token. When attached, the Recipe delivers it as AI_PROXY_<ALIAS>_API_KEY, the connection's alias in capitals with every character other than a letter or a digit as an underscore, by a Kubernetes secretKeyRef, composes the bearer token AI_PROXY_<ALIAS>_AUTHORIZATION from it, and the connection's routes read that token through APISIX's $env:// reference, naming the variable rather than the value. Unattached, the route adds no credential."
+    # The store the gateway's semantic cache keeps its replies in, each beside
+    # the vector of the prompt it answered, and searches by similarity when a
+    # prompt arrives; the store removes a reply once its lifetime has passed.
+    # APISIX's ai-cache drives the store through the Redis query engine's
+    # vector search, which a store states it serves by publishing
+    # vector_search, as core/datastore/redis does from release 8.0.0 on. The
+    # selector admits the key-value stores, and `apisix-chart` halts the build
+    # when the store wired here publishes no vector_search, because a cache
+    # whose store lacks that search caches nothing while every request still
+    # succeeds. The store's published host and port are written
+    # into the cache's configuration in the routes file as pointers the
+    # compiler never resolves. A store publishing valkey-tls or redis-tls is
+    # reached over TLS, its certificate chain checked against the authorities
+    # the gateway trusts for every connection, its system's by default, so
+    # this socket offers no server_ca; another value served over TLS halts the
+    # build, naming the store. Optional: wired alone it changes nothing the
+    # gateway renders, since the cache is on only while core/semantic-caching
+    # is attached, and that attachment halts the build unless this socket is
+    # wired. The cache keeps replies apart by route and by the caller that
+    # presented its key, not by gateway: its exact matches are keyed by the
+    # route, the caller's name and the request, and its vector index is named
+    # for the gateway's instance and the attachment, so two APISIX gateways
+    # wired to one store, or two Releases of one Aggregate pointing their
+    # gateway at one external store, can serve a cached reply to a caller of
+    # the same name on the same alias and model.
+    #
+    # The password the cache presents to the store is the connection's own, in
+    # its credential slot, for a store that requires one: core/datastore/redis
+    # does once a credential is attached to its own password slot, and a
+    # credential holding the same password is attached here, both reading one
+    # parameter. With none, the cache presents no password, because presenting
+    # one to a store that requires none fails the connection.
+    cache_store:
+      selector: "datastore.aggrega.ai/engine=kv"
+      valueSchema:
+        unauthenticated:
+          type: boolean
+          default: false
+          description: Declares that the store this connection reaches takes no password, so a connection carrying none is intended rather than an omission. It changes nothing this component renders.
+      featuresSchema:
+        credential:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [env]
+          description: "Optional password the gateway's semantic cache presents to the store this connection reaches. When attached while core/semantic-caching is attached, the Recipe delivers it as CACHE_STORE_PASSWORD by a Kubernetes secretKeyRef, and the cache reads it through APISIX's $env:// reference, naming the variable rather than the value; attach a credential holding the password the store itself requires, which must publish the name of a Secret and the data key holding it there. Unattached, the cache connects without a password, which suits a store with none."
+
+  featuresSchema:
+    # The Admin API key is a credential, so it reaches the gateway only as a
+    # reference to the Secret holding it: each Recipe names an environment
+    # variable where the gateway's configuration takes the key, and delivers that
+    # variable from the Secret, so none of the gateway's own rendered resources
+    # carries the key. Required while nothing is wired to the models socket, with
+    # no default: a gateway left to a default key runs on one every reader of the
+    # catalog holds. While a model is wired the gateway runs no Admin API, so an
+    # attachment here is refused. Both halves are the assertion
+    # store_and_admin_key_follow_the_models_socket below. The selector is
+    # secret-kind-pinned but family-agnostic; both Recipes read the key from a
+    # Secret, so the fill must publish that Secret's name and data key.
+    admin_key:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      description: "The key authenticating the gateway's Admin API, which a caller presents in the X-API-KEY header. The attached credential must publish the name of a Secret and the data key holding the key there; each Recipe delivers the key from that Secret to the gateway as an environment variable, and a credential publishing no such locator halts the build. Required while nothing is wired to the models socket, with no default: with no credential attached then, the build halts. While a model is wired the gateway runs no Admin API, and an attachment here halts the build. The key must not be empty, which stops the gateway at start-up, and must not be a value APISIX reads as a number or as true or false, such as an all-digit key, because APISIX then never matches it against the key a request presents."
+    # The keys the callers infra.callers declares present to the gateway. They
+    # are credentials, so they reach the gateway only by reference to the one
+    # Secret this slot names: `apisix-chart` delivers each caller's key from
+    # that Secret as an environment variable, under the caller's own name as
+    # the data key, and the routes file names the variable through APISIX's
+    # $env:// reference, so no rendered resource of the gateway's carries a
+    # key. Attached exactly when infra.callers declares a caller, which the
+    # assertion callers_are_declared_with_their_keys below holds. The selector
+    # is secret-kind-pinned but family-agnostic; the Recipe reads the Secret's
+    # name the fill publishes, so core/referenced-secret-set fills it.
+    caller_keys:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      description: "The Secret holding the key each caller infra.callers declares presents to the gateway, one data key per caller, the data key being the caller's name. The attached credential must publish the Secret's name, as core/referenced-secret-set does, and a credential publishing none halts the build. The chart Recipe delivers each key as CALLER_<NAME>_KEY, the caller's name in capitals with every character other than a letter or a digit as an underscore, by a Kubernetes secretKeyRef, and composes CALLER_<NAME>_AUTHORIZATION, the whole Authorization header a caller presents, from it; the caller's consumer in the routes file reads that header through APISIX's $env:// reference. Required while infra.callers declares a caller, and refused while it declares none. A caller with no data key of its name in the Secret leaves the gateway unable to start, since Kubernetes starts no container whose secretKeyRef names a missing key; that is caught at start, not by the build."
+
+  schema:
+    # Its configuration store arrives on the `etcd` uses-edge, its Admin API key
+    # through the `admin_key` slot and the models it serves on the models
+    # socket, so the one developer value is the alias it publishes as its model.
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      #
+      # The alias this gateway publishes as its model. A component wired to the
+      # gateway's address over a model socket — an agent, a tool, a memory store
+      # — reads one endpoint and one model name off the edge, the same keys a
+      # model publishes; the endpoint is this alias's route and the model name
+      # is the alias. A Recipe writes the gateway's published values from what
+      # the gateway itself was given, which holds none of its connections, so
+      # the published alias is named here rather than taken from the socket:
+      # with a connection on the models socket this value is required, and with
+      # none it is omitted.
+      model:
+        type: string
+        description: The alias of a connection on the models socket that this gateway publishes as its model, and whose route its published endpoint addresses. It must be an alias a models connection carries, and the build halts naming this value otherwise; it is required while the models socket holds a connection, and omitted while it holds none.
+      # The gateway's own metrics, in the Prometheus format, from APISIX's
+      # prometheus plugin, which its default plugin list carries. Both
+      # realizations serve them on the plugin's export server, on port 9091 at
+      # /apisix/prometheus/metrics: `apisix` moves that server from the loopback
+      # address, its default, to every interface and puts the port on its
+      # Service; `apisix-chart` sets the chart's own switch, which does the same
+      # and renders a Service of its own for the port. The export server serves
+      # those metrics and nothing else outside the loopback address. Per-route
+      # request metrics appear for the routes that enable the plugin, which no
+      # route this catalog renders does; the gateway's connection, etcd and
+      # shared-memory metrics need none.
+      metrics_enabled:
+        type: boolean
+        default: false
+        description: Turns on the gateway's own metrics, in the Prometheus format, and publishes their address as `metrics_endpoint`; while false that key is empty. The port they are served on checks no caller, so anything that reaches it can read them.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      http_port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 9080
+        description: Proxy data-plane port consumers connect to.
+      admin_port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 9180
+        description: Admin API port, reachable in-cluster only. Read only while nothing is wired to the models socket; with a model wired the gateway runs no Admin API.
+      # A Release may name its callers here, their keys through the caller_keys
+      # slot; every route then refuses a request presenting no declared key as
+      # `Authorization: Bearer <key>`, as an OpenAI client does.
+      #
+      # The callers the gateway authenticates, by name. Each becomes a consumer
+      # in the routes file, keyed by the key the caller_keys Secret holds under
+      # its name, and every model route then refuses a request presenting no
+      # declared key, so a semantic cache can keep each caller's replies apart
+      # and a period budget can count each caller apart. Only the routes file
+      # declares consumers, so callers need a model wired and `apisix-chart`;
+      # with none declared the routes are open, as they are without this key.
+      callers:
+        type: array
+        min: 1
+        items:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{1,253}$"
+        description: The callers the gateway serves models to, by name, each presenting its own key in the Authorization header as `Bearer <key>`, which is how an OpenAI client presents one. Every model route then refuses a request presenting no declared key with HTTP 401, removes the key from the request it forwards, and sends the caller's name to the model in an X-Consumer-Username header. A name takes letters, digits, hyphens and underscores, and is also the data key holding that caller's key in the Secret the caller_keys slot names. Read by `apisix-chart` while a model is wired; with nothing wired, or with `apisix`, the build halts on it. Omit it for open routes.
+      engine_version:
+        type: string
+        default: "3.17.0-debian"
+        description: Apache APISIX container image tag. Selects the image tag on container targets; the chart-backed realization pins its own image tag.
+      source_version:
+        type: string
+        description: Version of the Helm chart the chart-backed realization pulls. Read only by that realization; the workload-synthesis realization pulls no source artifact and ignores it. Changing it away from the Recipe's default does not guarantee value-mapping compatibility with the new chart.
+      compute:
+        cpu:
+          type: string
+          default: 250m
+        memory:
+          type: string
+          default: 512Mi
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name of the Service fronting the proxy data plane. A
+          consumer sends its client traffic here rather than to the service
+          behind the gateway.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port that Service accepts proxied traffic on. It carries the
+          data-plane port an operator set, never the Admin API port, which
+          stays in-cluster.
+      protocol:
+        type: string
+        description: How the published address is spoken to — `http`, so a consumer composes an address on that scheme.
+      # endpoint and model together are the contract every model component
+      # publishes, which is what lets a model socket take this gateway in place
+      # of a model with its consumer's Recipe unchanged. Neither is required:
+      # with nothing wired to the models socket the gateway serves no model and
+      # publishes both empty, as does `apisix`, which serves none.
+      endpoint:
+        type: string
+        description: >
+          Full base URL of the OpenAI-compatible API the gateway serves for the
+          model values.model names, with the host, the port and that alias's
+          route already composed. A caller hands it to a client library as its
+          base URL. Every other wired model is served at the same host and port
+          under its own alias in the path. Empty while nothing is wired to the
+          models socket.
+      model:
+        type: string
+        description: >
+          The alias a consumer wired to the gateway sends as its model name:
+          values.model. The route behind the endpoint asks for the model it was
+          written for whatever name a request carries. Empty while nothing is
+          wired to the models socket.
+      # The address a Prometheus server scrapes the gateway's own metrics at,
+      # while values.metrics_enabled is true: /apisix/prometheus/metrics on port
+      # 9091, on the Service each realization renders for that port. Every
+      # Recipe publishes it spelled out in full, because a provides entry cannot
+      # read another.
+      metrics_endpoint:
+        type: string
+        description: >
+          The full address Prometheus scrapes this component's metrics at —
+          scheme, host, port and path,
+          `http://<host>:9091/apisix/prometheus/metrics`. Empty while
+          values.metrics_enabled is false.
+
+  # Which configuration the gateway reads, and the rules of the models socket,
+  # with the credential rule every socket declaring unauthenticated carries.
+  # Each reads what the Aggregate and the Release wrote — the values, the
+  # attachments, and each connection's target labels, values and attachments —
+  # all known before a Recipe binds, so each holds whichever Recipe renders this
+  # component and halts before anything renders.
+  assertions:
+    # A gateway serving a model reads its routes from a file and nothing else,
+    # with no Admin API, and one serving none keeps its routes in etcd behind
+    # an Admin API. So with nothing on the models socket the etcd connection
+    # and the admin_key attachment are both required, and with a model wired
+    # both are refused: neither would be read, and a build carrying a store and
+    # a key nothing uses says otherwise.
+    store_and_admin_key_follow_the_models_socket: >-
+      {{- $models := sortAlpha (keys (optional .uses "models" dict)) -}}
+      {{- $hasStore := gt (len (optional .uses "etcd" dict)) 0 -}}
+      {{- $hasKey := hasKey (optional . "features" dict) "admin_key" -}}
+      {{- if $models -}}
+      {{- $unread := list -}}
+      {{- if $hasStore -}}{{- $unread = append $unread "a connection on its etcd socket" -}}{{- end -}}
+      {{- if $hasKey -}}{{- $unread = append $unread "an attachment on its admin_key slot" -}}{{- end -}}
+      {{- if $unread -}}
+      {{- fail (printf "%q serves %s from its models socket, so it reads its routes from a file rendered with it, reads no etcd store and runs no Admin API, but it carries %s, which it would not read; remove %s" .metadata.instance_id (join ", " $models) (join " and " $unread) (ternary "them" "it" (gt (len $unread) 1))) -}}
+      {{- end -}}
+      {{- else -}}
+      {{- $missing := list -}}
+      {{- if not $hasStore -}}{{- $missing = append $missing "wire the etcd store it keeps its routes in to its etcd socket" -}}{{- end -}}
+      {{- if not $hasKey -}}{{- $missing = append $missing "attach the credential its Admin API is authenticated by to its admin_key slot" -}}{{- end -}}
+      {{- if $missing -}}
+      {{- fail (printf "%q has nothing on its models socket, so it keeps its routes in an etcd store written through an Admin API: %s, or wire a model to its models socket" .metadata.instance_id (join ", and " $missing)) -}}
+      {{- end -}}
+      {{- end -}}
+    # The model the gateway publishes must be one it serves. values.model names
+    # the alias of a connection on the models socket, and is required while the
+    # socket holds one, because the published values are written from what the
+    # gateway was given and a connection is not among it. With nothing wired, a
+    # value naming an alias names a route the gateway does not serve.
+    published_model_is_a_wired_alias: >-
+      {{- $wired := sortAlpha (keys (optional .uses "models" dict)) -}}
+      {{- with optional .values "model" "" -}}
+      {{- if not (has . $wired) -}}
+      {{- if $wired -}}
+      {{- fail (printf "values.model is %q, but no connection on the models socket carries that alias, so a component wired to this gateway would be sent to a route it does not serve; set values.model to one of the aliases the models socket carries: %s" . (join ", " $wired)) -}}
+      {{- else -}}
+      {{- fail (printf "values.model is %q, but nothing is wired to the models socket, so the gateway serves no model to publish under that alias; wire a model to the models socket under that alias, or remove values.model" .) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- else -}}
+      {{- if $wired -}}
+      {{- fail (printf "values.model is not set, but the models socket carries %s, so the gateway cannot tell which of them a component wired to it asks for, and the alias a connection is served under is not among what its published values are written from; set values.model to one of them" (join ", " $wired)) -}}
+      {{- end -}}
+      {{- end -}}
+    # A wired model's route is written from the endpoint and the model name the
+    # model publishes, for the AI proxy to reach over the OpenAI API, which is
+    # what model.aggrega.ai/api: openai asserts answers at that endpoint. A
+    # model whose API is another needs the proxy's own settings for that
+    # provider, which nothing the model publishes names, so it halts rather
+    # than being written as a guess.
+    wired_model_speaks_the_openai_api: >-
+      {{- range $alias, $connection := (optional .uses "models" dict) -}}
+      {{- $api := optional $connection.labels "model.aggrega.ai/api" "" -}}
+      {{- if ne $api "openai" -}}
+      {{- fail (printf "the models connection %s of %q reaches %q, whose model.aggrega.ai/api is %q, but the gateway writes a wired model's route from the endpoint and model name it publishes for the OpenAI API alone, so it cannot write a route for it; wire a model whose model.aggrega.ai/api is openai instead" $alias $.metadata.instance_id $connection.target $api) -}}
+      {{- end -}}
+      {{- end -}}
+    # The callers infra.callers declares are consumers of the routes file, the
+    # only place a gateway serving models declares one, so they need a model
+    # wired. Each caller's key reaches the gateway from the Secret its
+    # caller_keys slot names, under two variables named after the caller in
+    # capitals with every character other than a letter or a digit as an
+    # underscore — so two callers that rule maps to one name, alice-a and
+    # alice_a, or one name written twice, would share one key — and the slot is
+    # attached exactly when a caller is declared, since a key Secret no caller
+    # reads, or callers with no Secret to read from, says otherwise.
+    callers_are_declared_with_their_keys: >-
+      {{- $callers := optional .infra "callers" list -}}
+      {{- $hasKeys := hasKey (optional . "features" dict) "caller_keys" -}}
+      {{- if $callers -}}
+      {{- if not (optional .uses "models" dict) -}}
+      {{- fail (printf "infra.callers of %q declares %s, but nothing is wired to its models socket, so it keeps its routes in an etcd store written through an Admin API and reads no routes file, which is the only place its callers are declared; wire a model to its models socket, or remove infra.callers" .metadata.instance_id (join ", " $callers)) -}}
+      {{- end -}}
+      {{- $seen := dict -}}
+      {{- range $caller := $callers -}}
+      {{- $variable := regexReplaceAll "[^A-Z0-9]" (upper $caller) "_" -}}
+      {{- with get $seen $variable -}}
+      {{- if eq . $caller -}}
+      {{- fail (printf "infra.callers of %q names %s more than once; name each caller once" $.metadata.instance_id $caller) -}}
+      {{- end -}}
+      {{- fail (printf "infra.callers of %q names %s and %s, which would each present their key under one variable, because the gateway names a caller's variables after the caller in capitals with every character other than a letter or a digit as an underscore; give each caller a name of its own" $.metadata.instance_id . $caller) -}}
+      {{- end -}}
+      {{- $_ := set $seen $variable $caller -}}
+      {{- end -}}
+      {{- if not $hasKeys -}}
+      {{- fail (printf "infra.callers of %q declares %s, but nothing is attached to its caller_keys slot, so the gateway has no Secret to read its callers' keys from; attach core/referenced-secret-set to caller_keys, with one data key per caller, named for the caller" .metadata.instance_id (join ", " $callers)) -}}
+      {{- end -}}
+      {{- else if $hasKeys -}}
+      {{- fail (printf "an attachment fills the caller_keys slot of %q, but infra.callers declares no caller, so the gateway would read no key from it; declare the callers in infra.callers, or remove the attachment" .metadata.instance_id) -}}
+      {{- end -}}
+    # The Recipe names the variables a models connection's credential is
+    # delivered under after the connection's alias in capitals, with every
+    # character other than a letter or a digit as an underscore, so two aliases
+    # that rule maps to one name — fast-a and fast_a — would deliver two
+    # credentials under one variable. It halts, naming both connections.
+    credential_variables_are_distinct: >-
+      {{- $seen := dict -}}
+      {{- range $alias, $connection := (optional .uses "models" dict) -}}
+      {{- if hasKey $connection.features "credential" -}}
+      {{- $variable := regexReplaceAll "[^A-Z0-9]" (upper $alias) "_" -}}
+      {{- with get $seen $variable -}}
+      {{- fail (printf "the models connections %s and %s of %q would each deliver their credential under one variable, because the gateway names a connection's variables after its alias in capitals with every character other than a letter or a digit as an underscore; rename one of the two connections" . $alias $.metadata.instance_id) -}}
+      {{- end -}}
+      {{- $_ := set $seen $variable $alias -}}
+      {{- end -}}
+      {{- end -}}
+    # A connection to a target its catalog labels a managed service
+    # (component.aggrega.ai/hosting: managed) carries a credential, or says on
+    # the connection that its target takes none. The rule reads the target's
+    # labels, the connection's unauthenticated value and its credential slot,
+    # all known before a Recipe binds, so it holds whichever Recipe renders this
+    # component; a self-hosted target draws nothing. The list names every
+    # socket of this component that declares unauthenticated.
+    managed_target_needs_a_credential: >-
+      {{- range $socket := list "models" "cache_store" -}}
+      {{- range $alias, $connection := (optional $.uses $socket dict) -}}
+      {{- $managed := eq (optional $connection.labels "component.aggrega.ai/hosting" "") "managed" -}}
+      {{- $optedOut := optional $connection.values "unauthenticated" false -}}
+      {{- if and $managed (not (hasKey $connection.features "credential")) (not $optedOut) -}}
+      {{- fail (printf "the %s connection %s of %q reaches %q, whose component.aggrega.ai/hosting label is managed, with no credential: attach one under credential on that connection, or set unauthenticated: true in its values" $socket $alias $.metadata.instance_id $connection.target) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- end -}}

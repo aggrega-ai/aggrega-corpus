@@ -1,0 +1,247 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/datastore/cognee
+  version: 1.0.0
+  # metadata.license records the licence of the wrapped product, which is a
+  # different field from the licence of this catalog file itself (the SPDX header
+  # above) and from the upstream-licensing class label below.
+  license: Apache-2.0
+  description: >
+    A semantic-memory store for agent deployments. It ingests text and documents
+    and turns them into a typed graph of entities and the relations between them,
+    kept alongside embeddings of the same material, so a consumer asks what
+    relates to what rather than only what looks similar. Construction is the
+    point: a model reads each ingested item, names the entities and relations it
+    finds, and the result is written into the graph, optionally grounded against
+    an ontology the deployment supplies so extracted names resolve onto terms the
+    deployment already uses. The graph, the embeddings and the bookkeeping tables
+    are held by this component itself, on its own persistent volume, which is why
+    it is a stateful server rather than a façade over someone else's store. The
+    model it reads with is wired in over the uses topology and its address is a
+    deterministic pointer string the running server resolves per request; the
+    compiler never contacts a model. Realized on Kubernetes via its Helm Recipe,
+    which runs the official upstream image directly and carries the whole memory
+    configuration — the graph engine, the embedding store, the extraction and
+    embedding models, and the ontology grounding — into the rendered artifact.
+    Exports its host, its port, its base URL and its protocol to consumers via
+    the uses topology.
+  labels:
+    component.aggrega.ai/type: stateful-server
+    component.aggrega.ai/category: datastore
+    # The engine dimension: this product's identity is the memory it builds. It
+    # extracts entities and relations and answers questions about how they
+    # connect, and no value supplied makes it something else — the
+    # same standing the operational primitive above has, which is why the value
+    # sits on this component rather than on a specialization. The value is
+    # asserted by what the Recipe renders: the graph engine, the extraction and
+    # embedding models and the ontology grounding are all in the rendered
+    # configuration, not merely in this component's schema. A general-purpose
+    # store that gains a similarity index from an extension is the opposite case
+    # and carries its value on a specialization instead.
+    datastore.aggrega.ai/engine: semantic-memory
+    # The Recipe runs the server as containers in the deployment's own cluster,
+    # so a single posture is this component's identity. Selector-only: never
+    # stamped onto rendered output.
+    component.aggrega.ai/hosting: self-hosted
+    component.aggrega.ai/upstream-licensing: osi-approved
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # Self-inject allowlist: the component may inject its own provides keys into
+  # the env delivery mechanism.
+  inject: [env]
+
+  usesSchema:
+    # Both sockets select a model component, or a gateway serving a model API
+    # in front of several — each carries model.aggrega.ai/api — and both are
+    # optional, because the server carries a working provider configuration of
+    # its own: with neither socket wired it still renders and starts,
+    # reaching the provider named in `values` at that provider's own address. A
+    # wired socket replaces that with the address and model name the wired
+    # component publishes, and the key with the credential its own connection
+    # carries, which is what lets extraction point at a model the same Release
+    # runs. Each address is a deterministic pointer string the running server
+    # resolves; the compiler never contacts a model.
+    #
+    # Wired to a gateway, the address is the gateway's and the model name is
+    # the one alias the gateway publishes. The provider family in `values`
+    # still selects the client the server constructs, so it names one that
+    # speaks the API the gateway's model.aggrega.ai/api value names.
+    #
+    # Each socket declares the two per-connection facts an agent's model
+    # socket declares: unauthenticated, a statement about the connection's
+    # target, authored on the connection, that the model it reaches takes no
+    # credential, which changes nothing this component renders; and the
+    # credential the server presents to that model. The credential is optional
+    # (a model that checks no key); transparent (inject: [env]) so a
+    # synthesized Workload may reference it as an env secret;
+    # secret-kind-pinned but family-agnostic.
+    #
+    # extraction_model reads the ingested material and names the entities and
+    # relations written into the graph; its unwired fallback is
+    # values.extraction_provider.
+    extraction_model:
+      selector: "component.aggrega.ai/category in (ai-model, gateway), model.aggrega.ai/api"
+      valueSchema:
+        unauthenticated:
+          type: boolean
+          default: false
+          description: Declares that the model this connection reaches takes no credential, so a connection carrying none is intended rather than an omission. It changes nothing this component renders.
+      featuresSchema:
+        credential:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [env]
+          description: "Optional credential the server presents to the model this connection reaches, the one it reads ingested material with. When attached, the Recipe delivers it as LLM_API_KEY (a Kubernetes secretKeyRef on helm), so its value never appears in the rendered manifest, and the component's model_api_key is not read for this side; unattached, no key is delivered for it."
+    # embedding_model encodes the same material, so it is retrievable by
+    # similarity alongside the graph; its unwired fallback is
+    # values.embedding_provider.
+    embedding_model:
+      selector: "component.aggrega.ai/category in (ai-model, gateway), model.aggrega.ai/api"
+      valueSchema:
+        unauthenticated:
+          type: boolean
+          default: false
+          description: Declares that the model this connection reaches takes no credential, so a connection carrying none is intended rather than an omission. It changes nothing this component renders.
+      featuresSchema:
+        credential:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [env]
+          description: "Optional credential the server presents to the model this connection reaches, the one it encodes ingested material with. When attached, the Recipe delivers it as EMBEDDING_API_KEY (a Kubernetes secretKeyRef on helm), so its value never appears in the rendered manifest, and the component's model_api_key is not read for this side; unattached, no key is delivered for it, and the server may then present the extraction side's key, where one is delivered, to this model instead."
+
+  featuresSchema:
+    # The key for a model socket left UNWIRED, and only for that. An unwired
+    # socket reaches the provider named in `values` at its own address, which
+    # no connection reaches, so its key cannot sit on a connection; a wired
+    # socket carries its key on its own connection, under credential, and
+    # never reads this slot. `required` omitted → optional, so a bare
+    # instance still loads, and with nothing attached the render is
+    # byte-identical to a Recipe carrying no slot at all. Transparent
+    # (inject: [env]) so the injected value reaches the Recipe on the env pipe;
+    # the selector is secret-kind-pinned but family-agnostic, so either a
+    # referenceable Secret (helm secretKeyRef) or an inject-value may fill it.
+    model_api_key:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      description: "Optional credential the server presents to a model provider it reaches without a connection. It serves only a model socket left unwired, where the server reaches the provider its values name at that provider's own address: for extraction it is delivered as LLM_API_KEY, for embedding as EMBEDDING_API_KEY, so with both unwired each side presents this key. A wired socket carries its key on its own connection, under credential, and never reads this slot. Delivered as an environment variable, so the plaintext never appears in the rendered manifest; unattached, no key is delivered for an unwired side."
+
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate. Every knob
+      # below reaches the rendered configuration, and each one that is unset
+      # emits nothing, so a bare deployment renders free of redundant settings
+      # and the server keeps its own built-in default.
+      extraction_provider:
+        type: string
+        default: openai
+        description: The provider family the server reads ingested material with. Consulted when the extraction_model socket is unwired; a wired socket supplies the address and model name instead.
+      embedding_provider:
+        type: string
+        default: openai
+        description: The provider family the server encodes ingested material with. Consulted when the embedding_model socket is unwired; a wired socket supplies the address and model name instead.
+      embedding_dimensions:
+        type: integer
+        min: 1
+        description: Width of the vectors the embedding model returns. Set it to match the model in use; omit it and the server takes the width its own default model returns.
+      ontology_file_path:
+        type: string
+        description: Path inside the container to an ontology document the deployment supplies, against which extracted names are resolved onto terms the deployment already uses. A deterministic pointer string the running server opens; the compiler never reads the file. Omit it and extraction proceeds ungrounded, naming entities as it finds them.
+      extraction_rate_limit_per_minute:
+        type: integer
+        min: 1
+        description: Largest number of model requests the server issues per minute while building the graph, which is what keeps a large ingestion inside a provider's own quota. Omit it and the server issues requests as fast as ingestion produces them.
+      access_control_enabled:
+        type: boolean
+        default: false
+        description: Keep each dataset's memory readable only by the users granted it, rather than serving one shared memory to every caller. Off by default, matching the server's own default.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 8000
+        description: HTTP listen port the API serves on. Most operators should omit this and let the Recipe assign the default (8000).
+      engine_version:
+        type: string
+        default: "1.5.3"
+        description: Server container image tag.
+      compute:
+        cpu:
+          type: string
+          default: 500m
+        memory:
+          type: string
+          default: 1Gi
+      storage:
+        type: object
+        properties:
+          size:
+            type: string
+            default: 10Gi
+            description: Persistent volume size holding the graph, the embeddings and the bookkeeping tables. Realized on the synthesized-Helm target.
+          type:
+            type: string
+            description: >
+              Persistent volume storage class holding the graph, the embeddings
+              and the bookkeeping tables. Realized on the synthesized-Helm
+              target. Leave it unset to take the cluster's default storage class;
+              set it to name another class the cluster offers.
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      # host and port are the pair an agent's memory socket reads; endpoint is
+      # the base URL a consumer composing a request reads instead.
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name of the Service fronting the memory API. A
+          consumer that composes its own address dials this name; one that
+          does not reads `endpoint` instead.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port that Service accepts API requests on. It follows the port
+          an operator set in the Release, so a consumer reads it rather than
+          assuming a default.
+      endpoint:
+        type: string
+        description: >
+          Full base URL of the memory API, with the host and the port already
+          composed. A consumer hands it to its client as the address it
+          ingests material through and asks its questions of.
+      protocol:
+        type: string
+        description: How the published address is spoken to — `http`, so a consumer reaches the API with an HTTP client.
+
+  # A connection to a target its catalog labels a managed service
+  # (component.aggrega.ai/hosting: managed) carries a credential, or says on the
+  # connection that its target takes none. The rule reads the target's labels,
+  # the connection's unauthenticated value and its credential slot, all known
+  # before a Recipe binds, so it holds whichever Recipe renders this component;
+  # a self-hosted target draws nothing. The list names every socket of this
+  # component that declares unauthenticated.
+  assertions:
+    managed_target_needs_a_credential: >-
+      {{- range $socket := list "extraction_model" "embedding_model" -}}
+      {{- range $alias, $connection := (optional $.uses $socket dict) -}}
+      {{- $managed := eq (optional $connection.labels "component.aggrega.ai/hosting" "") "managed" -}}
+      {{- $optedOut := optional $connection.values "unauthenticated" false -}}
+      {{- if and $managed (not (hasKey $connection.features "credential")) (not $optedOut) -}}
+      {{- fail (printf "the %s connection %s of %q reaches %q, whose component.aggrega.ai/hosting label is managed, with no credential: attach one under credential on that connection, or set unauthenticated: true in its values" $socket $alias $.metadata.instance_id $connection.target) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- end -}}

@@ -1,0 +1,331 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: loki
+  version: 1.0.0
+  license: AGPL-3.0
+  description: >
+    Grafana Loki log-aggregation server on Kubernetes via the official Grafana
+    Loki Helm chart (grafana/loki), driven in single-binary mode. Every Loki
+    subsystem runs inside one process backed by a filesystem object store, so
+    the chart renders one StatefulSet with a per-replica data volume, its
+    read/write/backend scaling paths held at zero replicas. The auxiliary
+    services the chart bundles by default — the ingress gateway, the chunk and
+    result caches, and the canary probe DaemonSet — are turned off so this Recipe
+    renders a single workload; those are separate services modelled on their own.
+    A memcached wired to the chunk_cache socket is exactly that case: the chart
+    keeps its own bundled cache off and the recipe points the chunk-cache client
+    at the wired memcached instead, with the batch size, parallelism, timeout and
+    entry lifetime taken from that edge's own values, over TLS to one
+    publishing memcached-tls. Unwired, the client stays off and every chunk is
+    read from the data volume.
+    The Loki server image and the config-reload sidecar image are pinned to
+    resolvable tags for reproducible renders. The developer's retention_period
+    flows into the in-process compactor, which deletes log streams once they age
+    past it. provides.host is the bare in-cluster Service name this Recipe pins
+    the chart's resource names to, with no namespace; a consumer in another
+    namespace qualifies it on its own side. provides.otlp_http_endpoint is that
+    Service's /otlp address, for OpenTelemetry logs, and
+    provides.metrics_endpoint its /metrics address, where the server serves its
+    own metrics in the Prometheus format. The packaged Loki server is AGPL-3.0.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/observability/loki:1.0.0
+
+  source:
+    kind: helm-oci-chart
+    url: oci://ghcr.io/grafana/helm-charts/loki
+    # Default chart version. Override via infra.source_version.
+    version: "{{ optional .infra `source_version` \"7.0.0\" }}"
+
+  # provides.host is the Service fronting the push and query API, with no
+  # namespace segment, so the Recipe is independent of where it is deployed.
+  # The valuesMapping below pins the chart's
+  # fullnameOverride to the rendered name, and the chart names that Service after
+  # the pin with no suffix, so it is named exactly "<rendered_name>".
+  # .context.rendered_name is the release name the helm provider gives the
+  # chart, spelled in the alphabet a Kubernetes name allows: an underscore or a
+  # capital in the component's name, and the separator joining an imported
+  # Aggregate's module to its component, are written out of it. The pin and this
+  # pillar read the same key, so the two agree. A same-namespace consumer reaches
+  # the Service under this name
+  # directly; a cross-namespace consumer qualifies it with the target namespace
+  # caller-side.
+  # protocol is "http" — the Loki push-and-query endpoint. The chart serves that
+  # endpoint on its fixed port 3100, so provides.port is that fixed value.
+  # otlp_http_endpoint is the base address an OpenTelemetry exporter sends logs
+  # to: the same Service and port at Loki's /otlp path, to which the exporter
+  # appends /v1/logs itself. Loki accepts the payload there because the schema
+  # below is v13 and the server's release allows structured metadata by
+  # default. metrics_endpoint is the address the server serves its own metrics
+  # at, in the Prometheus format: /metrics on the same Service and port, always
+  # on, with no credential configured for it. Both addresses are spelled out in
+  # full on purpose: a provides entry cannot read another.
+  provides:
+    host: "{{ .context.rendered_name }}"
+    port: "3100"
+    protocol: "http"
+    otlp_http_endpoint: "http://{{ .context.rendered_name }}:3100/otlp"
+    metrics_endpoint: "http://{{ .context.rendered_name }}:3100/metrics"
+
+  # The chunk-cache client the value mapping turns on speaks the memcached
+  # protocol to whatever is wired on chunk_cache, a socket whose selector admits
+  # any datastore. The check that the wired cache publishes memcached, or
+  # memcached-tls while it serves TLS alone, lives in the TargetProtocol
+  # library's Check bundle, imported under artifacts by every Recipe of this
+  # Component. These locals are what it reads — the socket, the protocols, why
+  # Loki needs them and a component publishing them — and it stops the build,
+  # naming the connection, on a cache publishing another protocol or none. It
+  # writes no file.
+  locals:
+    check_socket: chunk_cache
+    check_protocol: '["memcached", "memcached-tls"]'
+    check_reason: "Loki's chunk-cache client speaks the memcached protocol, which a cache publishes as the protocol memcached, or memcached-tls while it serves TLS alone"
+    check_example: core/datastore/memcached
+  artifacts:
+    target-protocol:
+      $import: TargetProtocol#/artifacts/Check
+
+  # This Recipe reads from infra.overrides:
+  #   loki_image    - map[string]string (loki.image.* fields; overrides the tag pin)
+  #   sidecar_image - map[string]string (sidecar.image.* fields; overrides the tag pin)
+  #   requests      - { cpu: string, memory: string } (resource requests on the single-binary pod)
+  #   storage_class - string (singleBinary.persistence.storageClass)
+  #   nodeSelector  - map[string]string (singleBinary.nodeSelector)
+  #   tolerations   - []object (singleBinary.tolerations)
+  valuesMapping: |
+    {{- /*
+      The chunk cache over TLS. A cache publishing memcached-tls accepts TLS
+      connections alone, so the chunk-cache client reaches it over TLS; the
+      TargetProtocol check above refuses any value but the two this client
+      speaks. A server_ca on the connection is the authority the client checks
+      the cache's certificate against; it is mounted, so its attachment must
+      name a Secret, and it is refused on a cache served without TLS, where no
+      handshake takes place to check a certificate in.
+    */ -}}
+    {{- $cacheTLS := false }}{{ $cacheCA := "" -}}
+    {{- range $alias, $edge := .context.uses }}{{ if eq $edge.socket "chunk_cache" -}}
+    {{- $edgeTLS := eq (toString (optional (default dict $edge.provides) "protocol" "")) "memcached-tls" -}}
+    {{- if $edgeTLS }}{{ $cacheTLS = true }}{{ end -}}
+    {{- if hasKey (default dict $edge.features) "server_ca" -}}
+    {{- $caProvides := optional (optional (default dict $edge.features) "server_ca" dict) "provides" dict -}}
+    {{- if not (and (kindIs "map" $caProvides) (optional $caProvides "name" "")) -}}
+    {{- fail (printf "the server_ca on the chunk_cache connection %s of %q publishes no Secret name, so no Secret could be mounted into the server: attach a server_ca publishing one, such as core/referenced-secret" $alias $.context.instance_id) -}}
+    {{- end -}}
+    {{- if not $edgeTLS -}}
+    {{- fail (printf "the chunk_cache connection %s of %q holds a server_ca, but the cache it reaches, %q, publishes protocol %s, served without TLS, so no TLS handshake takes place to check a certificate in: turn client_tls on for that cache, or remove the server_ca" $alias $.context.instance_id $edge.target (default "none" (toString (optional (default dict $edge.provides) "protocol" "")))) -}}
+    {{- end -}}
+    {{- $cacheCA = $caProvides.name -}}
+    {{- end -}}
+    {{- end }}{{ end -}}
+    ## ── Pin the chart's resource names to the rendered name ────
+    ## Names the Service fronting the push and query API exactly
+    ## "<rendered_name>", matching provides.host. Without this the chart derives
+    ## its resource names from the release name and appends its own name, so
+    ## the Service a consumer is handed would not be the one that renders.
+    fullnameOverride: "{{ .context.rendered_name }}"
+
+    ## ── Deployment mode ────────────────────────────────────────
+    ## SingleBinary runs every Loki target in one process. The read/write/
+    ## backend scaling paths are held at zero replicas so no distributed
+    ## workloads render.
+    deploymentMode: SingleBinary
+
+    ## ── Loki server configuration ──────────────────────────────
+    ## Single-tenant (auth off), replication factor 1, a TSDB schema over a
+    ## filesystem object store, and an in-process compactor that enforces the
+    ## developer's retention window.
+    loki:
+      auth_enabled: false
+      commonConfig:
+        replication_factor: 1
+      schemaConfig:
+        configs:
+          - from: "2024-04-01"
+            store: tsdb
+            object_store: filesystem
+            schema: v13
+            index:
+              prefix: index_
+              period: 24h
+      storage:
+        type: filesystem
+      limits_config:
+        retention_period: "{{ .values.retention_period }}"
+      compactor:
+        retention_enabled: true
+        delete_request_store: filesystem
+      ## Over TLS the chunk-cache client the chunksCache block below writes
+      ## connects with TLS on, which the chart's chunksCache values have no key
+      ## for, so it is merged into the client through the chart's
+      ## structuredConfig, which the chart lays over the configuration it
+      ## writes. The client checks the cache's certificate and the name dialed:
+      ## against the authority mounted below where the connection holds a
+      ## server_ca, and otherwise against the image's default trust store,
+      ## which a publicly trusted certificate chains to. Read from Loki's
+      ## chunk-cache client and the chart at the versions this Recipe pins.
+      {{- if $cacheTLS }}
+      structuredConfig:
+        chunk_store_config:
+          chunk_cache_config:
+            memcached_client:
+              tls_enabled: true
+              {{- if $cacheCA }}
+              tls_ca_path: /etc/loki/chunk-cache-server-ca/ca.crt
+              {{- end }}
+      {{- end }}
+      ## Loki server image pin. The chart ships a resolvable tag; pin explicitly
+      ## for a reproducible render. Override the whole block via
+      ## infra.overrides.loki_image.
+      {{- if and .infra.overrides .infra.overrides.loki_image }}
+      image:
+        {{- range $k, $v := .infra.overrides.loki_image }}
+        {{ $k }}: "{{ $v }}"
+        {{- end }}
+      {{- else }}
+      image:
+        registry: docker.io
+        repository: grafana/loki
+        tag: "3.6.7"
+      {{- end }}
+
+    ## ── Single-binary workload ─────────────────────────────────
+    ## One replica, a persistent data volume sized from infra.storage, and
+    ## resource limits from infra.compute (requests optional via
+    ## infra.overrides.requests).
+    singleBinary:
+      replicas: 1
+      persistence:
+        enabled: true
+        size: "{{ if .infra.storage }}{{ .infra.storage.size | default "10Gi" }}{{ else }}10Gi{{ end }}"
+        {{- if and .infra.overrides .infra.overrides.storage_class }}
+        storageClass: "{{ .infra.overrides.storage_class }}"
+        {{- end }}
+      resources:
+        limits:
+          cpu: "{{ .infra.compute.cpu }}"
+          memory: "{{ .infra.compute.memory }}"
+        {{- if and .infra.overrides .infra.overrides.requests }}
+        requests:
+          cpu: "{{ .infra.overrides.requests.cpu }}"
+          memory: "{{ .infra.overrides.requests.memory }}"
+        {{- end }}
+      {{- if .infra.overrides }}
+      {{- if .infra.overrides.nodeSelector }}
+      nodeSelector: {{ toJson .infra.overrides.nodeSelector }}
+      {{- end }}
+      {{- if .infra.overrides.tolerations }}
+      tolerations: {{ toJson .infra.overrides.tolerations }}
+      {{- end }}
+      {{- end }}
+      ## The chunk_cache connection's server_ca Secret, mounted whole and
+      ## read-only into the single binary as a volume this Recipe names, so the
+      ## chunk-cache client reads its ca.crt.
+      {{- with $cacheCA }}
+      extraVolumes:
+        - name: chunk-cache-server-ca
+          secret:
+            secretName: "{{ . }}"
+      extraVolumeMounts:
+        - name: chunk-cache-server-ca
+          mountPath: /etc/loki/chunk-cache-server-ca
+          readOnly: true
+      {{- end }}
+
+    ## ── Distributed scaling paths (off) ────────────────────────
+    ## Held at zero replicas so only the single binary runs.
+    write:
+      replicas: 0
+    read:
+      replicas: 0
+    backend:
+      replicas: 0
+
+    ## ── Chunk cache ────────────────────────────────────────────
+    ## A memcached wired to the chunk_cache socket holds decompressed chunks
+    ## between queries, so a query touching a chunk an earlier query already read
+    ## does not fetch and decompress it again. The socket carries one connection:
+    ## the chart configures a single chunk-cache client. Wired, this block turns
+    ## that client on and points it at the memcached the edge resolved to — the
+    ## chart's documented path for a cache it does not deploy itself, which is
+    ## why the chart's own bundled memcached is turned off alongside it rather
+    ## than left at its default. The address is composed from the edge's resolved
+    ## host and port; the four client settings come from that edge's own values,
+    ## so one memcached serving two log servers is driven differently by each.
+    ## Unwired, the client stays off and every chunk is read from the server's own
+    ## store, which is the single-node shape this Recipe ships by default.
+    {{- $chunk_cache := dict }}
+    {{- range $alias, $edge := .context.uses }}
+      {{- if eq $edge.socket "chunk_cache" }}
+        {{- $chunk_cache = $edge }}
+      {{- end }}
+    {{- end }}
+    {{- if $chunk_cache }}
+    memcached:
+      enabled: false
+    chunksCache:
+      enabled: true
+      addresses: "{{ $chunk_cache.provides.host }}:{{ $chunk_cache.provides.port }}"
+      batchSize: {{ $chunk_cache.values.batch_size }}
+      parallelism: {{ $chunk_cache.values.parallelism }}
+      timeout: "{{ $chunk_cache.values.timeout }}"
+      defaultValidity: "{{ $chunk_cache.values.entry_lifetime }}"
+    {{- else }}
+    chunksCache:
+      enabled: false
+    {{- end }}
+
+    ## ── Auxiliary services and bundled subcharts (off) ─────────
+    ## The gateway, the result cache, the canary probe, and the test hook are
+    ## separate workloads modelled on their own; the bundled object-store,
+    ## self-monitoring, and rollout-operator subcharts are likewise separate
+    ## services. Every toggle is set explicitly — the chart gates each bundled
+    ## subchart on a condition value, and an unset condition falls back to on, so
+    ## disabling them explicitly is what keeps this Recipe's render a single workload.
+    gateway:
+      enabled: false
+    resultsCache:
+      enabled: false
+    lokiCanary:
+      enabled: false
+    test:
+      enabled: false
+    minio:
+      enabled: false
+    rollout_operator:
+      enabled: false
+    monitoring:
+      selfMonitoring:
+        enabled: false
+        grafanaAgent:
+          installOperator: false
+      dashboards:
+        enabled: false
+      rules:
+        enabled: false
+      serviceMonitor:
+        enabled: false
+      lokiCanary:
+        enabled: false
+
+    ## ── Config-reload sidecar image pin ────────────────────────
+    ## The sidecar container inside the Loki pod watches for config changes. Pin
+    ## its image explicitly; override via infra.overrides.sidecar_image.
+    sidecar:
+      {{- if and .infra.overrides .infra.overrides.sidecar_image }}
+      image:
+        {{- range $k, $v := .infra.overrides.sidecar_image }}
+        {{ $k }}: "{{ $v }}"
+        {{- end }}
+      {{- else }}
+      image:
+        registry: docker.io
+        repository: kiwigrid/k8s-sidecar
+        tag: "2.5.0"
+      {{- end }}

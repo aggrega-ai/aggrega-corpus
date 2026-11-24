@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: databricks
+  version: 1.0.0
+  description: >
+    A Databricks model serving endpoint as a reference realization: no compute runs in-cluster. helm emits an ExternalName Service mapping an in-cluster name onto the operator-supplied endpoint. No credential is delivered by this recipe: a consumer that needs one declares it as `credential` on the socket that reaches this endpoint and delivers it from its own container, because the environment-variable name belongs to the consumer.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/ai-model/databricks:1.0.0
+  # The endpoint is operator-supplied (infra.endpoint) and single-sourced
+  # into both provides and the workload below.
+  provides:
+    endpoint: "{{ .infra.endpoint }}"
+    model: "{{ .values.model }}"
+  assertions:
+    # Model serving is per-workspace, so the host belongs to the workspace and
+    # no address exists for the catalog to hold as a default: the Release
+    # names the workspace this model is served from.
+    endpoint_supplied: >-
+      {{- if not (optional .infra "endpoint" "") -}}
+      {{- fail "this realization reaches a model served from a Databricks workspace, and serving is per-workspace, so the Release supplies the address and the catalog holds no default: set infra.endpoint in the Release to the base URL of that workspace (https://<workspace>.cloud.databricks.com)" -}}
+      {{- end -}}
+  workload: |
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    form: reference
+    endpoint: "{{ .infra.endpoint }}"
+    port: 443

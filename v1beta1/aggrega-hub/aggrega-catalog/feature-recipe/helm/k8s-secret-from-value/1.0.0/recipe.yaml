@@ -1,0 +1,153 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: FeatureRecipe
+metadata:
+  name: k8s-secret-from-value
+  version: 1.0.0
+  description: >
+    Helm realization of core/secret-value that a consuming Recipe can read by
+    reference. It renders one Kubernetes Secret holding the value and
+    publishes the Secret's name and data key, so a Recipe reading the slot as
+    a secretKeyRef points at it, and it also delivers the value into the
+    component's inject pipe, as env-secret does, so a Recipe reading the pipe
+    receives it as a variable.
+
+    The value is written into the emitted Secret, and a Recipe reading the
+    pipe writes it into its own manifest as well, so the material sits in the
+    rendered output: for evaluation and local work, not for a production
+    credential. The Secret is emitted for every attachment, whether or not
+    its host reads it by reference. An origin holding a Docker Compose
+    variable reference of the form ${…} halts the build, since Kubernetes
+    substitutes none; set the real value through the Release instead.
+
+    Reach for this realization where a host reads the credential by
+    reference, or where one Manifest maps core/secret-value for hosts of both
+    kinds. Reach for env-secret where every host reads the inject pipe and no
+    Secret is wanted, and for core/referenced-secret where the Secret already
+    exists or a secret-store operator fetches the credential.
+  maintainers:
+    - name: "Massimiliano Ferrero"
+      email: "m.ferrero@cognitio.it"
+spec:
+  capability: helm
+  implements: core/secret-value:1.0.0
+
+  # The Secret's identity, published so a consumer references it (a Kubernetes
+  # secretKeyRef) without re-deriving the name; the emitted Secret below derives
+  # from these provides, so the name is authored once, here. core/secret-value
+  # declares no provides contract of its own, and publishing keys a Feature does
+  # not declare is allowed; name and key are the two a Workload reference reads.
+  # The name is {rendered_name}-{attachment_name}: the host part is
+  # .context.rendered_name, because a component's name may carry an underscore or
+  # a capital, which the rendered name writes out; the attachment name is folded
+  # from underscores to hyphens. A host whose provider reports no rendered name —
+  # a helm Recipe placing an artifact set alone, such as helm/function-knative —
+  # names its own resources from its identity, and so does this Secret there: the
+  # host part is read through optional, which falls back to .context.instance_id,
+  # because a direct read of .context.rendered_name on such a host halts the
+  # build. Wherever a rendered name is reported, the name is the same either way.
+  # The published name is a valid RFC-1123 label wherever the host part is a
+  # rendered name, and on the fallback only where the component's identity is
+  # one. The data key is values.key, the key the attachment also delivers the
+  # value under on the inject pipe. DELIBERATE NEAR-DUPLICATE of the `name`
+  # k8s-secret-from-parameter, k8s-external-secret and k8s-secret-set publish:
+  # each realization publishes its own, and no catalog kind holds a provides
+  # block for several entities to share; a change to one of the four is made to
+  # all four. The two random-password realizations compose their Secret's name
+  # the same way but deliberately not byte for byte, honouring values.name ahead
+  # of it; a change to how the host part is read is made in all six.
+  provides:
+    name: '{{ optional .context "rendered_name" .context.instance_id }}-{{ .attachment_name | replace "_" "-" }}'
+    key: "{{ .values.key }}"
+
+  # An origin carrying a Docker Compose variable reference, ${NAME}, halts the
+  # build. Docker Compose substitutes such a reference when the stack starts;
+  # Kubernetes substitutes no such reference, so the Secret and the inject pipe would carry
+  # the reference as literal text and the workload would run on it as its
+  # password. Only the ${…} shape is refused, and only where the braces hold a
+  # variable name, alone or followed by one of Compose's :-, -, :?, ?, :+ or +
+  # forms: a $ anywhere else is part of the value and is delivered as written,
+  # and so is a ${…} whose braces hold no variable name. The check is an
+  # assertion because a FeatureRecipe's assertions run once the attachment is
+  # bound and before that binding renders, and the halt writes no output. It
+  # reads the origin through the expression the injectMapping and the
+  # valuesMapping below read it through, from whichever pillar carries it. The
+  # three read it inline rather than from one locals entry, deliberately: a
+  # FeatureRecipe's assertions are handed the host component's locals, not this
+  # entity's, and a locals entry is stored with its surrounding whitespace
+  # trimmed, which would change a credential that carries any.
+  #
+  # The sentence is fixed and names no attachment. origin is declared sensitive,
+  # and this refusal fires on what the value holds, so the compiler withholds any
+  # text the template composes: a sentence filled in with the attachment's name
+  # would never be shown. What the reader sees is the host component and this
+  # rule's name, which the refusal carries, and this sentence as written.
+  #
+  # DELIBERATE NEAR-DUPLICATE of env-secret's assertion of the same name, byte
+  # for byte: an assertion is a plain string that takes no $import:, and no
+  # catalog kind holds an assertion for several entities to share. A change to
+  # one is made to both.
+  assertions:
+    origin_is_not_a_compose_variable_reference: >-
+      {{- $origin := optional .values "origin" (optional .infra "origin" "") -}}
+      {{- if regexMatch `\$\{[A-Za-z_][A-Za-z0-9_]*(:?[-?+][^}]*)?\}` $origin -}}
+      {{- fail "this core/secret-value attachment sets its origin to a Docker Compose variable reference of the form ${…}, which Docker Compose substitutes when the stack starts and Kubernetes never substitutes. Set the real value through the Release instead, as a parameter the Aggregate hoists into this origin or as infra.origin on this attachment in place of the origin the Aggregate writes, or attach core/referenced-secret naming a Secret that already exists in the namespace" -}}
+      {{- end -}}
+
+  # Delivery into the inject pipe, under the key the attachment names, exactly as
+  # env-secret delivers it: a host Recipe reading .context.inject.env receives
+  # the value as a container variable, or maps it onto a chart's auth values. A
+  # host that references the slot renders a secretKeyRef from the provides above,
+  # and the value waiting on its pipe reaches its manifest only where that host
+  # also reads the pipe under this key. The value is written through
+  # toJson, as a JSON string, which the mapping's YAML reads back exactly: a quote
+  # or a backslash in the value is delivered as authored rather than breaking the
+  # mapping. DELIBERATE NEAR-DUPLICATE of env-secret's injectMapping: the two
+  # realizations deliver the pipe identically, and an injectMapping is a plain
+  # string that takes no $import:, so no MappingLibrary entry can supply it to
+  # both; a change to one is made to both.
+  #
+  # origin is read from whichever pillar carries it — values where the developer
+  # wrote it, infra where the operator did; the Feature halts the build when both
+  # or neither do. DELIBERATE NEAR-DUPLICATE: each realization of a credential
+  # Feature that reads the locator repeats this one expression, because it sits
+  # inside a template the realization owns, and no catalog kind holds a single
+  # template expression for several entities to share. values is read only
+  # through optional, and that is load-bearing: a template that also read
+  # .values.origin as a path would find the key present and empty, and never
+  # fall through to infra.
+  injectMapping: |
+    env:
+      {{ .values.key }}: {{ optional .values "origin" (optional .infra "origin" "") | toJson }}
+
+  # Resource Generation via a co-located Helm chart: the chart renders one
+  # Kubernetes Secret whose name and data key are fed from the published provides
+  # — so the rendered Secret and the consumer's .features.<slot>.provides are one
+  # authored source — with the origin as its value. The chart is the one
+  # k8s-secret-from-parameter renders, copied beside this entity because each
+  # entity is published with its own files. The chart is also passed the scope's
+  # namespace, when the scope declares one, so the Secret lands beside the
+  # workload that references it rather than wherever the applying tool defaults
+  # to — a reference does not resolve a Secret in another namespace. Empty when
+  # no scope declares one, and the chart then omits the field, matching a
+  # synthesized workload, which also emits no namespace and is placed by the
+  # applying tool.
+  #
+  # DELIBERATE NEAR-DUPLICATE: the valuesMapping below is k8s-secret-from-parameter's,
+  # byte for byte. A MappingLibrary entry could hold it, but it feeds the chart this
+  # entity carries as a copy anyway, and two users stay below the three at which
+  # the conventions make a shared mapping a library candidate; a change to one is
+  # made to both.
+  source: ./chart
+  valuesMapping: |
+    secretName: "{{ .provides.name }}"
+    dataKey: "{{ .provides.key }}"
+    origin: {{ optional .values "origin" (optional .infra "origin" "") | toJson }}
+    {{- $ns := "" }}
+    {{- if .context.annotations }}
+      {{- $raw := optional (optional (default dict .context.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict .context.annotations) "aggregate" dict) "aggrega.ai/namespace" "") }}
+      {{- if $raw }}{{- $ns = $raw }}{{- end }}
+    {{- end }}
+    namespace: "{{ $ns }}"

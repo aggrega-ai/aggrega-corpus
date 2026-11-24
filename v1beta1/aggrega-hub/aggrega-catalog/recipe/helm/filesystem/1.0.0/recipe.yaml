@@ -1,0 +1,324 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: filesystem
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    The file-tree tool realized on Kubernetes by the helm provider's Workload
+    synthesis, rendered offline as plain manifests. The Workload becomes a
+    StatefulSet whose tree lives on a per-instance persistent volume, mounted
+    where the Release's image reads and writes it, with a ClusterIP Service
+    fronting the port the tool listens on and a headless Service carrying the
+    instance's stable network identity. It runs one instance, a condition of
+    the tool being correct rather than a starting size: two instances behind
+    one address would each hold their own copy of the tree, so a file written
+    through one would be missing from the other. The count is pinned here for
+    that reason and is not exposed as an operational knob. A read-only access
+    mode reaches the mount as well as the
+    tool, so a tree the Aggregate declared read-only cannot be written even by
+    an image that would try. The developer's access mode, declared effect and
+    timeout reach the running tool as environment variables, together with the
+    directory the tree is mounted at. The image is the Release's, because
+    this tool packages no upstream product: a build with none set halts and
+    names the key. An edge from the tool, on a socket the author names,
+    delivers the names its `inject:` block dictates, as variables or as files
+    from a ConfigMap emitted beside the StatefulSet, never inside the tree.
+    provides is the synthesized ClusterIP Service, so a consumer
+    wires to a host, port, endpoint and protocol and never to the file tree
+    behind them.
+    The component's own `inject:` block delivers its entries as a connection's
+    are, and one reading a value of the tool alone replaces that value's default
+    name.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/ai-tool/filesystem:1.0.0
+  # provides.host is the bare Service name "<rendered_name>-default" — the helm
+  # provider names the synthesized ClusterIP Service
+  # "<rendered_name>-<service-key>", and this workload's client-facing service
+  # key is "default". It carries no namespace segment, so the recipe is
+  # independent of where it is deployed and a consumer in another namespace
+  # qualifies it on its own side (caller-side routing). The port is the one the
+  # tool listens on, because a caller reaches this Service directly rather than
+  # through a routing layer.
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ .infra.port }}"
+    endpoint: "http://{{ .context.rendered_name }}-default:{{ .infra.port }}"
+    protocol: "http"
+  assertions:
+    # This component wraps no upstream product, so it holds no default image to
+    # fall back to: the Release names the one it runs.
+    image_supplied: >-
+      {{- if not (optional .infra "image" "") -}}
+      {{- fail "this realization runs an image the Release supplies, because the tool component packages no upstream product and therefore holds no default: set infra.image to the container image serving the file tree in the Release" -}}
+      {{- end -}}
+    compute_group_complete: >-
+      {{- if not (optional (default dict .infra.compute) "cpu" "") -}}
+      {{- fail "this Release sets part of infra.compute on the tool but leaves compute.cpu empty, so the rendered StatefulSet would carry no CPU request or limit: set both compute.cpu and compute.memory together, or remove the compute block entirely to take the component's defaults" -}}
+      {{- end -}}
+      {{- if not (optional (default dict .infra.compute) "memory" "") -}}
+      {{- fail "this Release sets part of infra.compute on the tool but leaves compute.memory empty, so the rendered StatefulSet would carry no memory request or limit: set both compute.cpu and compute.memory together, or remove the compute block entirely to take the component's defaults" -}}
+      {{- end -}}
+  # This Recipe reads no infra.overrides keys, and the component declares no
+  # such block: a synthesized Workload offers no free-form annotation surface
+  # for one to land in, so a bag declared here would be read by nothing.
+  #
+  # The tool's own values are delivered to the container as environment
+  # variables. The image is the Release's, so no upstream documentation names a
+  # spelling for them; the recipe delivers each under a stable default name for
+  # the application's own code to read, and the developer's access mode, effect
+  # and timeout reach the running tool through these names by default. The mount
+  # directory is delivered under the same scheme and is single-sourced with the
+  # volumeMount below, so the path the tool serves and the path the volume is
+  # mounted at cannot drift apart. The optional description override is emitted
+  # only when the developer set it, so an unset value renders no variable rather
+  # than an empty one.
+  #
+  # The image is the tool's own code, and the component declares no socket, so
+  # this recipe derives no variable from a connection: an edge from the tool,
+  # on whatever socket the author names, delivers exactly what its inject block
+  # dictates — any key the target publishes, under the names that code reads —
+  # and an edge writing none delivers nothing. A dictated env entry becomes a
+  # container variable under the name it gives, read off the inject pipe as a
+  # map; a dictated file entry a read-only file at the absolute path it names,
+  # held in one ConfigMap and mounted by subPath, so a path that is not
+  # absolute, or one lying beneath another file's path, is refused, and so is
+  # one at, beneath or above the directory the file tree is mounted at, which
+  # is the tree's alone. An arg entry is refused, because this recipe renders
+  # no command line: Kubernetes takes a container's arguments in place of the
+  # image's default command, which is the Release's. Any other mechanism is
+  # refused too. A dictated variable named like one this recipe delivers
+  # itself halts the build, naming both, since the compiler cannot see the
+  # names a recipe writes.
+  #
+  # The component's own inject block. The developer may also write an inject
+  # block on the component itself, and its env and file entries reach the
+  # container as a connection's do: each env entry under the name it gives,
+  # read off the inject pipe, and each file at the absolute path it names, from
+  # the same ConfigMap and checked as a connection's file is. The names this
+  # recipe gives the tool's own values are defaults: each is rendered, and kept
+  # from a connection, only while no entry of that block, in either mechanism,
+  # delivers its value. The templates read that at .context.self_inject, which
+  # maps each name the developer wrote to values.<key> for an entry whose
+  # template reads that one own value. A refusal about one of that block's
+  # entries names the block rather than a connection.
+  #
+  # DELIBERATE NEAR-DUPLICATE of the reading of .context.self_inject every
+  # Recipe in this catalog that reads .context.self_inject declares: the same
+  # lines, save the own values each looks up and the mechanisms it reads. A
+  # Recipe of a tool or of an agent reads env and file entries, and reads the
+  # file entries a second time for the files it emits; a Recipe of
+  # core/compute/function, task or worker reads env entries alone; a Recipe of
+  # core/compute/server that refuses a variable by name reads the names of the
+  # env entries alone; and a realization of core/ai-tool/mcp that delivers none
+  # of the block reads it only to refuse each of its entries. The connections
+  # and that block only record who dictates each name and each file, and each
+  # refusal runs once over both, naming the one that dictated it. It is part of
+  # an artifact or a workload template, and no catalog kind holds part of one
+  # for several Recipes to share; a change to it is made to all of them.
+  #
+  # filesystem-files.configmap.yaml holds the file entries the connections and
+  # the component's own inject block dictate, keyed file-0, file-1 and so on in
+  # path order, the keys the workload's mounts read. It is emitted only while
+  # either one dictates a file, so a build with none renders nothing there. The
+  # pod mounts it by name, which resolves only in the pod's own namespace, so it
+  # carries the namespace the Release, or else the Aggregate, declares for the
+  # component through the aggrega.ai/namespace annotation, and none where it
+  # declares none. The block reading the connections' inject directives is the
+  # one every helm Workload realization of a tool in this catalog declares,
+  # differing only in the names each delivers itself and the refusals its own
+  # container calls for; a change to it is made to all.
+  artifacts:
+    filesystem-files.configmap.yaml: |
+      {{- $pipeFiles := optional (default dict .context.inject) "file" dict }}
+      {{- $files := dict }}
+      {{- range $alias, $edge := .context.uses }}
+      {{- range $path, $from := (optional (default dict $edge.inject) "file" dict) }}
+      {{- $_ := set $files $path (optional $pipeFiles $path "") }}
+      {{- end }}
+      {{- end }}
+      {{- range $mechanism, $names := default dict .context.self_inject }}
+      {{- if eq $mechanism "file" }}{{ range $path, $key := $names }}{{ $_ := set $files $path (optional $pipeFiles $path "") }}{{ end }}{{ end }}
+      {{- end }}
+      {{- if $files -}}
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: {{ .context.rendered_name }}-files
+        {{- with optional (optional (default dict .context.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict .context.annotations) "aggregate" dict) "aggrega.ai/namespace" "") }}
+        namespace: "{{ . }}"
+        {{- end }}
+      data:
+        {{- $i := 0 }}
+        {{- range $path, $v := $files }}
+        file-{{ $i }}: {{ toJson (toString $v) }}
+        {{- $i = add $i 1 }}
+        {{- end }}
+      {{- end }}
+  workload: |
+    {{- $env := optional (default dict .context.inject) "env" dict -}}
+    {{- $named := dict -}}
+    {{- $ownEnv := dict -}}
+    {{- $ownFile := dict -}}
+    {{- range $mechanism, $names := default dict .context.self_inject -}}
+    {{- range $name, $key := $names -}}
+    {{- if $key }}{{ $_ := set $named (toString $key) true }}{{ end -}}
+    {{- if eq $mechanism "env" }}{{ $_ := set $ownEnv $name true }}{{ end -}}
+    {{- if eq $mechanism "file" }}{{ $_ := set $ownFile $name true }}{{ end -}}
+    {{- end -}}
+    {{- end -}}
+    {{- $taken := dict -}}
+    {{- if not (hasKey $named "values.access_mode") }}{{ $_ := set $taken "FILESYSTEM_TOOL_ACCESS_MODE" "the component's own value access_mode" }}{{ end -}}
+    {{- $_ := set $taken "FILESYSTEM_TOOL_ROOT" "the component's own infra.mount_path" -}}
+    {{- if not (hasKey $named "values.side_effects") }}{{ $_ := set $taken "FILESYSTEM_TOOL_SIDE_EFFECTS" "the component's own value side_effects" }}{{ end -}}
+    {{- if not (hasKey $named "values.timeout_seconds") }}{{ $_ := set $taken "FILESYSTEM_TOOL_TIMEOUT_SECONDS" "the component's own value timeout_seconds" }}{{ end -}}
+    {{- $_ := set $taken "FILESYSTEM_TOOL_PORT" "the component's own infra.port" -}}
+    {{- if .values.llm_description_override -}}
+    {{- if not (hasKey $named "values.llm_description_override") }}{{ $_ := set $taken "FILESYSTEM_TOOL_DESCRIPTION" "the component's own value llm_description_override" }}{{ end -}}
+    {{- end -}}
+    {{- $tree := trimSuffix "/" (toString .infra.mount_path) -}}
+    {{- $files := dict -}}
+    {{- $dictated := dict -}}
+    {{- range $alias, $edge := .context.uses -}}
+    {{- range $mechanism, $entries := (default dict $edge.inject) -}}
+    {{- range $name, $from := $entries -}}
+    {{- if eq $mechanism "env" -}}
+    {{- $_ := set $dictated $name (printf "the %s connection %s of %q" $edge.socket $alias $.context.instance_id) -}}
+    {{- else if eq $mechanism "file" -}}
+    {{- $_ := set $files $name (printf "the %s connection %s of %q" $edge.socket $alias $.context.instance_id) -}}
+    {{- else if eq $mechanism "arg" -}}
+    {{- fail (printf "the %s connection %s of %q dictates the command-line argument %q, and this realization renders no command line: Kubernetes takes a container's arguments in place of the image's default command, and that command is the Release's. Dictate the value as an env or a file entry in that inject block instead" $edge.socket $alias $.context.instance_id $name) -}}
+    {{- else -}}
+    {{- fail (printf "the %s connection %s of %q dictates %q under the delivery mechanism %q, and this realization delivers env and file entries only: dictate the value as an env or a file entry in that inject block instead" $edge.socket $alias $.context.instance_id $name $mechanism) -}}
+    {{- end -}}
+    {{- end -}}
+    {{- end -}}
+    {{- end -}}
+    {{- range $name, $v := $ownEnv }}{{ $_ := set $dictated $name (printf "the own inject block of %q" $.context.instance_id) }}{{ end -}}
+    {{- range $name, $v := $ownFile }}{{ $_ := set $files $name (printf "the own inject block of %q" $.context.instance_id) }}{{ end -}}
+    {{- range $name, $by := $dictated -}}
+    {{- with optional $taken $name "" -}}
+    {{- fail (printf "%s dictates the variable %s, which this realization already delivers from %s: dictate another name in that inject block" $by $name .) -}}
+    {{- end -}}
+    {{- end -}}
+    {{- range $name, $by := $files -}}
+    {{- if not (hasPrefix "/" $name) -}}
+    {{- fail (printf "%s dictates a file at %q, and a file is written at an absolute path inside the container: write that path in that inject block starting with /" $by $name) -}}
+    {{- end -}}
+    {{- if or (eq $name $tree) (hasPrefix (printf "%s/" $tree) $name) (hasPrefix (printf "%s/" $name) $tree) -}}
+    {{- fail (printf "%s dictates a file at %q, and this realization mounts the tool's file tree at %q, so the two paths would overlap: dictate the file at a path neither at, beneath nor above that directory" $by $name $.infra.mount_path) -}}
+    {{- end -}}
+    {{- end -}}
+    {{- range $path, $_ := $files -}}
+    {{- range $other, $_ := $files -}}
+    {{- if hasPrefix (printf "%s/" $path) $other -}}
+    {{- fail (printf "the component %q is handed a file at %q and another at %q beneath it, and one path cannot be both a file and a directory: dictate the two files at paths neither of which lies beneath the other" $.context.instance_id $path $other) -}}
+    {{- end -}}
+    {{- end -}}
+    {{- end -}}
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # form: stateful selects a StatefulSet on the helm provider; the file tree
+    # persists to the per-instance persistentTemplate volume below, so the
+    # stateful shape (and its per-instance claim) is correct.
+    form: stateful
+    # One instance, pinned here rather than exposed as an operational knob:
+    # a second instance behind the same address holds its own copy of the tree,
+    # so a file written through one is missing from the other, and a disk shared
+    # between them instead would have two writers disagreeing about what it
+    # contains.
+    replicas: 1
+    containers:
+      main:
+        image: "{{ .infra.image }}"
+        variables:
+          {{- if not (hasKey $named "values.access_mode") }}
+          FILESYSTEM_TOOL_ACCESS_MODE: "{{ .values.access_mode }}"
+          {{- end }}
+          FILESYSTEM_TOOL_ROOT: "{{ .infra.mount_path }}"
+          {{- if not (hasKey $named "values.side_effects") }}
+          FILESYSTEM_TOOL_SIDE_EFFECTS: "{{ .values.side_effects }}"
+          {{- end }}
+          {{- if not (hasKey $named "values.timeout_seconds") }}
+          FILESYSTEM_TOOL_TIMEOUT_SECONDS: "{{ .values.timeout_seconds }}"
+          {{- end }}
+          FILESYSTEM_TOOL_PORT: "{{ .infra.port }}"
+          {{- if not (hasKey $named "values.llm_description_override") }}
+          {{- with .values.llm_description_override }}
+          FILESYSTEM_TOOL_DESCRIPTION: "{{ . }}"
+          {{- end }}
+          {{- end }}
+          {{- range $name, $_ := $ownEnv }}
+          {{ toJson $name }}: {{ toJson (toString (optional $env $name "")) }}
+          {{- end }}
+          {{- range $alias, $edge := .context.uses }}
+          {{- range $name, $from := (optional (default dict $edge.inject) "env" dict) }}
+          {{ toJson $name }}: {{ toJson (toString (optional $env $name "")) }}
+          {{- end }}
+          {{- end }}
+        ports:
+          http: {{ .infra.port }}
+        # The image is the Release's, so no product documents a health endpoint
+        # here: the readiness probe opens a TCP connection to the declared port,
+        # and the Service sends no traffic until the process accepts one. No
+        # liveness probe is declared, because a start-up time cannot be known
+        # for an image this realization does not name, and a liveness probe
+        # that fires before a slow server has started restarts it for ever.
+        health:
+          ready:
+            tcp: {{ .infra.port }}
+        # The resource quantities are quoted so the rendered value stays a
+        # string whatever the Release supplies. Rendered bare, a whole-core
+        # quantity such as 1 or 2 re-parses as a YAML integer and fails workload
+        # validation, which wants a string here; a milli quantity such as 250m
+        # happens not to. Quoting removes the difference, so every legal quantity
+        # a Release may write renders and validates alike.
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+        # The developer's read-only choice reaches the mount, not only the
+        # environment variable the tool reads: a tree declared read-only stays
+        # read-only even under an image that would write it.
+        volumeMounts:
+          - name: data
+            path: "{{ .infra.mount_path }}"
+    {{- if eq .values.access_mode "read_only" }}
+            readonly: true
+    {{- end }}
+    {{- $i := 0 }}
+    {{- range $path, $_ := $files }}
+          - name: inject-files
+            path: {{ toJson $path }}
+            subPath: "file-{{ $i }}"
+            readonly: true
+    {{- $i = add $i 1 }}
+    {{- end }}
+    volumes:
+      data:
+        persistentTemplate:
+          size: "{{ .infra.storage.size }}"
+    {{- if $files }}
+      inject-files:
+        configmap:
+          source: "{{ .context.rendered_name }}-files"
+    {{- end }}
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          http: {{ .infra.port }}
+      headless:
+        type: Headless
+        ports:
+          http: {{ .infra.port }}

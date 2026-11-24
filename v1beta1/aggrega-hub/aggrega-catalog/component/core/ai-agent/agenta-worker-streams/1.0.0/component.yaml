@@ -1,0 +1,219 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/ai-agent/agenta-worker-streams
+  version: 1.0.0
+  # metadata.license is deliberately absent, for the reason stated on
+  # core/ai-agent/agenta-api: the platform is published open-core, no single
+  # SPDX identifier covers it, and the class is carried on the
+  # component.aggrega.ai/upstream-licensing label below while the licence of the
+  # pinned artifact is named on this component's Recipe.
+  description: >
+    The stream-consuming worker tier of an agent workspace — the process that
+    drains the platform's continuous streams and writes what they carry into the
+    relational backend. Three families of stream reach it: the spans an
+    instrumented application or an agent run emits, the platform's own internal
+    events, and the transcript records of an agent session.
+
+    It reads its work from the stream side of the queue wired through the
+    `queue` socket, writes to the relational backend wired through `backend`
+    using the two database names given on that edge, and uses the cache wired
+    through `cache` for the same read-caching the rest of the platform does. Its
+    `streams` value selects which families one container runs; left unset it
+    runs all three, which is what a single-container installation wants. An
+    Aggregate that needs one family scaled apart from the others declares a
+    second instance of this same component with a value naming just that family
+    — the stream names and consumer groups are unchanged by the split, so two
+    instances share the work rather than duplicating it.
+
+    Wire here because trace and session ingestion happens off the
+    request path. With nothing running this tier the platform accepts spans and
+    session records into the streams and never drains them, so the console's
+    traces stay empty while nothing reports an error — which is why this is a
+    component of its own and not an optional extra.
+
+    It serves no port and nothing connects to it, so it publishes no provides
+    contract.
+
+    Realized on Kubernetes via its Helm Recipe, which synthesizes the tier as a
+    stateless Deployment with no Service, running the platform image under the
+    stream-consumer entry point.
+  labels:
+    component.aggrega.ai/type: worker
+    component.aggrega.ai/category: ai-agent
+    component.aggrega.ai/hosting: self-hosted
+    component.aggrega.ai/upstream-licensing: open-core
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  inject: [env]
+
+  usesSchema:
+    # The relational backend the drained streams are written into. Same contract
+    # as on core/ai-agent/agenta-api, and the two database names must match that
+    # service's, because the two write one model.
+    backend:
+      selector: "component.aggrega.ai/category=datastore"
+      inject: [env]
+      required: true
+      valueSchema:
+        core_database:
+          type: string
+          default: agenta_core
+          description: Database on the wired backend holding the platform's own model. It names the same database the control-plane API reads.
+        tracing_database:
+          type: string
+          default: agenta_tracing
+          description: Database on the same backend that drained spans are written into. It names the same database the control-plane API reads them back from.
+        # A statement about this connection's target, authored on the
+        # connection: the relational backend it reaches takes no credential. It
+        # changes nothing this component renders.
+        unauthenticated:
+          type: boolean
+          default: false
+          description: Declares that the relational backend this connection reaches takes no credential, so a connection carrying none is intended rather than an omission. It changes nothing this component renders.
+      # To replace the Recipe's development default, attach core/random-password
+      # on the connection: the cluster generates it, and the backend takes the
+      # same credential by core/referenced-secret.
+      featuresSchema:
+        credential:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [env]
+          description: "Password the worker authenticates to the relational backend this connection reaches with, delivered as an env secret reference and substituted into the connection URL at run time. The same credential is attached to the control-plane API's backend connection, because both reach the same server. Unattached, the Recipe emits the development literal `apppass`, the default the standard-library relational Recipes leave in place; this catalog publishes it, so every Release that leaves the slot unattached shares that password."
+    # A cache publishing protocol valkey-tls or redis-tls is reached over TLS: the URL
+    # takes the rediss scheme, and the platform's Redis client checks the
+    # cache's certificate and the name dialed against the authority in
+    # server_ca where one is attached, and against the image's default trust
+    # store where not. A cache publishing another value served over TLS halts
+    # the build, naming the connection.
+    cache:
+      selector: "component.aggrega.ai/category=datastore"
+      inject: [env]
+      required: true
+      valueSchema:
+        db_index:
+          type: integer
+          min: 0
+          max: 15
+          default: 0
+          description: Logical-database index this connection uses on the wired cache. It matches the control-plane API's index on the same cache.
+      # The authority the platform's Redis client checks the cache's
+      # certificate against, for a cache whose certificate an authority the
+      # image does not already trust signs. Secret-kind-pinned because a
+      # referenceable Secret is what the Recipe mounts, and so marked sensitive
+      # as every secret-kind slot is, though the authority's certificate is not
+      # itself secret; delivered as a file.
+      featuresSchema:
+        server_ca:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [file]
+          description: "Optional authority the platform's Redis client checks the cache's certificate against while the cache publishes protocol valkey-tls or redis-tls, where the image does not already trust the authority that signs it. Its Secret holds ca.crt. The Recipe mounts the whole Secret read-only and names the file in the connection's URL. The build halts on a server_ca publishing no Secret name, and on one wired to a cache served without TLS. Fill it with core/referenced-secret."
+    # The stream side of the platform's queue. This is where the work is, so it
+    # is required: a stream consumer with nothing wired here has nothing to
+    # consume.
+    # A queue publishing protocol valkey-tls or redis-tls is reached over TLS: the URL
+    # takes the rediss scheme, and the platform's Redis client checks the
+    # queue's certificate and the name dialed against the authority in
+    # server_ca where one is attached, and against the image's default trust
+    # store where not. A queue publishing another value served over TLS halts
+    # the build, naming the connection.
+    queue:
+      selector: "component.aggrega.ai/category=datastore"
+      inject: [env]
+      required: true
+      valueSchema:
+        db_index:
+          type: integer
+          min: 0
+          max: 15
+          default: 0
+          description: Logical-database index this connection uses on the wired queue. It matches the index the producing services use, because this tier reads what they write.
+      # The authority the platform's Redis client checks the queue's
+      # certificate against, for a queue whose certificate an authority the
+      # image does not already trust signs. Secret-kind-pinned because a
+      # referenceable Secret is what the Recipe mounts, and so marked sensitive
+      # as every secret-kind slot is, though the authority's certificate is not
+      # itself secret; delivered as a file.
+      featuresSchema:
+        server_ca:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [file]
+          description: "Optional authority the platform's Redis client checks the queue's certificate against while the queue publishes protocol valkey-tls or redis-tls, where the image does not already trust the authority that signs it. Its Secret holds ca.crt. The Recipe mounts the whole Secret read-only and names the file in the connection's URL. The build halts on a server_ca publishing no Secret name, and on one wired to a queue served without TLS. Fill it with core/referenced-secret."
+
+  featuresSchema:
+    # Required, with no default. A key the cluster generates is attached through
+    # core/random-password, and slots sharing it take it by core/referenced-secret.
+    auth_key:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      required: true
+      description: "Required key the platform signs its own internal tokens with. It carries the same value as the control-plane API's slot. There is no default: the build halts when nothing fills this slot."
+    # Required, with no default. A key the cluster generates is attached through
+    # core/random-password, and slots sharing it take it by core/referenced-secret.
+    crypt_key:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      required: true
+      description: "Required key stored credentials are encrypted under. The worker decrypts them where a drained record references one, so it carries the same value as the control-plane API's slot. There is no default: the build halts when nothing fills this slot."
+
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      streams:
+        type: string
+        description: >
+          Comma-separated list of stream families this container runs, drawn
+          from spans, events and records. Left unset it runs all three, which is
+          what a single-container installation wants; naming a subset is how one
+          family is scaled apart from the others.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      engine_version:
+        type: string
+        default: "v0.114.1"
+        description: Platform API container image tag. This tier runs the same image as the control-plane API under a different entry point, so a Release moves both together.
+      log_level:
+        type: string
+        enum: [DEBUG, INFO, WARNING, ERROR, CRITICAL]
+        default: INFO
+        description: Log verbosity the worker emits.
+      compute:
+        cpu:
+          type: string
+          default: 500m
+        memory:
+          type: string
+          default: 1Gi
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+
+  # A connection to a target its catalog labels a managed service
+  # (component.aggrega.ai/hosting: managed) carries a credential, or says on the
+  # connection that its target takes none. The rule reads the target's labels,
+  # the connection's unauthenticated value and its credential slot, all known
+  # before a Recipe binds, so it holds whichever Recipe renders this component;
+  # a self-hosted target draws nothing. The list names every socket of this
+  # component that declares unauthenticated.
+  assertions:
+    managed_target_needs_a_credential: >-
+      {{- range $socket := list "backend" -}}
+      {{- range $alias, $connection := (optional $.uses $socket dict) -}}
+      {{- $managed := eq (optional $connection.labels "component.aggrega.ai/hosting" "") "managed" -}}
+      {{- $optedOut := optional $connection.values "unauthenticated" false -}}
+      {{- if and $managed (not (hasKey $connection.features "credential")) (not $optedOut) -}}
+      {{- fail (printf "the %s connection %s of %q reaches %q, whose component.aggrega.ai/hosting label is managed, with no credential: attach one under credential on that connection, or set unauthenticated: true in its values" $socket $alias $.metadata.instance_id $connection.target) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- end -}}

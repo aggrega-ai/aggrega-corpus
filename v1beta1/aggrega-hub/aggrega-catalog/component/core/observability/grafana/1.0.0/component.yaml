@@ -1,0 +1,169 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/observability/grafana
+  version: 1.0.0
+  # The packaged Grafana server is AGPL-3.0.
+  license: AGPL-3.0
+  description: >
+    A Grafana dashboards and visualization server. It keeps its own state —
+    users, saved dashboards, preferences — in a local database, so it renders as
+    a server backed by a persistent volume. It ships standalone: it declares no
+    socket for a metrics or logs source to be wired in as a provisioned data
+    source. Exports its web endpoint host and port to consumers. Grafana serves
+    its own metrics in the Prometheus format at /metrics on its web port, on by
+    default, and every Recipe publishes that address as `metrics_endpoint`.
+
+    An admin account is always present: its username is a developer value and
+    its password is wired through the optional `admin_password` credential slot.
+    Unattached, the Recipe supplies a deterministic development default instead
+    of a generated password, so the render stays byte-identical across runs.
+
+    Realized for local development by a Compose Recipe, and on Kubernetes by two
+    realizations the Manifest chooses between. `grafana` synthesizes the server
+    as a workload and fetches nothing, so it is the one to reach for where the
+    build must complete with no chart repository reachable. `grafana-chart`
+    renders the community-maintained Grafana Helm chart, which additionally
+    carries the server's own provisioning surface — data sources and dashboards
+    declared in the Release through `infra.overrides` — so reach for it where a
+    chart repository is reachable at build time.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: observability
+    component.aggrega.ai/upstream-licensing: osi-approved
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # Provider-agnostic: the same component is implemented by Helm Recipes —
+  # Workload synthesis to native Kubernetes resources, and the chart-backed
+  # realization — and by a Compose Recipe (local development).
+  #
+  # This component ships standalone and declares no uses-socket: wiring a
+  # metrics or logs source (such as a Prometheus server) into Grafana as a
+  # provisioned data source through the topology is not modelled here. The
+  # chart-backed realization takes data sources and dashboards through
+  # infra.overrides instead.
+  #
+  # Self-inject allowlist: the component may inject resolved credential values
+  # into the env delivery mechanism.
+  inject: [env]
+  featuresSchema:
+    # Optional admin-password credential slot. The Grafana admin account is
+    # always present; when a credential is attached here, the Recipe
+    # wires its value as the admin password through the credential subsystem.
+    # When unattached, the Recipe falls back to a deterministic inline
+    # development default rather than letting Grafana generate a random password
+    # (which would make the rendered output non-deterministic). `required`
+    # omitted → optional, so a bare `dashboards: {}` still loads.
+    # Transparent (inject: [env]) so the injected value reaches the Recipe on the
+    # env pipe; the selector is secret-kind-pinned but family-agnostic so either
+    # an inject-value or a referenceable credential may fill it.
+    admin_password:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      description: "Optional Grafana admin-password credential. When attached, supplies the admin password via the credential subsystem. Unattached, compose/grafana, helm/grafana and helm/grafana-chart set the admin password to the development literal `dev-grafana-admin-change-me`, which this catalog publishes, so every Release that leaves the slot unattached shares that password."
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      admin_user:
+        type: string
+        default: admin
+        description: Grafana admin account username. The account is always created; its password is wired through the optional `admin_password` credential slot.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      #
+      # Both realizations probe the server's health endpoint, so a rollout
+      # reports it ready only once it can reach its database.
+      #
+      # The published address follows this port on every Recipe. Grafana
+      # listens on 3000 unless told otherwise, so the synthesized and Compose
+      # Recipes move the server's own listener to this port whenever it is
+      # another; the chart-backed Recipe keeps the chart's fixed listener and
+      # puts this port on the Service in front of it.
+      port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 3000
+        description: HTTP port the Grafana web and query endpoint listens on. Most operators should omit this and let the Recipe assign the default (3000).
+      external_base_url:
+        type: string
+        description: >
+          Externally reachable base URL of the dashboards server, as assembled at
+          the ingress tier, including any path the ingress serves it under — for
+          example https://grafana.example.com or https://tools.example.com/grafana.
+          The server composes from this every link it writes, the address it
+          redirects a browser to, and the callback address it hands a sign-in
+          provider, so a shared dashboard link and a sign-in both resolve from
+          outside the cluster. The server keeps serving at its own root, so an
+          ingress in front of it maps the address's path onto that root. Omitted,
+          the server keeps its default root address, composed from its own
+          listening port rather than from an address a browser uses, which suits
+          a server nobody opens from outside the cluster.
+      engine_version:
+        type: string
+        default: "12.1.1"
+        description: Grafana container image tag. Selects the image tag on container targets; the chart-backed realization pins its own image tag.
+      # The chart-backed realization declares the provisioned data sources and
+      # dashboards in the Release rather than having them added by hand
+      # afterwards, and prepares the volume's ownership for the distroless server
+      # image it runs.
+      source_version:
+        type: string
+        description: Version of the Helm chart the chart-backed realization pulls. Read only by that realization; the workload-synthesis and Compose realizations pull no source artifact and ignore it. Changing it away from the Recipe's default does not guarantee value-mapping compatibility with the new chart.
+      compute:
+        cpu:
+          type: string
+          default: 500m
+        memory:
+          type: string
+          default: 512Mi
+      storage:
+        size:
+          type: string
+          default: 10Gi
+          description: Size of the persistent volume backing Grafana's local state (users, dashboards, preferences).
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      # Grafana renders operational dashboards over its query and web endpoint,
+      # which is the address published here.
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name of the Service fronting the web and query
+          endpoint. A gateway routing browser traffic to the dashboards points
+          its upstream at this name.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port that Service serves the web and query endpoint on. It
+          follows the port an operator set in the Release, so a consumer reads
+          it rather than assuming a default.
+      protocol:
+        type: string
+        description: How the published address is spoken to — `http`, so a consumer composes an address on that scheme.
+      # The address a Prometheus server scrapes Grafana's own metrics at.
+      # Grafana serves them in the Prometheus format at /metrics on its web
+      # port, on by default, and asks no credential for them: a username and
+      # password guard them only where both are configured, and no Recipe
+      # configures them. Every Recipe publishes the address spelled out in full
+      # from its own host and port, because a provides entry cannot read
+      # another.
+      metrics_endpoint:
+        type: string
+        description: >
+          The full address Prometheus scrapes this component's metrics at —
+          scheme, host, port and path, `http://<host>:<port>/metrics` on the
+          web endpoint. Empty where the component serves none reachable.

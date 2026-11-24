@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/security/external-secrets
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    An external-secrets operator that synchronizes secrets from external
+    secret-management systems into native Kubernetes Secrets. external-secrets
+    is a cluster-scoped add-on that reads material from providers such as
+    HashiCorp Vault, AWS Secrets Manager, Google Secret Manager, or Azure Key
+    Vault and materializes it as in-cluster Secrets, keeping them in sync as the
+    source changes. It extends the cluster with its own ExternalSecret,
+    SecretStore, ClusterSecretStore, and related custom resources; applications
+    obtain their secrets by declaring those resources rather than by wiring a
+    topology edge, so the component takes no `uses` edge, and what it publishes
+    is where Prometheus finds its metrics. A controller reconciles
+    ExternalSecret resources, a webhook validates and defaults the custom
+    resources, and a certificate controller manages the webhook's serving
+    certificate. external-secrets is realized on Kubernetes through its Helm
+    Recipe (the official chart); it has no standalone local-container form, so
+    no Compose Recipe is provided.
+
+    Each of the three serves its own metrics on a port no Service carries, so
+    the Recipe publishes the pod label selecting all three, the name of their
+    metrics port and the path, for a scraper that discovers those pods
+    directly.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: security
+    component.aggrega.ai/upstream-licensing: osi-approved
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      install_crds:
+        type: boolean
+        default: true
+        description: Whether this component installs external-secrets' custom resource definitions (ExternalSecret, SecretStore, ClusterSecretStore, and the related push and generator resources). Leave on to bring the external-secrets API into the cluster; set false when the CRDs are managed out of band or already present.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      source_version:
+        type: string
+        description: Source artifact version (Helm chart). Overrides the Recipe's default source version. Changing from default does not guarantee value mapping compatibility.
+      compute:
+        cpu:
+          type: string
+          default: 100m
+        memory:
+          type: string
+          default: 128Mi
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      # Where Prometheus finds external-secrets' own metrics. The controller,
+      # the webhook and the certificate controller each serve them at /metrics
+      # on a container port named metrics, 8080, in plain HTTP with no caller
+      # check; that listener serves the metrics and nothing else. The chart
+      # puts that port on no Service unless asked to, which the Recipe does
+      # not, so a scraper discovers the pods directly: one label selects all
+      # three, and they share the port name. None of the keys carries a
+      # namespace: a scraper reads where the target runs from its own
+      # connection.
+      metrics_pod_selector:
+        type: string
+        description: >
+          Kubernetes label selector matching the controller, webhook and
+          certificate controller pods, for a scraper that discovers those pods
+          directly rather than scraping one address. Published beside
+          `metrics_pod_port` and `metrics_path`.
+      metrics_pod_port:
+        type: string
+        description: >
+          Name of the container port on those pods that carries the metrics,
+          `metrics`.
+      metrics_path:
+        type: string
+        description: >
+          Path the metrics are served at on that port, `/metrics`.

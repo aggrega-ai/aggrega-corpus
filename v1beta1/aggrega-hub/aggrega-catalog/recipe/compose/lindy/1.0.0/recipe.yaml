@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: lindy
+  version: 1.0.0
+  description: >
+    A Lindy assistant on Lindy's managed platform as a reference realization for
+    local development, so no service runs. The compiler carries the
+    operator-supplied platform endpoint and the assistant identifier to
+    consumers through the injection contract. No credential is delivered by this
+    recipe: a consumer that needs one declares it as `credential` on the socket
+    that reaches this endpoint and delivers it from its own container, because
+    the environment-variable name belongs to the consumer.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: compose
+  implements: core/ai-agent/lindy:1.0.0
+  # The endpoint is sourced from infra.endpoint and single-sourced into both
+  # provides and the workload below.
+  provides:
+    endpoint: "{{ .infra.endpoint }}"
+    lindy_id: "{{ .values.lindy_id }}"
+  assertions:
+    # The host the platform is reached at is the operator's to state, and it
+    # may be a gateway or proxy in front of the platform rather than the
+    # platform itself, so the catalog holds no default address: the Release
+    # names it.
+    endpoint_supplied: >-
+      {{- if not (optional .infra "endpoint" "") -}}
+      {{- fail "this realization reaches Lindy's platform, or a gateway or proxy an operator puts in front of it, so the Release supplies the address and the catalog holds no default: set infra.endpoint in the Release to the base URL of the platform's API, or of the gateway or proxy that reaches it" -}}
+      {{- end -}}
+  workload: |
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    form: reference
+    endpoint: "{{ .infra.endpoint }}"
+    port: 443

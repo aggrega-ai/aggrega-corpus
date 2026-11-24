@@ -1,0 +1,352 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: ArtifactLibrary
+metadata:
+  name: OtelCollectorConfig
+  version: 1.0.0
+  description: >
+    The configuration of an OpenTelemetry Collector, as one bundle every Recipe
+    running core/observability/otel-collector imports, so the receivers,
+    processors, exporters and pipelines the collector runs are written once,
+    whichever target it runs on.
+
+    CollectorConfig writes the collector's whole configuration: the OTLP
+    receiver on the gRPC and HTTP ports the importing Component declares as
+    infra.otlp_grpc_port and infra.otlp_http_port, the health check on port
+    13133, and one pipeline each for traces, metrics and logs, fed by the OTLP
+    receiver through a memory limiter and a batch processor. Each backend wired
+    to the signal's socket adds one exporter to that pipeline, written for the
+    protocol its observability.aggrega.ai label names: otlp_grpc to its host and
+    port, or otlp_http to its otlp_http_endpoint. A signal with nothing wired
+    ends in the debug exporter at basic verbosity. It stops the build when two
+    listeners share a port, or when a backend publishes no address. With the
+    Component's values.metrics_enabled true it also has the collector serve its
+    own telemetry metrics on every interface, port 8888.
+
+    The importing Recipe picks the delivery with the local
+    collector_config_delivery — config_map, one ConfigMap holding the
+    configuration under the key relay, for a Kubernetes target, or
+    compose_configs, one compose config — and declares as locals the names and
+    the ports it shares with the bundle, which stops the build when one is
+    missing or differs. The bundle is authored against the collector's contrib
+    distribution at 0.162.0.
+spec:
+  artifacts:
+    # The bundle. The configuration an OpenTelemetry Collector runs, as one
+    # bundle every Recipe running core/observability/otel-collector imports. The
+    # collector reads everything it does from this one file — what it listens
+    # on, what it does to what arrives and where it sends it — so the text lives
+    # here once rather than as a copy in each Recipe that a later edit could
+    # leave behind.
+    #
+    # What it writes. The OTLP receiver, listening for gRPC on
+    # infra.otlp_grpc_port and for HTTP on infra.otlp_http_port, both bound on
+    # every address so a producer elsewhere in the cluster or on the compose
+    # network reaches it. The health_check extension, bound on every address at
+    # port 13133, which answers at / while the collector is running. One
+    # pipeline for each signal — traces, metrics and logs — fed by the OTLP
+    # receiver. Each passes what arrives through the memory_limiter processor,
+    # which refuses data once the collector's memory use nears its limit,
+    # before the batch processor groups it; that is the pair, in that order,
+    # the project's own Helm chart runs by default. The configuration is the
+    # whole configuration: no receiver, extension or port the collector's own
+    # default configuration or its chart's carries is in it.
+    #
+    # Where each pipeline ends. The importing Component's traces, metrics and
+    # logs sockets each take the backends for their signal, and every
+    # connection on one of them adds one exporter to that signal's pipeline.
+    # The target of each carries the label observability.aggrega.ai/<signal>
+    # its socket selects, and the label's value names the protocol the target
+    # receives the signal on, so it decides the exporter:
+    #   otlp-grpc  an otlp_grpc exporter to the host and port the target
+    #              publishes, with transport security off, because the
+    #              receivers the catalog renders serve no TLS;
+    #   otlp-http  an otlp_http exporter to the base address the target
+    #              publishes as otlp_http_endpoint, to which the exporter
+    #              appends the signal's own path, such as /v1/logs.
+    # otlp_grpc and otlp_http are the exporters' names in the collector release
+    # this bundle is written for; the shorter otlp and otlphttp it also accepts
+    # are its deprecated aliases. Each exporter is named after its type and the
+    # connection's alias, otlp_grpc/<alias> or otlp_http/<alias>, so no two
+    # connections share a name and each reads back to the connection it was
+    # written for. An alias holds letters, digits, underscores and hyphens, the
+    # alphabet the Aggregate and the Release hold it to, all of which the
+    # collector takes in a name and YAML reads as written. A pipeline lists its
+    # exporters in the order a template ranges the connections, which is by
+    # alias. A signal with nothing wired ends in the debug exporter at basic
+    # verbosity instead: the collector writes one line per batch to its own log,
+    # saying which signal arrived and how many records, and sends the data
+    # nowhere else. So a producer wired to the collector is not refused for want
+    # of a backend, and what it sends is visible in the collector's log rather
+    # than dropped unseen. The debug exporter is written only while some signal
+    # still ends in it.
+    #
+    # A connection the collector could not export through stops the build,
+    # naming it: a target whose label carries another value; an otlp-grpc
+    # target publishing no host or port; an otlp-http target publishing no
+    # otlp_http_endpoint — on core/observability/prometheus, which publishes it
+    # only while its OTLP receiver is on, the message names the line to write,
+    # values.otlp_receiver: true on that Prometheus in the Aggregate.
+    #
+    # The memory limiter takes its limit as a share of the memory limit the
+    # container runs under, which each importing Recipe sets from
+    # infra.compute.memory.
+    #
+    # Two listeners on one port stop the collector from starting, so the bundle
+    # stops the build when infra.otlp_grpc_port and infra.otlp_http_port are
+    # equal, or when either is 13133, naming the setting to change.
+    #
+    # The collector's own telemetry metrics. With no service.telemetry block the
+    # collector serves them at /metrics on port 8888 of its loopback address
+    # alone. With the importing Component's values.metrics_enabled true the
+    # configuration carries that block, with one pull reader: the same
+    # Prometheus exporter on the same port, with the same three settings that
+    # keep the default's metric names, bound on every address instead, so a
+    # Prometheus elsewhere reaches it. That listener serves /metrics and nothing
+    # else, and checks no caller. A reader written in the configuration replaces
+    # the default one whole, which is why the three settings are written out.
+    # The port is then a fourth listener, so the bundle also stops the build when
+    # either OTLP port is 8888. With the value false nothing of this is written.
+    #
+    # How the configuration reaches the workload. The importing Recipe chooses
+    # through the local collector_config_delivery. With config_map the bundle
+    # emits one ConfigMap carrying the configuration under the key relay, which
+    # is the key the collector's Helm chart mounts when it is given the name of
+    # a ConfigMap it does not create itself. With compose_configs it emits one
+    # compose config, for the compose target, which delivers a config as one
+    # file at the path it is mounted at. The configuration carries no literal
+    # $; compose reads a $ in a config's content as the start of a variable of
+    # its own, so a $ added to it is written as $$ in the compose delivery. Any
+    # other value, or none, stops the build.
+    #
+    # What the importing Recipe declares. The importing Recipe mounts the
+    # configuration and, on Kubernetes, points its probes at the health check;
+    # those are its own workload, which a bundle cannot write, so it declares as
+    # locals the values they share with this bundle, and the bundle stops the
+    # build, naming the local, when one is missing or differs from its own. With
+    # config_map it declares collector_config_map_suffix (-collector-config):
+    # the ConfigMap is named after the name the Recipe's provider gives the
+    # component, followed by that suffix, and since a local cannot read that
+    # name, the Recipe composes the two where it names the ConfigMap. It also
+    # declares health_port (13133), the port its probes ask. With
+    # compose_configs it declares collector_config_name instead, the config's
+    # name (the instance name followed by -collector-config); the file it is
+    # mounted as is the Recipe's own. With either it declares metrics_port
+    # (8888), the port of the telemetry listener above, which its published
+    # metrics address and, on Kubernetes, its Service read.
+    #
+    # The template reads the importing Recipe's context: .infra.otlp_grpc_port,
+    # .infra.otlp_http_port and .values.metrics_enabled from the Component,
+    # .context.instance_id, .context.rendered_name with config_map, the locals
+    # listed above, and, for each connection on the three signal sockets, its
+    # alias, its socket, its target's labels and component, and what the target
+    # publishes. It checks every local before it writes anything, because a
+    # local the importing Recipe does not declare reads as empty here rather
+    # than stopping the build, and a name or a port that differs on the two
+    # sides would leave a collector with no configuration, or probes asking a
+    # port nothing answers on. Since the configuration changes with what a
+    # connection publishes, an importing Recipe's digest of it covers those
+    # connections as well as its infra, and the value while it is true.
+    CollectorConfig:
+      collector-config.yaml: |
+        {{- /* The values this bundle shares with the Recipe importing it. Each has its home here, and the importing
+          Recipe restates it as a local because its own workload, which this bundle cannot write, reads it too. A local
+          the Recipe does not declare reads as empty here, so each is checked before anything is written: absent, or
+          not the value below, and the build stops naming it. */}}
+        {{- $bundle := "OtelCollectorConfig#/artifacts/CollectorConfig" }}
+        {{- $mapSuffix := "-collector-config" }}
+        {{- $configName := printf "%s-collector-config" .context.instance_id }}
+        {{- $healthPort := "13133" }}
+        {{- $metricsPort := "8888" }}
+        {{- $have := "" }}
+        {{- /* How the configuration reaches the importing Recipe's workload, which that Recipe chooses because its
+          workload mounts it: "config_map", one ConfigMap carrying it under the key relay, for a Kubernetes target; or
+          "compose_configs", one compose config, for the compose target, which delivers a config as one file at the
+          path it is mounted at. Any other value stops the build. */}}
+        {{- $have = optional .locals "collector_config_delivery" "" }}
+        {{- if not $have }}
+        {{- fail (printf "the Recipe importing %s does not declare the local collector_config_delivery, which takes \"config_map\" or \"compose_configs\": whether this bundle delivers the collector's configuration as a ConfigMap, for a Kubernetes target, or as a compose config, for the compose target; declare it as one of the two" $bundle) }}
+        {{- else if not (has $have (list "config_map" "compose_configs")) }}
+        {{- fail (printf "the Recipe importing %s declares the local collector_config_delivery as %q, but it takes \"config_map\" or \"compose_configs\": whether this bundle delivers the collector's configuration as a ConfigMap, for a Kubernetes target, or as a compose config, for the compose target; declare it as one of the two" $bundle $have) }}
+        {{- end }}
+        {{- $compose := eq $have "compose_configs" }}
+        {{- /* The port the collector serves its own telemetry metrics on, which the importing Recipe publishes in its
+          metrics address and, on Kubernetes, puts on its Service; shared with either delivery. */}}
+        {{- $have = optional .locals "metrics_port" "" }}
+        {{- if not $have }}
+        {{- fail (printf "the Recipe importing %s does not declare the local metrics_port, which is the port its published metrics address names and this bundle binds the collector's own telemetry metrics on; declare it as %q" $bundle $metricsPort) }}
+        {{- else if ne $have $metricsPort }}
+        {{- fail (printf "the Recipe importing %s declares the local metrics_port as %q, but that local is the port its published metrics address names and this bundle binds the collector's own telemetry metrics on, and this bundle's side of it is %q; declare it as %q" $bundle $have $metricsPort $metricsPort) }}
+        {{- end }}
+        {{- /* The names the importing Recipe's workload mounts what this bundle emits by: the compose config's, or the
+          ConfigMap's. The ConfigMap is named after the name the Recipe's provider gives the component, which a local
+          cannot read, so the Recipe declares the part after it and composes the two where it names the ConfigMap. The
+          port the Recipe's probes ask is shared with the ConfigMap delivery alone: the compose target runs no probe
+          against an image with no shell or client in it. */}}
+        {{- if $compose }}
+        {{- $have = optional .locals "collector_config_name" "" }}
+        {{- if not $have }}
+        {{- fail (printf "the Recipe importing %s does not declare the local collector_config_name, which is the name of the compose config its workload mounts the collector's configuration from, which this bundle emits; declare it as %q" $bundle $configName) }}
+        {{- else if ne $have $configName }}
+        {{- fail (printf "the Recipe importing %s declares the local collector_config_name as %q, but that local is the name of the compose config its workload mounts the collector's configuration from, which this bundle emits, and this bundle's side of it is %q; declare it as %q" $bundle $have $configName $configName) }}
+        {{- end }}
+        {{- else }}
+        {{- $have = optional .locals "collector_config_map_suffix" "" }}
+        {{- if not $have }}
+        {{- fail (printf "the Recipe importing %s does not declare the local collector_config_map_suffix, which follows the component's rendered name in the name of the ConfigMap its chart mounts, which this bundle emits; declare it as %q" $bundle $mapSuffix) }}
+        {{- else if ne $have $mapSuffix }}
+        {{- fail (printf "the Recipe importing %s declares the local collector_config_map_suffix as %q, but that local follows the component's rendered name in the name of the ConfigMap its chart mounts, which this bundle emits, and this bundle's side of it is %q; declare it as %q" $bundle $have $mapSuffix $mapSuffix) }}
+        {{- end }}
+        {{- $have = optional .locals "health_port" "" }}
+        {{- if not $have }}
+        {{- fail (printf "the Recipe importing %s does not declare the local health_port, which is the port its probes ask and this bundle binds the collector's health check on; declare it as %q" $bundle $healthPort) }}
+        {{- else if ne $have $healthPort }}
+        {{- fail (printf "the Recipe importing %s declares the local health_port as %q, but that local is the port its probes ask and this bundle binds the collector's health check on, and this bundle's side of it is %q; declare it as %q" $bundle $have $healthPort $healthPort) }}
+        {{- end }}
+        {{- if not .context.rendered_name }}
+        {{- fail (printf "the Recipe importing %s declares the local collector_config_delivery as \"config_map\", but its provider reports no rendered name for %q, and the ConfigMap is named after it; declare \"compose_configs\" on the compose target, or import this bundle from a Recipe whose provider names the component" $bundle .context.instance_id) }}
+        {{- end }}
+        {{- end }}
+        {{- /* The three listeners the configuration binds, each on a port of its own: two on one port stop the
+          collector from starting. */}}
+        {{- $grpcPort := toString .infra.otlp_grpc_port }}
+        {{- $httpPort := toString .infra.otlp_http_port }}
+        {{- if eq $grpcPort $httpPort }}
+        {{- fail (printf "%q receives OTLP over gRPC on infra.otlp_grpc_port and over HTTP on infra.otlp_http_port, and both are %s, but the collector cannot bind two listeners on one port; set the two to different ports" .context.instance_id $grpcPort) }}
+        {{- end }}
+        {{- range $setting := list "otlp_grpc_port" "otlp_http_port" }}
+        {{- if eq (toString (index $.infra $setting)) $healthPort }}
+        {{- fail (printf "%q sets infra.%s to %s, the port the collector's health check listens on, but the collector cannot bind two listeners on one port; set infra.%s to another port" $.context.instance_id $setting $healthPort $setting) }}
+        {{- end }}
+        {{- end }}
+        {{- /* The collector's own telemetry metrics, served on every address while values.metrics_enabled is true, which
+          makes their port a fourth listener. */}}
+        {{- $metrics := optional .values "metrics_enabled" false }}
+        {{- if $metrics }}
+        {{- range $setting := list "otlp_grpc_port" "otlp_http_port" }}
+        {{- if eq (toString (index $.infra $setting)) $metricsPort }}
+        {{- fail (printf "%q sets infra.%s to %s and values.metrics_enabled to true, but %s is the port the collector serves its own metrics on, and the collector cannot bind two listeners on one port; set infra.%s to another port" $.context.instance_id $setting $metricsPort $metricsPort $setting) }}
+        {{- end }}
+        {{- end }}
+        {{- end }}
+        {{- /* The backends wired to the three signal sockets, each connection read in the order a template ranges
+          them, by alias. The target's observability.aggrega.ai/<signal> label names the protocol it receives the
+          signal on, and that decides the exporter written for it: otlp_grpc to its host and port, or otlp_http to
+          its otlp_http_endpoint. Each exporter is named after its type and the connection's alias. $routes holds
+          each signal's exporter names; a signal holding none ends in debug. */}}
+        {{- $signals := list "traces" "metrics" "logs" }}
+        {{- $routes := dict "traces" (list) "metrics" (list) "logs" (list) }}
+        {{- $exporters := list }}
+        {{- range $alias, $edge := .context.uses }}
+        {{- if has $edge.socket $signals }}
+        {{- $label := printf "observability.aggrega.ai/%s" $edge.socket }}
+        {{- $protocol := toString (optional (optional $edge "labels" dict) $label "") }}
+        {{- if eq $protocol "otlp-grpc" }}
+        {{- $host := toString (optional $edge.provides "host" "") }}
+        {{- $port := toString (optional $edge.provides "port" "") }}
+        {{- if not (and $host $port) }}
+        {{- fail (printf "%q exports %s through its %s connection %q to %q, which carries %s: otlp-grpc but publishes no host and port to send them to; bind %q in the Manifest to a Recipe that publishes both" $.context.instance_id $edge.socket $edge.socket $alias $edge.target $label $edge.target) }}
+        {{- end }}
+        {{- $name := printf "otlp_grpc/%s" $alias }}
+        {{- $exporters = append $exporters (dict "name" $name "endpoint" (printf "%s:%s" $host $port) "insecure" true) }}
+        {{- $_ := set $routes $edge.socket (append (get $routes $edge.socket) $name) }}
+        {{- else if eq $protocol "otlp-http" }}
+        {{- $endpoint := toString (optional $edge.provides "otlp_http_endpoint" "") }}
+        {{- if not $endpoint }}
+        {{- $type := first (splitList ":" (toString (optional $edge "component" ""))) }}
+        {{- if eq $type "core/observability/prometheus" }}
+        {{- fail (printf "%q exports %s through its %s connection %q to %q, but %q publishes no otlp_http_endpoint: a Prometheus receives OTLP only while its OTLP receiver is on, and it is off by default; set values.otlp_receiver: true on %q in the Aggregate" $.context.instance_id $edge.socket $edge.socket $alias $edge.target $edge.target $edge.target) }}
+        {{- end }}
+        {{- fail (printf "%q exports %s through its %s connection %q to %q, which carries %s: otlp-http but publishes no otlp_http_endpoint, the base address an OTLP HTTP exporter sends to; bind %q in the Manifest to a Recipe that publishes one" $.context.instance_id $edge.socket $edge.socket $alias $edge.target $label $edge.target) }}
+        {{- end }}
+        {{- $name := printf "otlp_http/%s" $alias }}
+        {{- $exporters = append $exporters (dict "name" $name "endpoint" $endpoint "insecure" false) }}
+        {{- $_ := set $routes $edge.socket (append (get $routes $edge.socket) $name) }}
+        {{- else }}
+        {{- fail (printf "%q wires %q to its %s socket, and %q carries %s: %q, but the collector writes an exporter for otlp-grpc and otlp-http alone; wire a target that receives %s over one of the two" $.context.instance_id $edge.target $edge.socket $edge.target $label $protocol $edge.socket) }}
+        {{- end }}
+        {{- end }}
+        {{- end }}
+        {{- $debug := false }}
+        {{- range $signal := $signals }}
+        {{- if not (get $routes $signal) }}
+        {{- $debug = true }}
+        {{- $_ := set $routes $signal (list "debug") }}
+        {{- end }}
+        {{- end }}
+        {{- /* The envelope. The configuration below is written once and wrapped by the envelope the importing Recipe
+          chose: a compose config's content or a ConfigMap key. Both are block scalars holding it at one indentation,
+          so in the compose fragment the config's content key sits one column deeper than its name, the shallowest
+          place a block scalar of that indentation can hang from; the compose target reads the fragment's configs and
+          writes them into the compose file, so that column reaches no emitted byte. */}}
+        {{- if $compose -}}
+        configs:
+          {{ $configName }}:
+           content: |
+        {{- else -}}
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: {{ .context.rendered_name }}{{ $mapSuffix }}
+        data:
+          relay: |
+        {{- end }}
+            receivers:
+              otlp:
+                protocols:
+                  grpc:
+                    endpoint: "0.0.0.0:{{ $grpcPort }}"
+                  http:
+                    endpoint: "0.0.0.0:{{ $httpPort }}"
+            processors:
+              memory_limiter:
+                check_interval: 5s
+                limit_percentage: 80
+                spike_limit_percentage: 25
+              batch: {}
+            exporters:
+        {{- if $debug }}
+              debug:
+                verbosity: basic
+        {{- end }}
+        {{- range $exporter := $exporters }}
+              {{ $exporter.name }}:
+                endpoint: {{ toJson $exporter.endpoint }}
+        {{- if $exporter.insecure }}
+                tls:
+                  insecure: true
+        {{- end }}
+        {{- end }}
+            extensions:
+              health_check:
+                endpoint: "0.0.0.0:{{ $healthPort }}"
+            service:
+              extensions: [health_check]
+              pipelines:
+                traces:
+                  receivers: [otlp]
+                  processors: [memory_limiter, batch]
+                  exporters: [{{ join ", " (get $routes "traces") }}]
+                metrics:
+                  receivers: [otlp]
+                  processors: [memory_limiter, batch]
+                  exporters: [{{ join ", " (get $routes "metrics") }}]
+                logs:
+                  receivers: [otlp]
+                  processors: [memory_limiter, batch]
+                  exporters: [{{ join ", " (get $routes "logs") }}]
+        {{- if $metrics }}
+              telemetry:
+                metrics:
+                  readers:
+                    - pull:
+                        exporter:
+                          prometheus:
+                            host: "0.0.0.0"
+                            port: {{ $metricsPort }}
+                            without_scope_info: true
+                            without_units: true
+                            without_type_suffix: true
+        {{- end }}

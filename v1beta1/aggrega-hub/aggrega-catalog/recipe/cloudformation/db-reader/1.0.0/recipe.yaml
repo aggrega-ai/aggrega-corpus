@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: db-reader
+  version: 1.0.0
+  description: >
+    A database-consuming application rendered as a CloudFormation fragment. The
+    artifact emits a single SSM parameter whose value is the database host the
+    `database` uses-edge injects, stored as a whole scalar. When the database
+    assembles into the same stack the value is an intra-stack Fn::GetAtt; when
+    it assembles into another stack the provider replaces the injected value
+    with a cross-stack reference. The provider stamps the stack envelope when it
+    assembles the boundary.
+  maintainers:
+    - name: "Massimiliano Ferrero"
+      email: "m.ferrero@cognitio.it"
+spec:
+  capability: cloudformation
+  implements: example/compute/db-reader:1.0.0
+
+  # The resource's logical id, derived from this instance's own name so that two
+  # applications of this type deployed into one stack describe two parameters
+  # rather than one. A logical id is unique within a CloudFormation template and
+  # admits only letters and digits, so the instance name's separators are read as
+  # word boundaries and each word is capitalised: instance payments-app names the
+  # resource PaymentsApp. The name carries only which instance the resource
+  # belongs to, because the resource type below already says what it is.
+  locals:
+    logical_id: '{{ capitalizedWords .context.instance_id }}'
+
+  artifacts:
+    template.yaml: |
+      {{- /*
+        The connection variables this Recipe reads off the inject pipe, under the
+        socket whose edge delivers them, each beside the provides key the edge's
+        inject block names it from. The pipe is read as a map, and every read of
+        these variables below goes through it, so a variable nothing delivered is
+        told apart from one delivered empty: an edge on one of these sockets
+        leaving any of its variables missing halts the build, naming the edge, the
+        variables and the inject block to write, rather than rendering a
+        connection setting with an empty value. A socket in $required is read
+        whether or not anything is wired to it, so leaving it empty halts too.
+      */ -}}
+      {{- $env := optional (default dict .context.inject) "env" dict -}}
+      {{- $reads := dict "database" (dict "DB_HOST" "host") -}}
+      {{- $required := list "database" -}}
+      {{- $gaps := list }}{{ $wired := list -}}
+      {{- range $alias, $edge := .context.uses }}{{ with get $reads $edge.socket -}}
+      {{- $wired = append $wired $edge.socket }}{{ $missing := list }}{{ $shape := list -}}
+      {{- range $var, $from := . }}{{ if not (hasKey $env $var) }}{{ $missing = append $missing $var }}{{ end }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+      {{- if $missing }}{{ $gaps = append $gaps (printf "the edge %q on its %s socket delivers no %s, so give that edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $alias $edge.socket (join " or " $missing) (join ", " $shape)) }}{{ end -}}
+      {{- end }}{{ end -}}
+      {{- range $socket := $required }}{{ if not (has $socket $wired) -}}
+      {{- $vars := list }}{{ $shape := list }}{{ range $var, $from := get $reads $socket }}{{ $vars = append $vars $var }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+      {{- $gaps = append $gaps (printf "nothing is wired to its %s socket to deliver %s, so wire one and give its edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $socket (join " and " $vars) (join ", " $shape)) -}}
+      {{- end }}{{ end -}}
+      {{- if $gaps }}{{ fail (printf "example/compute/db-reader %q composes its connection settings from variables its edges deliver on its inject pipe, but %s" .context.instance_id (join "; and " $gaps)) }}{{ end -}}
+      Resources:
+        {{ .locals.logical_id }}:
+          Type: AWS::SSM::Parameter
+          Properties:
+            Name: "{{ .values.parameter_name }}"
+            Type: String
+            Tier: "{{ .infra.tier }}"
+            # Whole-scalar injection: the database host arrives on the
+            # injection context and is stored as the parameter value. A
+            # cross-stack reference can only replace a whole value, so this
+            # value is never interpolated into a larger string.
+            Value: {{ $env.DB_HOST }}

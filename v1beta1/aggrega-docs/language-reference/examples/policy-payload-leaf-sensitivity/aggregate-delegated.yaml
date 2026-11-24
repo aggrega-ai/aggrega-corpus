@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Aggregate
+metadata:
+  name: delegated
+  version: "1.0.0"
+  description: >
+    The same database with no credential attached: the developer authors nothing
+    for the slot, and the Release fills it with the engine-managed peer. That
+    attachment's payload carries no value at a declared leaf, so there is no leaf
+    to mark — while the attachment is still sensitive at the whole-attachment
+    answer, because the slot it fills is declared sensitive. That is what makes
+    this release the control: a rule keyed on the whole-attachment answer
+    refuses it too.
+spec:
+  components:
+    # No features block: the root_password slot is bound in the Release, by the
+    # operator, because who owns the credential follows from the target.
+    db:
+      type: core/datastore/mariadb
+      values:
+        database: appdb

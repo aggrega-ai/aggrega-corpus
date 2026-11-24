@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/ai-agent/gemini
+  version: 1.0.0
+  description: >
+    A Gemini assistant hosted on Google's generative-language API, realized as an external reference (no in-cluster compute). The model runs in Google's service and the deployment holds a contract and a key; the assistant's behaviour is carried in the system instruction and the per-request options the application sends, including whether search grounding is enabled. The realization emits only the wiring a consuming application needs, which is the API endpoint and the model string to call it with. The endpoint defaults to the fixed generative-language host and is sourced from infra so an operator may repoint it at a gateway or proxy.
+  labels:
+    component.aggrega.ai/type: resource
+    component.aggrega.ai/category: ai-agent
+    agent.aggrega.ai/autonomy: copilot
+    component.aggrega.ai/hosting: managed
+    component.aggrega.ai/upstream-licensing: proprietary
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  schema:
+    values:
+      $ref: "BaseComponents#/schemas/BaseAgentParameter"
+      properties:
+        model: { type: string }
+        system_instruction: { type: string }
+        enable_google_search_grounding: { type: boolean, default: false }
+        temperature: { type: number, min: 0.0, max: 2.0, default: 0.7 }
+      required: [model, enable_google_search_grounding, temperature]
+    infra:
+      # The generative-language API has a fixed host, so the endpoint defaults to
+      # it and an operator need not supply one. It is sourced from infra (not
+      # hardcoded in the Recipe) so an operator may repoint it at a gateway or
+      # proxy.
+      endpoint: { type: string, default: "https://generativelanguage.googleapis.com" }
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      endpoint:
+        type: string
+        required: true
+        description: >
+          Base URL an application sends the assistant's requests to. It
+          follows the endpoint set in the Release, so an operator may point it
+          at a gateway or proxy without the application changing.
+      model:
+        type: string
+        required: true
+        description: >
+          Name of the model the assistant runs on, carried through from the
+          model the Aggregate declared. An application sends it with each
+          request, alongside the system instruction that carries the
+          assistant's behaviour.

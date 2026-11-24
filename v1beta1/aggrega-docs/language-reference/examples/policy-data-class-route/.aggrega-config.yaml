@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+workspace:
+  catalog_dirs:
+    # The workspace's own catalog: it declares the claims assistant this
+    # workspace deploys, and the Plugin entity of the OPA engine, its guest
+    # beside it.
+    - ./catalog
+# The hub registry supplies the standard-library catalog: every other
+# Component, the two Features, their Recipes, and the Plugin entities of the
+# Rego and CEL engines compiled into the aggrega binary — and the gateway
+# configuration step the data-masking realization runs.
+default_registry: hub.aggrega.ai
+
+# No governance attachment here. The policy is attached by the file a build
+# names with --config: governance-rego.yaml, governance-cel.yaml or
+# governance-opa.yaml, one per engine. That file is read as the global
+# configuration and this one layers on top of it, and a list this file declared
+# would replace the one the named file carries — so this file declares no
+# plugins.governance of its own.

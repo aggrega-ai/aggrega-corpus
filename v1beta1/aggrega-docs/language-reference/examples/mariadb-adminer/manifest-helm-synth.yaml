@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Manifest
+metadata:
+  name: manifest-helm-synth
+  version: "1.0.0"
+  description: >
+    Ops mapping for the self-contained Kubernetes target. MariaDB and
+    Adminer are rendered offline by the helm provider's Workload synthesis
+    (no external chart). Recipe selection at build time is by component type
+    against the loaded catalog layer; these mappings bind each type to its
+    Recipe for this target.
+spec:
+  mappings:
+    components:
+      type:
+        core/datastore/mariadb:1.0.0: helm/mariadb-synth:1.0.0
+        core/devtool/adminer:1.0.0: helm/adminer-helm:1.0.0
+    features:
+      type:
+        core/secret-value:1.0.0: helm/env-secret:1.0.0
+        core/secret-provided:1.0.0: helm/provided-secret:1.0.0

@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Release
+metadata:
+  name: cross-boundary-helm
+  environment: production
+  version: "1.0.0"
+spec:
+  aggregate: cross-boundary-app
+  manifest: cross-boundary-helm-manifest
+  # Same developer intent as the compose variant, deployed to Kubernetes. Two
+  # sibling boundaries, each with a distinct aggrega.ai/namespace annotation that
+  # cascades to every resource in the boundary as metadata.namespace. There is
+  # NO compose-bridge: the adminer→db reference crosses the namespace seam by
+  # native cross-namespace DNS. The db recipe publishes a bare service name; the
+  # consumer attaches the core/k8s-dns-resolver routing feature, which qualifies
+  # the injected host with the target's namespace caller-side (db-default.backend).
+  boundaries:
+    frontend:
+      directory: frontend
+      annotations:
+        aggrega.ai/namespace: "frontend"
+      components:
+        adminer:
+          # Qualify the injected database host with the target's namespace on
+          # the consumer side: ADMINER_DEFAULT_SERVER becomes db-default.backend.
+          features:
+            dns-resolver:
+              type: core/k8s-dns-resolver:1.0.0
+              infra:
+                target_var: ADMINER_DEFAULT_SERVER
+    backend:
+      directory: backend
+      annotations:
+        aggrega.ai/namespace: "backend"
+      components:
+        db: {}

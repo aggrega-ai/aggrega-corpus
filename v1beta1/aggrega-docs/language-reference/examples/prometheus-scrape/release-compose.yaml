@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Release
+metadata:
+  name: local-compose
+  environment: development
+  version: "1.0.0"
+spec:
+  aggregate: aggregate
+  manifest: manifest-compose
+  boundaries:
+    app:
+      directory: app
+      components:
+        team-dashboards:
+          infra:
+            port: 3000
+        ops-dashboards:
+          # A distinct host port, so both Grafanas can run side by side locally.
+          infra:
+            port: 3001
+        metrics:
+          infra:
+            engine_version: "v3.5.0"

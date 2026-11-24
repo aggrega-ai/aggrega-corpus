@@ -1,0 +1,237 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: jaeger
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    Jaeger single-node tracing on Kubernetes via the helm provider's Workload
+    synthesis (a StatefulSet with a per-replica data volume, plus a ClusterIP
+    Service exposing the OTLP receivers and the query UI). Jaeger v2 is an
+    OpenTelemetry Collector distribution configured by a YAML config file rather
+    than the legacy environment variables. That config is delivered as a file:
+    the recipe emits it as a ConfigMap via artifacts: and mounts it into the
+    container through a configmap volume at /etc/jaeger, and the container reads
+    it with --config /etc/jaeger/config.yaml. The embedded key-value store writes
+    to the persistent volume at /badger (keys under /badger/key, values under
+    /badger/data) so trace data survives restarts. The OTLP receiver endpoints in
+    the config track the recipe's OTLP port sizing so the process listens on the
+    same ports the Service publishes. provides.host is the bare, self-contained
+    in-cluster service name of the synthesized Service — it carries no namespace,
+    so the recipe is independent of where it is deployed. A consumer in another
+    namespace qualifies the host with the target namespace on its own side
+    (caller-side routing).
+
+    It is synthesized because Jaeger's own Helm chart fails the complete test:
+    it keeps no trace store on a volume, which the on-disk store this Component
+    describes needs.
+
+    With `values.metrics_enabled` true the config has Jaeger serve its own
+    metrics at port 8888 on every interface, which checks no caller and joins
+    the ClusterIP Service, and provides.metrics_endpoint publishes the address;
+    false, that key is empty.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/observability/jaeger:1.0.0
+  # Why this is a synthesis rather than a chart realization. Jaeger publishes a
+  # chart, but it fails the catalog's complete test for this Component, which
+  # keeps its spans in a local embedded store on a volume of infra.storage.size.
+  # Measured 2026-10-21 at chart jaeger 4.11.2 (appVersion 2.19.0, this
+  # Component's default; 4.16.1, the newest, has the same shape) from
+  # https://jaegertracing.github.io/helm-charts: its templates render a
+  # Deployment (strategy Recreate), a Service and a ServiceAccount, and no
+  # PersistentVolumeClaim or StatefulSet. The only volume for the embedded store
+  # it mentions is a commented example of a claim the user supplies, under
+  # jaeger.extraVolumes and jaeger.extraVolumeMounts at /badger. Selecting that
+  # store means replacing the chart's whole server configuration through its
+  # userconfig value. Its README documents the in-memory store ("No
+  # persistence."), Elasticsearch and Cassandra, and opens "Experimental: This
+  # chart is under active development with no stability guarantees. Breaking
+  # changes may occur in minor versions."
+  #
+  # This Recipe reads no infra.overrides keys.
+  #
+  # provides.host is the bare Service name "<rendered_name>-default" — the helm
+  # provider names the synthesized ClusterIP Service "<rendered_name>-<service-key>"
+  # (here "<rendered_name>-default"), with no namespace segment. provides.port is
+  # the OTLP gRPC receiver port trace producers push to; protocol is "grpc".
+  #
+  # metrics_endpoint is the address Jaeger serves its own metrics at while
+  # values.metrics_enabled is true: /metrics on the metrics_port local below,
+  # of the same ClusterIP Service, which carries that port only then. It is
+  # empty while the value is false, when that listener stays on Jaeger's
+  # loopback address.
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ .infra.otlp_grpc_port }}"
+    protocol: "grpc"
+    metrics_endpoint: "{{ if .values.metrics_enabled }}http://{{ .context.rendered_name }}-default:{{ .locals.metrics_port }}/metrics{{ end }}"
+  # The Jaeger v2 config is delivered as a file: this ConfigMap carries the
+  # full config under config.yaml and is mounted into the container at
+  # /etc/jaeger by the configmap volume below. The ConfigMap name matches the
+  # volume's source. The OTLP receiver endpoints track the OTLP port sizing so
+  # the listeners and the published Service ports stay in lockstep; at the
+  # default ports this renders the minimal single-store badger config verbatim.
+  # The health-check extension listens on loopback unless an endpoint is set,
+  # so it is bound on every address at its conventional port, as Jaeger's own
+  # default configuration binds it, for the kubelet to reach.
+  #
+  # health_port is the single authored home for that port: the configuration
+  # below binds it and the workload declares it as the container port the
+  # probes reach, and the two are separate templates.
+  #
+  # Jaeger serves its own metrics at /metrics on port 8888 of its loopback
+  # address unless the configuration says otherwise. With values.metrics_enabled
+  # true the configuration carries a service.telemetry block with one pull
+  # reader: the same Prometheus exporter on the same port, with the same three
+  # settings that keep the default's metric names, bound on every address
+  # instead. A reader written in the configuration replaces the default one
+  # whole, which is why the three settings are written out. That listener
+  # serves /metrics and nothing else, and checks no caller. metrics_port is the
+  # single authored home for its port, which the configuration binds, the
+  # workload declares on the container and the Service, and provides publishes.
+  # With the value false nothing of it is rendered.
+  locals:
+    health_port: "13133"
+    metrics_port: "8888"
+  artifacts:
+    jaeger-config.yaml: |
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: {{ .context.rendered_name }}-jaeger-config
+      data:
+        config.yaml: |
+          service:
+            extensions: [jaeger_storage, jaeger_query, healthcheckv2]
+            pipelines:
+              traces:
+                receivers: [otlp]
+                processors: [batch]
+                exporters: [jaeger_storage_exporter]
+      {{- if .values.metrics_enabled }}
+            telemetry:
+              metrics:
+                readers:
+                  - pull:
+                      exporter:
+                        prometheus:
+                          host: "0.0.0.0"
+                          port: {{ .locals.metrics_port }}
+                          without_scope_info: true
+                          without_units: true
+                          without_type_suffix: true
+      {{- end }}
+          extensions:
+            healthcheckv2:
+              use_v2: true
+              http:
+                endpoint: 0.0.0.0:{{ .locals.health_port }}
+            jaeger_query:
+              storage:
+                traces: main_store
+            jaeger_storage:
+              backends:
+                main_store:
+                  badger:
+                    directories:
+                      keys: "/badger/key"
+                      values: "/badger/data"
+                    ephemeral: false
+                    ttl:
+                      spans: 48h
+          receivers:
+            otlp:
+              protocols:
+                grpc:
+                  endpoint: 0.0.0.0:{{ .infra.otlp_grpc_port }}
+                http:
+                  endpoint: 0.0.0.0:{{ .infra.otlp_http_port }}
+          processors:
+            batch:
+          exporters:
+            jaeger_storage_exporter:
+              trace_storage: main_store
+  workload: |
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # form: stateful selects a StatefulSet on the helm provider; the embedded
+    # trace store persists to the per-replica persistentTemplate volume at
+    # /badger, so the stateful shape (and its per-replica claim) is correct.
+    form: stateful
+    replicas: 1
+    containers:
+      main:
+        image: "cr.jaegertracing.io/jaegertracing/jaeger:{{ .infra.engine_version }}"
+        # Jaeger v2 reads its OTel-Collector config from the mounted file. The
+        # config ConfigMap is emitted via artifacts: and mounted at /etc/jaeger.
+        args:
+          - --config
+          - /etc/jaeger/config.yaml
+        # `health` is the health-check extension's port. It sorts before the
+        # other names, so an http probe is sent to it, and no Service publishes
+        # it; the ports the Services name keep their names.
+        ports:
+          health: {{ .locals.health_port }}
+          otlp-grpc: {{ .infra.otlp_grpc_port }}
+          otlp-http: {{ .infra.otlp_http_port }}
+          query: {{ .infra.query_port }}
+    {{- if .values.metrics_enabled }}
+          metrics: {{ .locals.metrics_port }}
+    {{- end }}
+        # The health-check extension reports the collector's status at /status.
+        # Both probes ask it, with the timings Jaeger's own chart gives them.
+        health:
+          ready:
+            http: /status
+            initialDelaySeconds: 1
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+          live:
+            http: /status
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 1
+            failureThreshold: 5
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+        volumeMounts:
+          - name: data
+            path: /badger
+          - name: config
+            path: /etc/jaeger
+    volumes:
+      data:
+        persistentTemplate:
+          size: "{{ .infra.storage.size }}"
+      config:
+        configmap:
+          source: "{{ .context.rendered_name }}-jaeger-config"
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          otlp-grpc: {{ .infra.otlp_grpc_port }}
+          otlp-http: {{ .infra.otlp_http_port }}
+          query: {{ .infra.query_port }}
+    {{- if .values.metrics_enabled }}
+          metrics: {{ .locals.metrics_port }}
+    {{- end }}
+      headless:
+        type: Headless
+        ports:
+          otlp-grpc: {{ .infra.otlp_grpc_port }}
+          otlp-http: {{ .infra.otlp_http_port }}
+          query: {{ .infra.query_port }}

@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: adminer-helm
+  version: "1.0.0"
+  description: >
+    Adminer on Kubernetes via the helm provider's Workload synthesis
+    (Deployment + NodePort Service). The database host resolved from the
+    `databases` uses-edge arrives on .context.inject.env and renders as
+    ADMINER_DEFAULT_SERVER — here a namespace-qualified cross-namespace DNS
+    name, so Adminer reaches the database in another namespace with no gateway.
+spec:
+  capability: helm
+  implements: core/devtool/adminer
+  # provides.host is the name of the Service that serves the UI: the helm
+  # provider names the synthesized Service "<rendered_name>-<service-key>",
+  # here "<rendered_name>-default". The image serves Adminer on 8080, so the
+  # container port stays 8080 whatever port an operator sets; infra.port is
+  # the Service's port, which targets the container port by its name, and
+  # provides.port is that Service port.
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ optional .infra `port` 8080 }}"
+  workload: |
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    replicas: 1
+    containers:
+      main:
+        image: "adminer:4"
+        variables:
+          {{- range $k, $v := .context.inject.env }}
+          {{ $k }}: "{{ $v | replace "\\" "\\\\" | replace "\"" "\\\"" }}"
+          {{- end }}
+        ports:
+          http: 8080
+    services:
+      default:
+        type: NodePort
+        ports:
+          http: {{ optional .infra `port` 8080 }}

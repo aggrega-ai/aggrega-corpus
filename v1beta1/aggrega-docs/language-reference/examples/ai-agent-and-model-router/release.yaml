@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Release
+metadata:
+  name: ai-agent-and-model-router-dev
+  environment: development
+  version: "1.0.0"
+spec:
+  aggregate: ai-agent-and-model-router
+  manifest: ai-agent-and-model-router-manifest
+
+  # The parameter the Aggregate declared, fulfilled for this environment. The
+  # Release fulfils parameters; it cannot declare values, and it cannot add a
+  # component the Aggregate did not.
+  parameters:
+    router_admin_key: dev-router-admin-key-change-me
+
+  # Single scope: components are authored directly with no boundaries block, so
+  # they fold into one synthesized boundary and the artifacts land flat under
+  # dist/helm/.
+  components:
+    router:
+      infra:
+        # Operator sizing. Everything omitted takes the schema default — the
+        # image tag and the CPU and memory requests — and with no credential in
+        # the router's database_url slot it runs stateless.
+        port: 4000
+      features:
+        # An attachment's operator sizing is authored under the attachment's own
+        # name, in its own infra pillar — the same split the component above
+        # has, one level in.
+        published:
+          infra:
+            # The name the router answers on outside the cluster. It is this
+            # environment's name for the router, so the operator writes it here
+            # and each environment's Release names its own.
+            host: assistant.example.internal
+            # The operator affirms that an ingress controller is already running
+            # in the target cluster. The compiler runs ahead of time and never
+            # contacts a cluster, so it cannot check this: the attachment asks
+            # instead, and the build halts while the answer is missing rather
+            # than emitting routing nothing would serve.
+            control_plane_present: true
+            # The routing knobs. service_name is deliberately omitted: left
+            # unset, the routing targets the Service the router's own Recipe
+            # emits, which is what this deployment wants. ingress_class_name is
+            # omitted too, so the field does not render and the cluster's
+            # default class claims the resource. Both of those fallbacks are
+            # delivered by the bound FeatureRecipe.
+            service_port_name: http
+        # The scrape target is attached here, type and all, rather than in the
+        # Aggregate: every input it takes is operator sizing — how often a
+        # platform scrapes, and where — so the operator attaches it.
+        metrics:
+          type: core/prometheus-exporter
+          infra:
+            # All three scrape knobs, written out. Left out, each takes the
+            # Feature's default — port `metrics`, every 60s, at /metrics. The
+            # router serves its metrics on the Service port named `metrics`,
+            # which its Recipe emits because the Aggregate sets the router's
+            # `metrics_enabled`; its `http` port answers /metrics 403.
+            interval: 30s
+            port: metrics
+            path: /metrics
+
+    # Declared with nothing to configure. Every knob the cache exposes takes its
+    # schema default, including the port the agent is handed. A component still
+    # has to appear here: one left out is placed in no scope and the build halts.
+    checkpointer: {}
+
+    agent:
+      infra:
+        # The application image. The catalog packages the agent runtime; the
+        # graph the agent runs is this deployment's own code.
+        image: ghcr.io/example/assistant:1.4.0

@@ -1,0 +1,222 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: agenta-web-mobile
+  version: 1.0.0
+  license: MIT
+  # The identifier names the terms of the software this Recipe realizes: the
+  # image below is the platform's open core, published under the MIT Expat terms
+  # its repository states for everything outside one named subtree. That subtree
+  # is published under separate terms; this Recipe pins neither it nor an image
+  # built from it, and offers no knob to select one. No single identifier states
+  # both situations, so the coarse class covering the product as a whole is
+  # carried on the component's component.aggrega.ai/upstream-licensing label
+  # rather than asserted here.
+  description: >
+    The agent workspace's small-screen front end on Kubernetes via the helm
+    provider's Workload synthesis: a stateless Deployment plus a ClusterIP
+    Service on the HTTP port the ingress tier routes its own path to. The front
+    end holds no state and owns no datastore, so it renders stateless.
+
+    It makes the same split between in-cluster and browser-facing addresses the
+    full console's Recipe makes, for the same reason: the base URLs of the
+    control-plane API and the model-facing service resolved from the `api` and
+    `services` edges are what the server-side rendering path calls, while the
+    externally reachable base URL the operator supplied is what the browser
+    calls. The authentication core's own base URL, resolved from the `auth_core`
+    edge, is emitted for the sign-in flow.
+
+    One variable differs from the full console's rendering and is worth naming:
+    this front end declares itself the small-screen destination, so a visitor it
+    serves is not redirected onward. That is what keeps the pair from bouncing a
+    visitor between them.
+
+    provides.host is the bare, self-contained in-cluster service name of the
+    synthesized Service — it carries no namespace, so the recipe is independent
+    of where it is deployed. A consumer in another namespace qualifies the host
+    with the target namespace on its own side (caller-side routing), and
+    assembles its own URL rather than reusing provides.endpoint.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/ai-agent/agenta-web-mobile:1.0.0
+  # This Recipe reads no infra.overrides keys.
+  #
+  # Target-expected names: as on the full console — HOSTNAME and PORT for the
+  # bind address and listen port, the three AGENTA_*_URL variables for the
+  # addresses a browser calls, AGENTA_API_INTERNAL_URL and
+  # AGENTA_SERVICES_INTERNAL_URL for the in-cluster addresses the server-side
+  # rendering path calls, SUPERTOKENS_URI_CORE for the authentication core, and
+  # AGENTA_AUTH_KEY and AGENTA_CRYPT_KEY for the keys shared with the
+  # control-plane API. AGENTA_MOBILE_GATE and AGENTA_MOBILE_REVERSE_GATE are the
+  # pair that says "this is the small-screen destination": both are set here, so
+  # a visitor this front end serves stays on it.
+  #
+  # The names the edges deliver on are read here as API_ENDPOINT,
+  # SERVICES_ENDPOINT and AUTH_CORE_ENDPOINT. Those are the `in:` keys each
+  # uses-edge must be set to, and the component's socket comments state the same
+  # contract on the authoring side.
+  #
+  # provides is evaluated before the workload and cannot read it, so the port has
+  # one authored home in .infra.port that every reader dereferences — provides.port
+  # and provides.endpoint here, and below the front end's own listen port, the
+  # container port and the Service; the literal is never repeated.
+  #
+  # host and endpoint spell the Service name out twice on purpose. A provides
+  # entry cannot read another provides entry, and the name has to match the
+  # Service the helm provider derives from the service key below, so the
+  # repetition is forced, not a choice, and the two must be edited together.
+  #
+  # The external base URL has no sensible default: it is the address a browser
+  # reaches this platform on, which depends on the cluster's own ingress and
+  # which an ahead-of-time compiler cannot discover. A build that has not
+  # supplied it halts here rather than rendering a front end that calls nothing.
+  assertions:
+    external_base_url_supplied: >-
+      {{- if not (and (hasKey .infra "external_base_url") (index .infra "external_base_url")) -}}
+      {{- fail "infra.external_base_url must name the externally reachable base URL of the platform, as a browser reaches it through the ingress tier (for example https://agenta.example.com); set it in the Release" -}}
+      {{- end -}}
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ .infra.port }}"
+    endpoint: "http://{{ .context.rendered_name }}-default:{{ .infra.port }}"
+    protocol: "http"
+  workload: |
+    {{- /*
+      The alias of each connection carrying a credential this component
+      presents, or empty: the authentication core's API key.
+    */ -}}
+    {{- $authCoreCredential := "" -}}
+    {{- range $alias, $edge := .context.uses -}}
+    {{- if and (eq $edge.socket "auth_core") (hasKey (default dict $edge.features) "credential") -}}{{- $authCoreCredential = $alias -}}{{- end -}}
+    {{- end -}}
+    {{- /*
+      The connection variables this Recipe reads off the inject pipe, under the
+      socket whose edge delivers them, each beside the provides key the edge's
+      inject block names it from. The pipe is read as a map, and every read of
+      these variables below goes through it, so a variable nothing delivered is
+      told apart from one delivered empty: an edge on one of these sockets
+      leaving any of its variables missing halts the build, naming the edge, the
+      variables and the inject block to write, rather than rendering a
+      connection setting with an empty value. A socket in $required is read
+      whether or not anything is wired to it, so leaving it empty halts too.
+    */ -}}
+    {{- $env := optional (default dict .context.inject) "env" dict -}}
+    {{- $reads := dict "api" (dict "API_ENDPOINT" "endpoint") "services" (dict "SERVICES_ENDPOINT" "endpoint") "auth_core" (dict "AUTH_CORE_ENDPOINT" "endpoint") -}}
+    {{- $required := list "api" "services" "auth_core" -}}
+    {{- $gaps := list }}{{ $wired := list -}}
+    {{- range $alias, $edge := .context.uses }}{{ with get $reads $edge.socket -}}
+    {{- $wired = append $wired $edge.socket }}{{ $missing := list }}{{ $shape := list -}}
+    {{- range $var, $from := . }}{{ if not (hasKey $env $var) }}{{ $missing = append $missing $var }}{{ end }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- if $missing }}{{ $gaps = append $gaps (printf "the edge %q on its %s socket delivers no %s, so give that edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $alias $edge.socket (join " or " $missing) (join ", " $shape)) }}{{ end -}}
+    {{- end }}{{ end -}}
+    {{- range $socket := $required }}{{ if not (has $socket $wired) -}}
+    {{- $vars := list }}{{ $shape := list }}{{ range $var, $from := get $reads $socket }}{{ $vars = append $vars $var }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- $gaps = append $gaps (printf "nothing is wired to its %s socket to deliver %s, so wire one and give its edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $socket (join " and " $vars) (join ", " $shape)) -}}
+    {{- end }}{{ end -}}
+    {{- if $gaps }}{{ fail (printf "core/ai-agent/agenta-web-mobile %q composes its connection settings from variables its edges deliver on its inject pipe, but %s" .context.instance_id (join "; and " $gaps)) }}{{ end -}}
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # The front end holds no durable state, so the default stateless form (a
+    # Deployment on the helm provider) is correct.
+    form: stateless
+    replicas: 1
+    containers:
+      main:
+        image: "ghcr.io/agenta-ai/agenta-web-mobile:{{ .infra.engine_version }}"
+        # The image ships the small-screen front end under its own path and runs
+        # whichever the arguments name.
+        command: ["/app/entrypoint.sh"]
+        args: ["node", "mobile/server.js"]
+        variables:
+          # Bind on every interface so the Service can reach the container.
+          HOSTNAME: "0.0.0.0"
+          PORT: "{{ .infra.port }}"
+          AGENTA_LICENSE: oss
+          # The addresses the browser calls. All three derive from one authored
+          # value so they cannot disagree, and the two path suffixes match the
+          # routes the ingress tier assembles.
+          AGENTA_WEB_URL: "{{ .infra.external_base_url }}"
+          AGENTA_API_URL: "{{ .infra.external_base_url }}/api"
+          AGENTA_SERVICES_URL: "{{ .infra.external_base_url }}/services"
+          # The addresses the server-side rendering path calls, resolved from the
+          # edges.
+          AGENTA_API_INTERNAL_URL: "{{ $env.API_ENDPOINT }}"
+          AGENTA_SERVICES_INTERNAL_URL: "{{ $env.SERVICES_ENDPOINT }}"
+          # The authentication core's own base URL, resolved from its edge.
+          SUPERTOKENS_URI_CORE: "{{ $env.AUTH_CORE_ENDPOINT }}"
+          # This front end IS the small-screen destination, so a visitor it
+          # serves is not sent onward. Both variables are stated together
+          # because either alone would leave the pair able to bounce a visitor.
+          AGENTA_MOBILE_GATE: "true"
+          AGENTA_MOBILE_REVERSE_GATE: "true"
+          ALLOW_EMBED: "{{ .values.allow_embedding }}"
+          # Stated rather than left to the image, because a standard-library
+          # entity chooses the quieter default.
+          NEXT_TELEMETRY_DISABLED: "1"
+    {{- $attached := $authCoreCredential }}
+    {{- range $slot := list "auth_key" "crypt_key" }}
+    {{- if hasKey (default dict $.features) $slot }}{{ $attached = true }}{{ end }}
+    {{- end }}
+    {{- if $attached }}
+        attachments:
+    {{- end }}
+    {{- if hasKey (default dict .features) "auth_key" }}
+          AGENTA_AUTH_KEY:
+            from: auth_key
+            as: env
+    {{- end }}
+    {{- if hasKey (default dict .features) "crypt_key" }}
+          AGENTA_CRYPT_KEY:
+            from: crypt_key
+            as: env
+    {{- end }}
+    {{- with $authCoreCredential }}
+          SUPERTOKENS_API_KEY:
+            connection: "{{ . }}"
+            from: credential
+            as: env
+    {{- end }}
+        ports:
+          http: {{ .infra.port }}
+        # The front end documents no health route of its own; the platform's own
+        # Helm chart probes it for start-up, readiness and liveness with a GET of
+        # /m/__env.js, a file it serves under its own path, on this port, with the
+        # timing below. The start-up probe allows up to 155 s before liveness
+        # takes over.
+        health:
+          startup:
+            http: /m/__env.js
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 30
+          ready:
+            http: /m/__env.js
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          live:
+            http: /m/__env.js
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+        # The resource quantities are quoted so the rendered value stays a
+        # string whatever the Release supplies.
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          http: {{ .infra.port }}

@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Release
+metadata:
+  name: local-dev
+  environment: development
+  version: "1.0.0"
+spec:
+  aggregate: aggregate
+  manifest: manifest
+  # Single scope: components are authored directly, no boundaries block. The
+  # compiler folds them into the synthesized default boundary and emits flat
+  # under dist/ (per provider).
+  components:
+    # infra — the Operator-sizing pillar, fulfilled per environment.
+    # The Developer's Aggregate never carries these fields.
+    db:
+      infra:
+        engine_version: "11.4"
+        storage:
+          size: 2Gi
+    web:
+      infra:
+        port: 8080

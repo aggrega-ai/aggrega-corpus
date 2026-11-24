@@ -1,0 +1,193 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: postgres
+  version: 1.0.0
+  description: >
+    PostgreSQL for local development via Docker Compose. Synthesized-mode
+    Workload: the compose provider translates the Workload kind into a service
+    entry (image, port, exposed service). provides.host is the bare service
+    name, resolved on the compose network. Bootstrap scripts (init_scripts) and
+    a custom server configuration block (custom_config) are both realized: each
+    script mounts under /docker-entrypoint-initdb.d and runs once when the
+    database first initializes, and the configuration block mounts as the
+    postgresql.conf the server's config_file argument points at.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: compose
+  implements: core/datastore/postgres:1.0.0
+  # The metrics keys are published empty: the server runs alone in its service,
+  # with no exporter beside it, and PostgreSQL serves no metrics of its own.
+  provides:
+    host: "{{ .context.instance_id }}"
+    port: "{{ .infra.port }}"
+    user: "{{ .values.user }}"
+    database: "{{ .values.database }}"
+    protocol: "postgres"
+    metrics_pod_selector: ""
+    metrics_pod_port: ""
+    metrics_path: ""
+  # infra.credentials chooses who owns the database's credentials on the
+  # controller-driven realization, and infra.credentials_secret names the
+  # Kubernetes Secret it reads them from. This realization takes the database
+  # password from the credential attached to the password slot, delivered as a
+  # value on the inject pipe, and Docker Compose has no Kubernetes Secret to
+  # read, so supplied, or any Secret name, would reach no byte of the output
+  # while the build reads as if it had chosen who owns the password. Refused
+  # here by name: infra.credentials other than generated, and any
+  # infra.credentials_secret. Not read: both, while they hold the Component's
+  # defaults, generated and empty.
+  assertions:
+    infra_credentials: >-
+      {{- if ne (toString .infra.credentials) "generated" -}}
+      {{- fail (printf "infra.credentials is %q, which chooses who owns the database's credentials on the controller-driven realization, and this realization takes the database password from the credential attached to the password slot: remove infra.credentials from the Release" (toString .infra.credentials)) -}}
+      {{- end -}}
+      {{- with .infra.credentials_secret -}}
+      {{- fail (printf "infra.credentials_secret is %q, which names the Kubernetes Secret the controller-driven realization reads the database owner's credentials from, and Docker Compose has no Kubernetes Secret to read, so this realization takes the database password from the credential attached to the password slot: remove infra.credentials_secret from the Release" .) -}}
+      {{- end -}}
+  # The developer's bootstrap scripts and custom server configuration render as
+  # compose configs the server mounts as files. Each half is presence-guarded
+  # independently: an Aggregate that leaves a value unset emits no config, no
+  # mount and no server argument for it, so it renders as though the key did not
+  # exist.
+  #
+  # init_scripts becomes one config per key, each mounted at its own filename
+  # under /docker-entrypoint-initdb.d. The image runs the files it finds there
+  # once, in filename order, and only when the data directory is empty — a
+  # database that already holds data is left untouched. custom_config becomes
+  # the postgresql.conf the server's config_file argument points at; settings
+  # the file omits keep their built-in defaults, and listen_addresses is the one
+  # worth naming, because its built-in default accepts local connections only —
+  # a block that omits it leaves the server unreachable from the other services
+  # on the compose network.
+  #
+  # Each config's name is spelled here and again on the volume that mounts it
+  # below. The artifact and the workload are separate template strings with no
+  # binding either could dereference, so the repetition is forced rather than
+  # chosen — the two must be edited together.
+  artifacts:
+    postgres-initdb.compose-fragment.yaml: |
+      {{- if .values.init_scripts }}
+      configs:
+      {{- range $name, $content := .values.init_scripts }}
+        {{ $.context.instance_id }}-initdb-{{ $name }}:
+          content: |
+      {{ $content | indent 6 }}
+      {{- end }}
+      {{- end }}
+    postgres-config.compose-fragment.yaml: |
+      {{- if .values.custom_config }}
+      configs:
+        {{ .context.instance_id }}-config:
+          content: |
+      {{ .values.custom_config | indent 6 }}
+      {{- end }}
+  workload: |
+    {{- $configFile := "/etc/postgresql/postgresql.conf" -}}
+    {{- $initDir := "/docker-entrypoint-initdb.d" -}}
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    containers:
+      main:
+        image: "postgres:{{ .infra.engine_version }}"
+    {{- if .values.custom_config }}
+        # The server arguments are supplied as args rather than as a command, so
+        # the image's own startup script still runs: it is what creates the
+        # database on an empty data directory, reads the POSTGRES_* variables
+        # below, and runs the bootstrap files. It passes these arguments through
+        # to the server, which is where config_file selects the mounted
+        # configuration file.
+        #
+        # $configFile is the single authored home for that path: the config_file
+        # argument and the mount that puts the file there both read the binding,
+        # so a future move cannot relocate one and leave the other pointing at
+        # the old path. It names a file rather than a directory.
+        args:
+          - postgres
+          - -c
+          - "config_file={{ $configFile }}"
+    {{- end }}
+        # POSTGRES_USER / POSTGRES_DB are developer values (configurable, defaults
+        # appuser and appdb). POSTGRES_PASSWORD is wired through
+        # the optional `password` credential slot: when attached its value arrives on
+        # the inject pipe (an inject-family FeatureRecipe such as dotenv-secret); with
+        # none attached the Recipe falls back to an inline development default. The
+        # value is read off the pipe under the key the attachment names in
+        # `values.key` (`value` for a `core/secret-value` the Release alone
+        # attaches), or under POSTGRES_PASSWORD where it names none; a value
+        # delivered under another key halts the build naming the key read.
+        # storage/compute sizing is a helm-synth concern; the compose flavor reads
+        # only the developer/port/version surface.
+        # The optional application-user role (the app_user_password slot) stays a
+        # helm-target realization: it rides the role-creation script the helm
+        # Recipe emits on first initialization, so a compose deployment does not
+        # create a separate application role.
+        variables:
+          POSTGRES_USER: "{{ .values.user }}"
+    {{- if hasKey (default dict .features) "password" }}
+    {{- $passwordKey := default "POSTGRES_PASSWORD" (optional (default dict .features.password.values) "key" "") }}
+          POSTGRES_PASSWORD: "{{ index .context.inject.env $passwordKey | replace "\\" "\\\\" | replace "\"" "\\\"" }}"
+    {{- else }}
+          POSTGRES_PASSWORD: apppass
+    {{- end }}
+          POSTGRES_DB: "{{ .values.database }}"
+    {{- if or .values.encoding .values.locale }}
+          POSTGRES_INITDB_ARGS: "{{ with .values.encoding }}--encoding={{ . }}{{ end }}{{ with .values.locale }} --locale={{ . }}{{ end }}"
+    {{- end }}
+        ports:
+          p: {{ .infra.port }}
+        # The service's healthcheck runs the image's own pg_isready, which
+        # PostgreSQL documents as the check of whether a server is accepting
+        # connections, over TCP: while a new database is initialized the image
+        # runs a temporary server that listens on its socket only, so a service
+        # that depends on this one is started only once the server accepts
+        # network connections. The image carries no curl or nc, so the check is a
+        # command the image does carry. The configured user and database are named
+        # so that a check is not logged as a failed connection attempt. A service
+        # keeps one healthcheck, so one probe is declared; failures in the first
+        # 30 s do not count, to cover initialization and the bootstrap scripts.
+        health:
+          ready:
+            exec:
+              - pg_isready
+              - "--host=127.0.0.1"
+              - "--port={{ .infra.port }}"
+              - "--username={{ .values.user }}"
+              - "--dbname={{ .values.database }}"
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+    {{- if or .values.init_scripts .values.custom_config }}
+        volumeMounts:
+    {{- range $name, $content := .values.init_scripts }}
+          - name: "initdb-{{ $name }}"
+            path: "{{ $initDir }}/{{ $name }}"
+    {{- end }}
+    {{- if .values.custom_config }}
+          - name: pgconf
+            path: "{{ $configFile }}"
+    {{- end }}
+    {{- end }}
+    {{- if or .values.init_scripts .values.custom_config }}
+    volumes:
+    {{- range $name, $content := .values.init_scripts }}
+      "initdb-{{ $name }}":
+        configmap:
+          source: "{{ $.context.instance_id }}-initdb-{{ $name }}"
+    {{- end }}
+    {{- if .values.custom_config }}
+      pgconf:
+        configmap:
+          source: "{{ .context.instance_id }}-config"
+    {{- end }}
+    {{- end }}
+    services:
+      db:
+        type: ClusterIP
+        ports:
+          p: {{ .infra.port }}

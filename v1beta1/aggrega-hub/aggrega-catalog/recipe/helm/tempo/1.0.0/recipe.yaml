@@ -1,0 +1,154 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: tempo
+  version: 1.0.0
+  license: AGPL-3.0
+  description: >
+    Grafana Tempo distributed-tracing server on Kubernetes via the helm
+    provider's Workload synthesis, running the official upstream grafana/tempo
+    image (no external Helm chart). Tempo is driven in its single-binary shape:
+    every subsystem — distributor, ingester, querier, compactor — runs inside
+    one process backed by a local trace store, so it renders as one StatefulSet
+    with a per-replica data volume, a ConfigMap carrying the Tempo config from
+    the TempoConfig bundle, a ClusterIP Service and a Headless Service exposing
+    the OTLP gRPC and HTTP receivers alongside the HTTP query API. The Tempo
+    server image is pinned to a resolvable tag for reproducible renders. The
+    developer's retention_period flows into the in-process compactor, which
+    deletes stored trace blocks once they age past it. provides.host is the bare
+    in-cluster name of the synthesized ClusterIP Service, with no namespace; a
+    consumer in another namespace qualifies it on its own side. provides.port is
+    the OTLP gRPC receiver port, the endpoint a trace producer wires to, and
+    provides.metrics_endpoint where the server serves its own metrics, in the
+    Prometheus format at /metrics on the HTTP port 3200. Image tag from
+    infra.engine_version. The
+    packaged Tempo server is AGPL-3.0. Reach for this realization where the build
+    must complete with nothing fetched, or where no chart repository is reachable
+    from it; reach for `tempo-chart`, which renders the community-maintained
+    Tempo chart, where the server's configuration should follow the chart as it
+    moves upstream rather than the hand-written file this realization imports,
+    or where spans arrive in the Jaeger or Zipkin wire formats this one does not
+    receive.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/observability/tempo:1.0.0
+  # This Recipe reads no infra.overrides keys.
+  #
+  # provides.host is the bare Service name "<rendered_name>-default" — the helm
+  # provider names the synthesized ClusterIP Service "<rendered_name>-<service-key>"
+  # (here "<rendered_name>-default"), with no namespace segment, so the recipe
+  # is independent of where it is deployed. A same-namespace consumer reaches it
+  # under this name directly; a cross-namespace consumer qualifies it with the
+  # target namespace caller-side. protocol is "grpc" and the container serves
+  # the OTLP gRPC receiver on its fixed port 4317, so provides.port is that
+  # fixed value.
+  #
+  # metrics_endpoint is the address the server serves its own metrics at, in
+  # the Prometheus format: /metrics on the HTTP port, always on, with no
+  # credential configured for it. That port is 3200, the one the TempoConfig
+  # bundle has the server listen on and the Service below carries as `http`,
+  # so the address is not the published host and port. It is spelled out in
+  # full on purpose: a provides entry cannot read another.
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "4317"
+    protocol: "grpc"
+    metrics_endpoint: "http://{{ .context.rendered_name }}-default:3200/metrics"
+  # The entries below are the values the workload shares with the TempoConfig
+  # bundle imported for the server's configuration. Each has its home in the
+  # bundle, which stops the build naming the local when one is missing or
+  # differs from its own; the workload reads them here, because a workload
+  # cannot read the bundle. server_config_delivery has the bundle emit one
+  # ConfigMap. That ConfigMap is named after the rendered name followed by
+  # server_config_map_suffix; a locals entry cannot read the rendered name, so
+  # the workload composes the two where it mounts the ConfigMap.
+  locals:
+    server_config_delivery: config_map
+    server_config_map_suffix: "-config"
+  # The single-binary Tempo configuration, from the TempoConfig bundle every
+  # Recipe synthesizing this Component imports, so the server is configured
+  # alike on either target. With server_config_delivery set to config_map the
+  # bundle emits one ConfigMap, "<rendered_name>-config", carrying the
+  # configuration under the key tempo.yaml. It mounts whole into /etc/tempo,
+  # where the server's -config.file argument reads tempo.yaml. The developer's
+  # retention_period drives the compactor's block retention; the OTLP gRPC and
+  # HTTP receivers are served on their conventional ports; traces and the
+  # write-ahead log live under the mounted data volume at /var/tempo.
+  artifacts:
+    server-config:
+      $import: TempoConfig#/artifacts/ServerConfig
+  workload: |
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # form: stateful selects a StatefulSet on the helm provider; the
+    # persistentTemplate volume below is a companion of this form (rendered as a
+    # volumeClaimTemplate), and the Headless service supplies the StatefulSet's
+    # stable network identity.
+    form: stateful
+    replicas: 1
+    containers:
+      main:
+        image: "grafana/tempo:{{ .infra.engine_version }}"
+        # The single-binary server reads its whole configuration from the
+        # ConfigMap the TempoConfig bundle emits, mounted at /etc/tempo; the
+        # trace store and write-ahead log live on the data volume at /var/tempo.
+        command: ["/tempo", "-config.file=/etc/tempo/tempo.yaml"]
+        ports:
+          otlp-grpc: 4317
+          otlp-http: 4318
+          http: 3200
+        # Tempo reports readiness at /ready on its HTTP port, which is the
+        # container port whose name sorts first, so an http probe reaches it.
+        # As in the product's own chart, both probes ask it, with that chart's
+        # timings.
+        health:
+          ready:
+            http: /ready
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          live:
+            http: /ready
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+        volumeMounts:
+          - name: data
+            path: /var/tempo
+          - name: config
+            path: /etc/tempo
+    volumes:
+      data:
+        persistentTemplate:
+          size: "{{ if .infra.storage }}{{ .infra.storage.size | default "10Gi" }}{{ else }}10Gi{{ end }}"
+      config:
+        configmap:
+          source: "{{ .context.rendered_name }}{{ .locals.server_config_map_suffix }}"
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          otlp-grpc: 4317
+          otlp-http: 4318
+          http: 3200
+      headless:
+        type: Headless
+        ports:
+          otlp-grpc: 4317
+          otlp-http: 4318
+          http: 3200

@@ -1,0 +1,472 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: prometheus-chart
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    Prometheus metrics server on Kubernetes via the prometheus-community Helm
+    chart, configured as one server: the chart's alerting, exporter and
+    push-gateway subcharts are switched off. It renders a Deployment, a
+    ConfigMap carrying the scrape configuration, a PersistentVolumeClaim for the
+    time-series database, a ClusterIP Service, and the ServiceAccount,
+    ClusterRole and ClusterRoleBinding the server reads the cluster's own
+    endpoints under. The server image and the chart version are pinned.
+
+    That cluster-scoped read grant also serves the chart's own jobs, which
+    scrape whatever the cluster advertises through scrape annotations. Each
+    connection on the `scrape_target` uses-socket becomes one scrape job, as on
+    the workload-synthesis realization: a target publishing `metrics_endpoint`
+    is scraped at that address; one publishing `metrics_service` or
+    `metrics_pod_selector` is discovered in the namespace its connection's
+    `aggrega.ai/namespace` annotation names, in every namespace for KEDA and
+    Knative Serving, or in the server's own where neither declares one; a
+    target publishing none halts the build. A connection's `credential` is
+    mounted as a file through `server.extraSecretMounts`, and its job presents
+    it as a bearer token. Reach for it where a chart repository is reachable
+    and the server should discover targets beyond those wired, and for
+    `prometheus` where the build must fetch nothing.
+
+    With `infra.external_base_url` set, the server takes it as its external URL
+    through the chart's `server.baseURL` and is kept serving at its root. With
+    `values.otlp_receiver` true, `server.extraArgs` also turns on the OTLP
+    receiver, whose address it publishes as provides.otlp_http_endpoint.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/observability/prometheus:1.0.0
+
+  # The chart is configured for the single-server shape this Component
+  # describes: the alerting, exporter and push-gateway subcharts it can also
+  # deploy are switched off, so the render is one Prometheus server and nothing
+  # else. Under this configuration the chart renders a Deployment for the
+  # server, a ConfigMap carrying the scrape configuration, a
+  # PersistentVolumeClaim for the time-series database, a ClusterIP Service,
+  # and the ServiceAccount, ClusterRole and ClusterRoleBinding the server needs
+  # to read the cluster's own endpoints.
+  #
+  # That cluster-scoped read grant is the reason to reach for this
+  # realization: it lets the chart's own jobs scrape whatever the cluster
+  # advertises, beyond the targets the topology wires, where the
+  # workload-synthesis realization grants itself read access only where the
+  # wired targets it discovers run. Each connection on the `scrape_target`
+  # uses-socket becomes one job in the scrape configuration the
+  # chart writes, exactly as the workload-synthesis realization does, so the
+  # developer-facing contract is unchanged between the two.
+  #
+  # The server image is pinned to a resolvable release tag for reproducible
+  # renders.
+  source:
+    kind: helm-https-chart
+    url: https://prometheus-community.github.io/helm-charts
+    chart: prometheus
+    # Default chart version. Override via infra.source_version.
+    version: "{{ optional .infra `source_version` \"29.31.1\" }}"
+
+  # provides.host is the query-endpoint Service name, which is what the
+  # Component's provides contract promises. The valuesMapping below pins
+  # server.fullnameOverride to the rendered name, the release name the helm
+  # provider gives the chart, which spells the Component's name in the alphabet
+  # a Kubernetes name allows, so that Service is named exactly "<rendered_name>"
+  # with no namespace segment.
+  #
+  # 🔴 The knob is server.fullnameOverride and NOT the chart's top-level
+  # fullnameOverride. This chart derives the server's resource names from its own
+  # server.fullnameOverride, falling back to the release name plus the chart name
+  # plus "server"; the top-level override is read by a different name helper and
+  # does not reach the server's Service. Setting the top-level one instead names
+  # the Service "<rendered_name>-prometheus-server", which this host would not
+  # match. Established by rendering the chart both ways.
+  #
+  # The name carries no namespace, so the Recipe is independent of where it is
+  # deployed. A same-namespace consumer reaches the query endpoint under this name
+  # directly; a cross-namespace consumer qualifies it caller-side. port follows
+  # the Service port the operator set; the server process itself always listens
+  # on the chart's fixed 9090 and the Service forwards to it.
+  #
+  # otlp_http_endpoint is the OTLP receiver's base address on that Service and
+  # port while values.otlp_receiver is true — the server serves its receiver
+  # at /api/v1/otlp/v1/metrics, and an OTLP exporter appends /v1/metrics to
+  # this base itself — and empty while it is false, when the server serves no
+  # receiver. The address is spelled out in full on purpose: a provides entry
+  # cannot read another.
+  #
+  # metrics_endpoint is where the server serves its own metrics: /metrics on
+  # that Service and port, always on, asking no credential.
+  provides:
+    host: "{{ .context.rendered_name }}"
+    port: "{{ .infra.port }}"
+    protocol: "http"
+    otlp_http_endpoint: "{{ if .values.otlp_receiver }}http://{{ .context.rendered_name }}:{{ .infra.port }}/api/v1/otlp{{ end }}"
+    metrics_endpoint: "http://{{ .context.rendered_name }}:{{ .infra.port }}/metrics"
+
+  # This Recipe reads from infra.overrides:
+  #   image               - map[string]string (server.image.* fields; overrides the tag pin)
+  #   config_reload_image - map[string]string (configmapReload.prometheus.image.* fields)
+  #   requests            - { cpu: string, memory: string } (server resource requests)
+  #   storage_class       - string (server.persistentVolume.storageClass for the data PVC)
+  #   nodeSelector        - map[string]string (server pod scheduling)
+  #   tolerations         - []object (server pod scheduling)
+  #
+  # The connections carrying a credential are read once, at the top of the
+  # mapping, in the alphabetical order of their aliases: each is numbered from
+  # 0, the chart mounts the Secret it publishes under
+  # /etc/prometheus/scrape-credentials/<n>/ through server.extraSecretMounts,
+  # and that connection's scrape job below reads the file named by the data
+  # key it publishes. A credential publishing no Secret name and data key
+  # halts the build, naming the connection, since nothing could be mounted.
+  valuesMapping: |
+    {{- $credentials := list }}
+    {{- range $alias, $edge := .context.uses }}
+    {{- if and (eq $edge.socket "scrape_target") (hasKey (default dict $edge.features) "credential") }}
+    {{- $locator := optional (default dict $edge.features.credential) "provides" dict }}
+    {{- if not (and (optional $locator "name" "") (optional $locator "key" "")) }}
+    {{- fail (printf "the credential on the scrape_target connection %s of %q publishes no Secret name and data key, so there is no Secret to mount as the file the scrape job reads; attach a credential publishing both, such as core/referenced-secret" $alias $.context.instance_id) }}
+    {{- end }}
+    {{- $credentials = append $credentials $alias }}
+    {{- end }}
+    {{- end }}
+    ## ── Subcharts this Component does not describe ─────────────
+    ## The chart can also deploy an alert manager, a node exporter, a
+    ## kube-state-metrics instance and a push gateway. The Component publishes a
+    ## query endpoint for one metrics server and describes none of those, so they
+    ## are switched off rather than rendered unreferenced. Each is its own product
+    ## and belongs to its own component if it is wanted.
+    alertmanager:
+      enabled: false
+    kube-state-metrics:
+      enabled: false
+    prometheus-node-exporter:
+      enabled: false
+    prometheus-pushgateway:
+      enabled: false
+
+    ## ── Configuration-reload sidecar image pin ─────────────────
+    ## The chart runs a second container beside the server, watching the
+    ## configuration ConfigMap and asking the server to reload it. It is one of
+    ## the images this Recipe renders, so it is pinned here rather than left to
+    ## whatever the chart's own default becomes at the next chart version.
+    ## Override the whole block via infra.overrides.config_reload_image.
+    configmapReload:
+      prometheus:
+        image:
+          {{- if and .infra.overrides .infra.overrides.config_reload_image }}
+          {{- range $k, $v := .infra.overrides.config_reload_image }}
+          {{ $k }}: "{{ $v }}"
+          {{- end }}
+          {{- else }}
+          repository: quay.io/prometheus-operator/prometheus-config-reloader
+          tag: "v0.94.0"
+          {{- end }}
+
+    server:
+      ## ── Pin the chart's resource names to the rendered name ──
+      ## Names the query-endpoint Service exactly "<rendered_name>", matching
+      ## provides.host. Read the comment above provides for why this is the
+      ## server-scoped override rather than the chart's top-level one.
+      fullnameOverride: "{{ .context.rendered_name }}"
+
+      ## ── Server image pin ─────────────────────────────────────
+      ## The chart leaves the tag empty and falls back to its own appVersion,
+      ## which makes the render move whenever the chart moves; pin it explicitly
+      ## instead. The repository is the chart's own default rather than the
+      ## workload-synthesis realization's, so the image this realization runs is
+      ## the one its chart is tested against, and it is why the Component's
+      ## engine_version says the chart-backed realization pins its own tag.
+      ## Override the whole block via infra.overrides.image.
+      image:
+        {{- if and .infra.overrides .infra.overrides.image }}
+        {{- range $k, $v := .infra.overrides.image }}
+        {{ $k }}: "{{ $v }}"
+        {{- end }}
+        {{- else }}
+        repository: quay.io/prometheus/prometheus
+        tag: "v3.14.0"
+        {{- end }}
+
+      ## ── Query-endpoint Service ───────────────────────────────
+      ## infra.port sets the Service port. The server process listens on the
+      ## chart's fixed 9090 and the Service forwards to it, so an operator moving
+      ## the port moves the published address and not the listener.
+      service:
+        type: ClusterIP
+        servicePort: {{ .infra.port }}
+
+      ## ── The address the server reports as its own ────────────
+      ## Set only with infra.external_base_url. baseURL is the chart's external
+      ## URL, the base of every link the server writes back to itself. The
+      ## server would otherwise also move every endpoint under that address's
+      ## path, so extraArgs passes --web.route-prefix=/ and keeps it serving at
+      ## its root. prefixURL, the chart's own route for serving under the path,
+      ## stays empty, so the chart's probes and its configuration-reload sidecar
+      ## keep addressing the root too, as does every consumer composing its
+      ## address from provides. Unset, neither value is set.
+      ##
+      ## ── The OTLP receiver ────────────────────────────────────
+      ## Set only with values.otlp_receiver true: extraArgs passes
+      ## --web.enable-otlp-receiver, which turns on the receiver for metrics
+      ## pushed over OTLP, at /api/v1/otlp/v1/metrics on the server's port; it
+      ## checks no caller. The chart writes an extraArgs entry whose value is
+      ## null as a bare flag, which this flag is. extraArgs is the one map
+      ## carrying both flags, so it is written whenever either is set; the
+      ## chart's extraFlags list, whose default is web.enable-lifecycle, is
+      ## left to the chart.
+      {{- with .infra.external_base_url }}
+      baseURL: "{{ . }}"
+      {{- end }}
+      {{- if or .infra.external_base_url .values.otlp_receiver }}
+      extraArgs:
+        {{- if .values.otlp_receiver }}
+        web.enable-otlp-receiver: null
+        {{- end }}
+        {{- if .infra.external_base_url }}
+        web.route-prefix: /
+        {{- end }}
+      {{- end }}
+
+      ## ── Time-series database volume ──────────────────────────
+      persistentVolume:
+        enabled: true
+        size: "{{ .infra.storage.size }}"
+        {{- if and .infra.overrides .infra.overrides.storage_class }}
+        storageClass: "{{ .infra.overrides.storage_class }}"
+        {{- end }}
+
+      ## ── Server resources ─────────────────────────────────────
+      resources:
+        limits:
+          cpu: "{{ .infra.compute.cpu }}"
+          memory: "{{ .infra.compute.memory }}"
+        {{- if and .infra.overrides .infra.overrides.requests }}
+        requests:
+          cpu: "{{ .infra.overrides.requests.cpu }}"
+          memory: "{{ .infra.overrides.requests.memory }}"
+        {{- end }}
+
+      ## ── Scheduling overrides ─────────────────────────────────
+      {{- if .infra.overrides }}
+      {{- if .infra.overrides.nodeSelector }}
+      nodeSelector: {{ toJson .infra.overrides.nodeSelector }}
+      {{- end }}
+      {{- if .infra.overrides.tolerations }}
+      tolerations: {{ toJson .infra.overrides.tolerations }}
+      {{- end }}
+      {{- end }}
+
+      ## ── Scrape credentials ───────────────────────────────────
+      ## One read-only mount per connection carrying a credential: the whole
+      ## Secret it publishes, so each data key is a file and the cluster keeps
+      ## it current, at the path that connection's scrape job reads. Rendered
+      ## only while a connection carries one.
+      {{- if $credentials }}
+      extraSecretMounts:
+      {{- range $n, $alias := $credentials }}
+        - name: scrape-credential-{{ $n }}
+          mountPath: /etc/prometheus/scrape-credentials/{{ $n }}
+          subPath: ""
+          secretName: {{ (index $.context.uses $alias).features.credential.provides.name | toJson }}
+          readOnly: true
+      {{- end }}
+      {{- end }}
+
+    ## ── Scrape configuration ───────────────────────────────────
+    ## Every component wired on the `scrape_target` socket becomes one scrape
+    ## job, its label and cadence tuned by the edge's per-connection values.
+    ## This is the same mapping the workload-synthesis realization performs, so
+    ## a developer who wired the topology once gets the same jobs from either
+    ## realization.
+    ##
+    ## A target publishing metrics_endpoint is scraped by a static job built
+    ## from it: its scheme, its path, and its host and port as the target. A
+    ## host carrying no dot is a Service in the target's own namespace, so where
+    ## the connection's aggrega.ai/namespace annotation names one other than
+    ## Prometheus's the host is qualified with it, caller-side, as
+    ## <host>.<namespace>.svc.cluster.local; a host already carrying its
+    ## namespace, and one whose target declares none, is used as published. An
+    ## address that is not an http or https URL naming a host, or that carries
+    ## a query string, a fragment or a user name, halts the build, naming the
+    ## target, and so does a target publishing none of metrics_endpoint,
+    ## metrics_service and metrics_pod_selector, or an address beside a
+    ## discovery fact.
+    ##
+    ## A connection carrying a credential is scraped with it, static and
+    ## discovered jobs alike: the job reads the file mounted above through
+    ## authorization's credentials_file, as a Bearer credential, and the
+    ## configuration names only the file. A connection carrying none to a
+    ## target publishing metrics_credential_required true halts the build,
+    ## naming the target. A connection to OpenBao (core/security/openbao) also
+    ## sends the request parameter format=prometheus, which OpenBao reads to
+    ## answer in the Prometheus format.
+    ##
+    ## A target publishing metrics_service or metrics_pod_selector is discovered
+    ## from the cluster instead, by the same rule as on the workload-synthesis
+    ## realization: an endpointslice job keeping the endpoints of the Services
+    ## named (a comma-separated list, written as an alternation) on the Service
+    ## port named, or a pod job passing the selector to the cluster as written
+    ## and keeping the container port named on running pods; the path is the one
+    ## the target publishes, and every series is labelled with its namespace and
+    ## pod. A target publishing both kinds, or a discovery fact without its port
+    ## name or path, halts the build, naming it. The job discovers in the
+    ## namespace the connection's aggrega.ai/namespace annotation names; in
+    ## every namespace for KEDA and Knative Serving, which run once per cluster
+    ## in a namespace of their own and are recognised by the Component the target
+    ## is; and in the server's own namespace where neither Prometheus nor the
+    ## target declares one, both then placed alike. Prometheus declaring a
+    ## namespace while the target declares none leaves the job nowhere to look,
+    ## and the build halts, naming both. The chart's own ClusterRole already
+    ## grants the server read access to pods, services, endpoints and
+    ## endpointslices in every namespace, so no grant is added here.
+    ##
+    ## The jobs below are ADDED to the chart's own cluster-discovery jobs rather
+    ## than replacing them, so this realization scrapes both the targets the
+    ## topology wires and whatever the cluster advertises through the annotations
+    ## the chart's jobs match on. That is a deliberate difference from the
+    ## workload-synthesis realization, which scrapes only the wired targets and
+    ## grants itself read access only where one of them is discovered. The
+    ## chart's pod and endpoint jobs keep anything annotated
+    ## prometheus.io/scrape, so a wired target whose pods or Service carry that
+    ## annotation — cert-manager's and Temporal's pods do — is scraped twice:
+    ## once under the chart's job and once under its connection's.
+    ##
+    ## job_name keeps a template fallback because its default is the edge alias —
+    ## per-edge context, which no static value in the socket's valueSchema can
+    ## express. scrape_interval takes its default from that valueSchema, so it
+    ## reads the edge value directly and this template holds no second copy.
+    ## 🔴 Only `scrape_configs` is authored here. The chart's own
+    ## `prometheus.yml` already carries `global` and `rule_files`, and setting
+    ## either again from this overlay emits the key TWICE in the rendered
+    ## configuration rather than replacing it — a duplicate mapping key that
+    ## renders green and that Prometheus reads to the last occurrence, silently
+    ## discarding the chart's defaults. Established by rendering it both ways.
+    serverFiles:
+      prometheus.yml:
+        scrape_configs:
+        {{- $promNs := optional (optional (default dict .context.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict .context.annotations) "aggregate" dict) "aggrega.ai/namespace" "") }}
+        {{- range $alias, $edge := .context.uses }}
+        {{- if eq $edge.socket "scrape_target" }}
+        {{- $v := default (dict) $edge.values }}
+        {{- $p := default (dict) $edge.provides }}
+        {{- $svc := optional $p "metrics_service" "" }}
+        {{- $sel := optional $p "metrics_pod_selector" "" }}
+        {{- $endpoint := toString (optional $p "metrics_endpoint" "") }}
+        {{- if and $svc $sel }}
+        {{- fail (printf "%q is wired to %q on its scrape_target socket and publishes both metrics_service (%q) and metrics_pod_selector (%q); Prometheus discovers a target either through its Service or through its pods, so the target's Recipe publishes one of the two and leaves the other empty" $edge.target $.context.instance_id $svc $sel) }}
+        {{- end }}
+        {{- if and (or $svc $sel) $endpoint }}
+        {{- fail (printf "%q is wired to %q on its scrape_target socket and publishes both metrics_endpoint (%q) and a fact Prometheus discovers it by (%q); a target says where it serves metrics in one of the two ways, so the target's Recipe publishes one and leaves the other empty" $edge.target $.context.instance_id $endpoint (default $sel $svc)) }}
+        {{- end }}
+        {{- if not (or $svc $sel $endpoint) }}
+        {{- fail (printf "%q is wired to %q on its scrape_target socket but publishes none of metrics_endpoint, metrics_service and metrics_pod_selector, so there is nowhere to scrape it: a target publishes where it serves metrics only while it serves them, some only while a value such as metrics_enabled turns them on; turn its metrics on, or remove the connection" $edge.target $.context.instance_id) }}
+        {{- end }}
+        {{- $features := default dict $edge.features }}
+        {{- if and (eq (toString (optional $p "metrics_credential_required" false)) "true") (not (hasKey $features "credential")) }}
+        {{- fail (printf "%q is wired to %q on its scrape_target socket and publishes metrics_credential_required true, so it answers its metrics only to a scrape presenting a credential, but the connection carries none; attach one under credential on that connection" $edge.target $.context.instance_id) }}
+        {{- end }}
+        {{- $credentialFile := "" }}
+        {{- if hasKey $features "credential" }}
+        {{- $n := 0 }}
+        {{- range $i, $a := $credentials }}{{ if eq $a $alias }}{{ $n = $i }}{{ end }}{{ end }}
+        {{- $credentialFile = printf "/etc/prometheus/scrape-credentials/%d/%s" $n $features.credential.provides.key }}
+        {{- end }}
+        {{- if or $svc $sel }}
+        {{- $fact := "metrics_pod_selector" }}{{ $portFact := "metrics_pod_port" }}{{ $found := $sel }}
+        {{- if $svc }}{{ $fact = "metrics_service" }}{{ $portFact = "metrics_service_port" }}{{ $found = $svc }}{{ end }}
+        {{- $port := optional $p $portFact "" }}
+        {{- $path := optional $p "metrics_path" "" }}
+        {{- if not (and $port $path) }}
+        {{- fail (printf "%q is wired to %q on its scrape_target socket and publishes %s %q, but its %s is %q and its metrics_path %q; Prometheus keeps what it discovers on that port name and requests that path, so the target's Recipe publishes all three" $edge.target $.context.instance_id $fact $found $portFact $port $path) }}
+        {{- end }}
+        {{- $everywhere := has $edge.component (list "core/compute/keda" "core/compute/knative-serving") }}
+        {{- $ns := optional (optional (default dict $edge.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict $edge.annotations) "aggregate" dict) "aggrega.ai/namespace" "") }}
+        {{- if and (not $everywhere) (not $ns) $promNs }}
+        {{- fail (printf "%q is placed in namespace %q and discovers the metrics of %q from the cluster, but %q declares no namespace, so there is no namespace to discover it in; declare the annotation aggrega.ai/namespace on %q in the Release" $.context.instance_id $promNs $edge.target $edge.target $edge.target) }}
+        {{- end }}
+          - job_name: {{ default $alias (get $v "job_name") }}
+            scrape_interval: {{ get $v "scrape_interval" }}
+            metrics_path: {{ $path | toJson }}
+        {{- with $credentialFile }}
+            authorization:
+              type: Bearer
+              credentials_file: {{ . | toJson }}
+        {{- end }}
+        {{- if eq $edge.component "core/security/openbao" }}
+            params:
+              format: [prometheus]
+        {{- end }}
+            kubernetes_sd_configs:
+              - role: {{ if $svc }}endpointslice{{ else }}pod{{ end }}
+        {{- if not $everywhere }}
+                namespaces:
+        {{- if $ns }}
+                  names:
+                    - {{ $ns | toJson }}
+        {{- else }}
+                  own_namespace: true
+        {{- end }}
+        {{- end }}
+        {{- if $sel }}
+                selectors:
+                  - role: pod
+                    label: {{ $sel | toJson }}
+        {{- end }}
+            relabel_configs:
+        {{- if $svc }}
+        {{- $names := list }}
+        {{- range splitList "," $svc }}{{ $names = append $names (trim .) }}{{ end }}
+              - source_labels: [__meta_kubernetes_service_name]
+                regex: {{ join "|" $names | toJson }}
+                action: keep
+              - source_labels: [__meta_kubernetes_endpointslice_port_name]
+                regex: {{ $port | toJson }}
+                action: keep
+        {{- else }}
+              - source_labels: [__meta_kubernetes_pod_container_port_name]
+                regex: {{ $port | toJson }}
+                action: keep
+              - source_labels: [__meta_kubernetes_pod_phase]
+                regex: Running
+                action: keep
+        {{- end }}
+              - source_labels: [__meta_kubernetes_namespace]
+                target_label: namespace
+              - source_labels: [__meta_kubernetes_pod_name]
+                target_label: pod
+        {{- else }}
+        {{- $u := urlParse $endpoint }}
+        {{- if or $u.query $u.fragment $u.userinfo }}
+        {{- fail (printf "%q is wired to %q on its scrape_target socket and publishes a metrics_endpoint carrying a query string, a fragment or a user name, which a scrape job takes from no address: Prometheus requests a path and sends its parameters apart from it, and a credential reaches it on the connection's credential slot; the target's Recipe publishes the scheme, host, port and path alone" $edge.target $.context.instance_id) }}
+        {{- end }}
+        {{- if not (and (has $u.scheme (list "http" "https")) $u.host) }}
+        {{- fail (printf "%q is wired to %q on its scrape_target socket and publishes metrics_endpoint %q, which is not an http or https URL naming a host, so Prometheus has no address to scrape; the target's Recipe publishes the full address, such as http://<host>:<port>/metrics" $edge.target $.context.instance_id $endpoint) }}
+        {{- end }}
+        {{- $host := $u.host }}
+        {{- $portSuffix := "" }}
+        {{- with regexFind ":[0-9]+$" $host }}{{ $portSuffix = . }}{{ $host = trimSuffix . $host }}{{ end }}
+        {{- $ns := optional (optional (default dict $edge.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict $edge.annotations) "aggregate" dict) "aggrega.ai/namespace" "") }}
+        {{- if and $ns (ne $ns $promNs) (not (contains "." $host)) (not (contains ":" $host)) }}
+        {{- $host = printf "%s.%s.svc.cluster.local" $host $ns }}
+        {{- end }}
+          - job_name: {{ default $alias (get $v "job_name") }}
+            scrape_interval: {{ get $v "scrape_interval" }}
+            scheme: {{ $u.scheme }}
+            metrics_path: {{ default "/" $u.path | toJson }}
+        {{- with $credentialFile }}
+            authorization:
+              type: Bearer
+              credentials_file: {{ . | toJson }}
+        {{- end }}
+        {{- if eq $edge.component "core/security/openbao" }}
+            params:
+              format: [prometheus]
+        {{- end }}
+            static_configs:
+              - targets:
+                  - {{ printf "%s%s" $host $portSuffix | toJson }}
+        {{- end }}
+        {{- end }}
+        {{- end }}

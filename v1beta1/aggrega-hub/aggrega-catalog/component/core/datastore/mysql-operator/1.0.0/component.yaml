@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/datastore/mysql-operator
+  version: 1.0.0
+  license: UPL-1.0
+  description: >
+    The MySQL Operator for Kubernetes control plane, declared as an explicit
+    component so a controller-driven MySQL realization can ship its runtime
+    prerequisite alongside the InnoDBCluster custom resource it emits, rather than
+    assuming an ambient install. The control plane is the controller that
+    reconciles InnoDBCluster custom resources into running MySQL servers and the
+    Services that reach them. Declare this component in the same Aggregate as a
+    core/datastore/mysql-innodb-cluster to satisfy that component's control-plane
+    prerequisite; the operator affirms the prerequisite on the cluster in the same
+    Release. The controller image is pinned to a published release tag, so a
+    Release that sets nothing still names one version rather than whatever the
+    target resolves; a Release pulling from its own mirror overrides it.
+
+    Realized on Kubernetes by two Helm Recipes. `mysql-operator-chart` renders
+    the project's own chart, custom-resource definitions and the controller's
+    full roles included, and is the one to reach for; its chart repository must
+    be reachable from the build. `mysql-operator` is a minimal bootstrap
+    installing the controller alone, and at the image pinned here its role
+    falls short of what the controller needs.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: datastore
+    component.aggrega.ai/upstream-licensing: osi-approved
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  schema:
+    infra:
+      image:
+        type: string
+        default: "container-registry.oracle.com/mysql/community-operator:26.7.0-2.3.0"
+        description: Controller image the control-plane Deployment runs. Pinned to a published release tag so the rendered workload names one version; a Release pulling from its own registry mirror sets this to that reference instead.
+      namespace:
+        type: string
+        default: "mysql-operator"
+        description: Namespace the control plane is installed into. It names where the controller runs, not what it reconciles. The `mysql-operator-chart` realization requires the Release to declare the same namespace for the component.
+      # Read by the chart realization alone; the bootstrap pulls no chart.
+      source_version:
+        type: string
+        description: Version of the MySQL Operator chart the `mysql-operator-chart` realization pulls. Its default is the release whose application version is the tag of the image default above; changing it away from that default does not guarantee value-mapping compatibility with the new chart, and the image follows it only where it is set too.

@@ -1,0 +1,244 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: weaviate
+  version: 1.0.0
+  license: BSD-3-Clause
+  description: >
+    Weaviate on Kubernetes via the helm provider's Workload synthesis, running
+    the official upstream image from the project's own registry (no external Helm
+    chart). Vector data is the point of this store rather than a cache of
+    something else, so the workload renders as a StatefulSet with a persistent
+    volume mounted at the server's data path, alongside the governing headless
+    Service the stateful form requires and a ClusterIP Service publishing both the
+    HTTP and the gRPC port. The rendered manifest always states its access
+    posture rather than leaving it to a server default: anonymous access is
+    enabled where no credential is attached, and where the optional api_key slot
+    is attached anonymous access is turned off, API-key authentication is turned
+    on and the key is delivered as an env secretKeyRef, so the plaintext key never
+    appears in the rendered manifest. provides.host is the bare, self-contained
+    in-cluster service name of the synthesized ClusterIP Service — it carries no
+    namespace, so the recipe is independent of where it is deployed. A consumer in
+    another namespace qualifies the host with the target namespace on its own side
+    (caller-side routing).
+
+    It is synthesized because Weaviate's own Helm chart fails the maintained
+    test: the newest chart its published repository serves packages an older
+    Weaviate than the one this Component pins.
+
+    With `values.metrics_enabled` true, PROMETHEUS_MONITORING_ENABLED turns on
+    Weaviate's metrics at port 2112, which joins the ClusterIP Service, and
+    provides.metrics_endpoint publishes the address; false, that key is empty.
+    The port checks no caller and also answers /tenant-activity with each
+    collection's tenant names.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/datastore/weaviate:1.0.0
+  # Why this is a synthesis rather than a chart realization. Weaviate publishes
+  # a chart, but it fails the catalog's maintained test: its newest version
+  # predates the release this Component pins. Measured 2026-10-21: the
+  # repository index at https://weaviate.github.io/weaviate-helm/index.yaml
+  # serves weaviate 17.8.3 (appVersion 1.38.2, published 2026-07-01) as its
+  # newest chart, while the Component's engine_version defaults to 1.39.2 and
+  # Weaviate's releases (https://api.github.com/repos/weaviate/weaviate/releases)
+  # run to v1.40.1 and v1.39.12, neither line packaged by any chart in the index.
+  #
+  # This Recipe reads no infra.overrides keys.
+  #
+  # provides.host is the bare Service name "<rendered_name>-default" — the helm
+  # provider names the synthesized ClusterIP Service "<rendered_name>-<service-key>"
+  # (here "<rendered_name>-default"), with no namespace segment. A same-namespace
+  # consumer reaches it under this name directly; a cross-namespace consumer
+  # qualifies it with the target namespace caller-side. protocol is "http" — the
+  # port published as provides.port serves the REST and GraphQL APIs over HTTP,
+  # and a consumer composing a URL needs the scheme rather than the product name.
+  #
+  # metrics_endpoint is the address Weaviate serves its own metrics at while
+  # values.metrics_enabled is true: /metrics on port 2112 of the same ClusterIP
+  # Service, which carries that port only then. It is empty while the value is
+  # false, when the metrics are off.
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ .infra.port }}"
+    grpc_port: "{{ .infra.grpc_port }}"
+    protocol: "http"
+    metrics_endpoint: "{{ if .values.metrics_enabled }}http://{{ .context.rendered_name }}-default:2112/metrics{{ end }}"
+  # An attached API key authenticates as a named identity, and an identity cannot
+  # be bound without a name. values.api_key_user carries that name and the
+  # Component declares a default for it, so an ordinary Aggregate never has to set
+  # it — but one that sets it to an empty string has asked for a key bound to
+  # nobody. The build halts here, where the fix is one line in the Aggregate,
+  # rather than emitting a server configuration that
+  # enables authentication against an empty identity list and rejects every
+  # request once the server starts. It halts only on that combination: with no
+  # credential attached no identity is needed at all, and a named identity renders
+  # exactly what was asked for.
+  assertions:
+    api_key_user_supplied: >-
+      {{- if and (hasKey (default dict .features) "api_key") (not (optional .values "api_key_user" "")) -}}
+      {{- fail "a credential is attached to the api_key slot, so the server is asked to enable API-key authentication, but values.api_key_user carries no identity for that key to authenticate as: set values.api_key_user to the name the key signs in as, or remove the api_key attachment if anonymous access is wanted" -}}
+      {{- end -}}
+    # A Release may write a key of an infra group as an empty string —
+    # `compute.cpu: ""`, or `storage.size: ""` — and a key written that way
+    # replaces the Component's default rather than falling back to it. Rendered,
+    # that would emit a workload with no CPU or memory limit, or a volume that
+    # requests no size: a Release materially different from the one the
+    # Component's declared defaults describe, with nothing in the output saying
+    # so. The build halts here instead, naming the key and the group it belongs
+    # to, so the fix is one line in the Release. A key the Release leaves out
+    # takes the Component's default. The storage class is not checked: left
+    # unset, the volume is provisioned from the cluster's default storage class.
+    compute_group_complete: >-
+      {{- if not (optional (default dict .infra.compute) "cpu" "") -}}
+      {{- fail "this Release sets part of infra.compute on the vector store but leaves compute.cpu empty, so the rendered workload would carry no CPU request or limit: set both compute.cpu and compute.memory together, or remove the compute block entirely to take the component's defaults" -}}
+      {{- end -}}
+      {{- if not (optional (default dict .infra.compute) "memory" "") -}}
+      {{- fail "this Release sets part of infra.compute on the vector store but leaves compute.memory empty, so the rendered workload would carry no memory request or limit: set both compute.cpu and compute.memory together, or remove the compute block entirely to take the component's defaults" -}}
+      {{- end -}}
+    storage_group_complete: >-
+      {{- if not (optional (default dict .infra.storage) "size" "") -}}
+      {{- fail "this Release leaves storage.size empty on the vector store, so the rendered volume would request no size: set storage.size to the size the volume needs, or leave it out of the Release to take the component's default" -}}
+      {{- end -}}
+  workload: |
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # form: stateful selects a StatefulSet on the helm provider; the
+    # persistentTemplate volume and the headless Service below are companions of
+    # this form.
+    form: stateful
+    replicas: 1
+    containers:
+      main:
+        image: "cr.weaviate.io/semitechnologies/weaviate:{{ .infra.engine_version }}"
+        # The image's entrypoint is the server binary and its default arguments
+        # carry the listen address, so overriding the arguments is how the
+        # operator's HTTP port reaches the server. The address is fixed at all
+        # interfaces because the container is the isolation boundary; the port and
+        # the scheme are the parts a Release configures.
+        args:
+          - "--host"
+          - "0.0.0.0"
+          - "--port"
+          - "{{ .infra.port }}"
+          - "--scheme"
+          - "http"
+        # The gRPC port, the data path and the query default are configured
+        # through the environment, which is the surface the server reads them
+        # from. The data path matches the volume mount below, so the server writes
+        # where the persistent volume is attached. Module settings are emitted only
+        # when the Aggregate named them, so an Aggregate that names none renders
+        # a server with no modules loaded.
+        #
+        # With values.metrics_enabled true, PROMETHEUS_MONITORING_ENABLED starts
+        # Weaviate's metrics listener on every interface, port 2112, and the port
+        # is declared on the container and the ClusterIP Service so the published
+        # address reaches it. That listener serves /metrics and /tenant-activity,
+        # every collection's tenants with their last read and write, and checks no
+        # caller: an attached API key guards the API, not this port. With the
+        # value false none of the three is rendered and the listener stays off.
+        # The probes run commands, so a port added here moves no probe.
+        variables:
+          GRPC_PORT: "{{ .infra.grpc_port }}"
+          PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
+    {{- with .values.query_defaults_limit }}
+          QUERY_DEFAULTS_LIMIT: "{{ . }}"
+    {{- end }}
+    {{- with .values.enable_modules }}
+          ENABLE_MODULES: "{{ . }}"
+    {{- end }}
+    {{- with .values.vectorizer_module }}
+          DEFAULT_VECTORIZER_MODULE: "{{ . }}"
+    {{- end }}
+    {{- if .values.metrics_enabled }}
+          PROMETHEUS_MONITORING_ENABLED: "true"
+    {{- end }}
+        # The access posture is always stated, so a reader of the rendered
+        # manifest sees it without knowing any server default. With a credential
+        # attached, anonymous access is off, API-key authentication is on, the key
+        # authenticates as the named identity, and the key itself arrives as an env
+        # secretKeyRef so the plaintext never lands in the manifest.
+    {{- if hasKey (default dict .features) "api_key" }}
+          AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "false"
+          AUTHENTICATION_APIKEY_ENABLED: "true"
+          AUTHENTICATION_APIKEY_USERS: "{{ .values.api_key_user }}"
+        attachments:
+          AUTHENTICATION_APIKEY_ALLOWED_KEYS:
+            from: api_key
+            as: env
+    {{- else }}
+          AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+    {{- end }}
+        ports:
+          http: {{ .infra.port }}
+          grpc: {{ .infra.grpc_port }}
+    {{- if .values.metrics_enabled }}
+          metrics: 2112
+    {{- end }}
+        # Weaviate serves /v1/.well-known/ready and /v1/.well-known/live on its
+        # HTTP port, the endpoints the product's own chart probes. An http probe
+        # is sent to the container port whose name sorts first, which here is
+        # `grpc`, and the Services name both ports, so neither is renamed. Both
+        # probes therefore run the wget of the image's busybox against the HTTP
+        # port, which fails on an error answer and when nothing answers. The
+        # timings are the ones that chart gives its own probes, including a
+        # liveness probe that first checks after 15 minutes.
+        health:
+          ready:
+            exec:
+              - wget
+              - "-q"
+              - "--spider"
+              - "http://127.0.0.1:{{ .infra.port }}/v1/.well-known/ready"
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            failureThreshold: 3
+          live:
+            exec:
+              - wget
+              - "-q"
+              - "--spider"
+              - "http://127.0.0.1:{{ .infra.port }}/v1/.well-known/live"
+            initialDelaySeconds: 900
+            periodSeconds: 10
+            failureThreshold: 30
+        # The resource quantities are quoted so the rendered value stays a string
+        # whatever the Release supplies. Rendered bare, a whole-core quantity
+        # such as 1 or 2 re-parses as a YAML integer and fails workload validation,
+        # which wants a string here; a milli quantity such as 500m happens not to.
+        # Quoting removes the difference, so every legal quantity a Release may
+        # write renders and validates alike.
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+        volumeMounts:
+          - name: data
+            path: /var/lib/weaviate
+    volumes:
+      data:
+        persistentTemplate:
+          size: "{{ .infra.storage.size }}"
+          class: "{{ .infra.storage.type }}"
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          http: {{ .infra.port }}
+          grpc: {{ .infra.grpc_port }}
+    {{- if .values.metrics_enabled }}
+          metrics: 2112
+    {{- end }}
+      headless:
+        type: Headless
+        ports:
+          http: {{ .infra.port }}
+          grpc: {{ .infra.grpc_port }}

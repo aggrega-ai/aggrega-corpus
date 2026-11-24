@@ -1,0 +1,135 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: grafana
+  version: 1.0.0
+  license: AGPL-3.0
+  description: >
+    Grafana dashboards server on Kubernetes via the helm provider's Workload
+    synthesis, running the official upstream grafana/grafana image directly (no
+    external Helm chart). Grafana keeps its own state — users, saved dashboards,
+    preferences — under /var/lib/grafana, so the workload mounts a persistent
+    volume at that path; the process itself is a single stateless replica, so it
+    renders a Deployment plus a ClusterIP Service. The admin username is a
+    developer value. The admin password is wired through the optional
+    `admin_password` credential slot: when a credential is attached it renders as
+    an env secretKeyRef (GF_SECURITY_ADMIN_PASSWORD), so the plaintext never lands
+    in the Deployment manifest; when none is attached the Recipe falls back to a
+    deterministic development default so the render stays byte-identical across
+    runs. With `infra.external_base_url` set, it reaches the server as its root
+    URL (GF_SERVER_ROOT_URL); unset, that variable is not emitted and the server
+    keeps its default. The server listens on `infra.port`, which also carries
+    its own metrics in the Prometheus format at /metrics, published as
+    provides.metrics_endpoint. The packaged
+    Grafana server is AGPL-3.0. Reach for this realization where the build must
+    complete with nothing fetched, or where no chart repository is reachable from
+    it; reach for `grafana-chart`, which renders the community-maintained Grafana
+    chart, where data sources or dashboards are to be provisioned with the server
+    — that realization carries the provisioning surface this one has nowhere to
+    declare.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/observability/grafana:1.0.0
+  # This Recipe reads no infra.overrides keys.
+  #
+  # provides.host is the bare Service name "<rendered_name>-default" — the helm
+  # provider names the synthesized ClusterIP Service "<rendered_name>-<service-key>"
+  # (here "<rendered_name>-default"), with no namespace segment, so the Recipe is
+  # independent of where it is deployed. A same-namespace consumer reaches it
+  # under this name directly; a cross-namespace consumer qualifies it with the
+  # target namespace caller-side. protocol is "http" — the Grafana web and query
+  # endpoint.
+  #
+  # metrics_endpoint is the address Grafana serves its own metrics at, in the
+  # Prometheus format: /metrics on the web port, on by default and asking no
+  # credential. It is spelled out in full on purpose: a provides entry cannot
+  # read another.
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ .infra.port }}"
+    protocol: "http"
+    metrics_endpoint: "http://{{ .context.rendered_name }}-default:{{ .infra.port }}/metrics"
+  workload: |
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # Grafana runs as a single stateless replica whose durable state lives on the
+    # mounted volume, so the default stateless form (a Deployment on the helm
+    # provider) is correct — no form: stateful, no per-replica volume template. The
+    # official grafana/grafana image entrypoint starts the server, so no command
+    # is set.
+    replicas: 1
+    containers:
+      main:
+        image: "grafana/grafana:{{ .infra.engine_version }}"
+        # GF_SECURITY_ADMIN_USER is a developer value. GF_SECURITY_ADMIN_PASSWORD
+        # is wired through the optional `admin_password` credential slot: when a
+        # credential is attached it renders as an env secretKeyRef so the
+        # plaintext never lands in the manifest; with none attached the Recipe
+        # falls back to a deterministic development default. Grafana keeps its
+        # state under /var/lib/grafana on the data volume. With
+        # infra.external_base_url set, GF_SERVER_ROOT_URL carries it as the
+        # server's root URL, the base of every link and redirect it writes; the
+        # server keeps serving at its own root, so the health checks below are
+        # unaffected by a path in that address. Unset, it is not emitted.
+        # Grafana listens on 3000 unless told otherwise, while the container
+        # port, the Service port and provides.port all follow infra.port; so
+        # with infra.port anything but 3000, GF_SERVER_HTTP_PORT moves the
+        # server's listener there too. At 3000 it is not emitted and the server
+        # keeps its own default.
+        variables:
+          GF_SECURITY_ADMIN_USER: "{{ .values.admin_user }}"
+    {{- if ne (int .infra.port) 3000 }}
+          GF_SERVER_HTTP_PORT: "{{ .infra.port }}"
+    {{- end }}
+    {{- with .infra.external_base_url }}
+          GF_SERVER_ROOT_URL: "{{ . }}"
+    {{- end }}
+    {{- if not (hasKey (default dict .features) "admin_password") }}
+          GF_SECURITY_ADMIN_PASSWORD: dev-grafana-admin-change-me
+    {{- end }}
+    {{- if hasKey (default dict .features) "admin_password" }}
+        attachments:
+          GF_SECURITY_ADMIN_PASSWORD:
+            from: admin_password
+            as: env
+    {{- end }}
+        ports:
+          http: {{ .infra.port }}
+        # Grafana's /api/health answers once the web server runs and can reach
+        # its database, which makes it the readiness check; /healthz answers
+        # whenever the web server runs, which makes it the liveness check. The
+        # liveness timing is the one the product's own chart gives its probe:
+        # a first check after 60 s, a 30 s timeout and ten misses.
+        health:
+          ready:
+            http: /api/health
+          live:
+            http: /healthz
+            initialDelaySeconds: 60
+            timeoutSeconds: 30
+            failureThreshold: 10
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+        volumeMounts:
+          - name: data
+            path: /var/lib/grafana
+    volumes:
+      data:
+        persistent:
+          size: "{{ if .infra.storage }}{{ .infra.storage.size | default "10Gi" }}{{ else }}10Gi{{ end }}"
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          http: {{ .infra.port }}

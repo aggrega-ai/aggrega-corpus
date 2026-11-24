@@ -1,0 +1,285 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: kafka-strimzi
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    Apache Kafka realized as a Strimzi custom resource the Strimzi Cluster
+    Operator reconciles, rather than a directly synthesized StatefulSet — the
+    operator-driven realization of the same Kafka component, selectable in the
+    Manifest alongside the synthesis recipe. The recipe emits a Kafka custom
+    resource (and its node-pool) in the KRaft shape at the Strimzi `v1` API,
+    authored against the Strimzi Cluster Operator's 1.3.0 release; the operator
+    turns it into a running broker. The Strimzi Cluster Operator is a runtime prerequisite: the build halts unless the
+    operator affirms it is installed (infra.control_plane_present), so no custom
+    resource is emitted into a cluster that cannot reconcile it. Reach for this
+    realization where the control plane is already in place and the cluster should
+    own broker upgrades, rolling restarts and partition rebalancing; reach for the
+    synthesis recipe where it is not.
+
+    It runs Kafka 4.2.0 to 4.3.1, so the build halts on any other
+    infra.engine_version, and on a values.cluster_id or infra.controller_port
+    other than the default, which the operator decides itself.
+
+    With values.metrics_enabled true the Kafka resource turns on the Strimzi
+    metrics reporter on every node, which serves /metrics on port tcp-prometheus
+    and checks no caller, and provides publishes the pod label, port name and
+    path a scraper discovers the nodes by; false, those keys are empty and
+    nothing else changes.
+
+    With infra.client_tls true the client listener, named tls, serves TLS alone
+    and protocol is kafka-ssl. A consumer trusts ca.crt of the Secret
+    <instance>-cluster-ca-cert through server_ca; one in another namespace
+    holds a copy of it there.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/messaging/kafka:1.0.0
+  # The Strimzi Cluster Operator creates a client bootstrap Service named
+  # "{cluster}-kafka-bootstrap" for the Kafka custom resource; provides.host is
+  # that bare in-cluster name, matching the synthesis realization's contract so
+  # consumers are realization-agnostic. provides.bootstrap_servers is that one
+  # address joined "host:port", the whole list for a client that takes one: the
+  # bootstrap Service fronts every node the pool runs, however many there are.
+  # Both read the Service name from one local.
+  #
+  # The metrics keys say where a scraper finds the brokers' metrics while
+  # values.metrics_enabled is true: every node the operator runs for this Kafka
+  # resource is labelled strimzi.io/cluster with the resource's name and
+  # strimzi.io/name with that name followed by -kafka, a label no other pod of the
+  # cluster carries — the entity operator, the Kafka Exporter and Cruise Control
+  # each have their own — and with metrics configured each node's container
+  # declares the port tcp-prometheus, 9404, which no Service carries. The labels
+  # and the port name are the operator's, read from its 0.51.0 and 1.3.0
+  # releases, and evolve with it like every other detail here. While the value is
+  # false the operator declares no metrics port and the keys are empty.
+  locals:
+    bootstrap_host: "{{ .context.instance_id }}-kafka-bootstrap"
+  provides:
+    host: "{{ .locals.bootstrap_host }}"
+    port: "{{ .infra.broker_port }}"
+    bootstrap_servers: "{{ .locals.bootstrap_host }}:{{ .infra.broker_port }}"
+    protocol: "{{ if .infra.client_tls }}kafka-ssl{{ else }}kafka{{ end }}"
+    metrics_pod_selector: "{{ if .values.metrics_enabled }}strimzi.io/cluster={{ .context.instance_id }},strimzi.io/name={{ .context.instance_id }}-kafka{{ end }}"
+    metrics_pod_port: "{{ if .values.metrics_enabled }}tcp-prometheus{{ end }}"
+    metrics_path: "{{ if .values.metrics_enabled }}/metrics{{ end }}"
+  # The Strimzi Cluster Operator must exist in the target cluster before a Kafka
+  # custom resource can reconcile. The compiler cannot inspect cluster state, so
+  # the prerequisite is declared: an operator affirms it in the Release, and an
+  # unaffirmed build halts here rather than emitting an orphan custom resource.
+  assertions:
+    kafka_operator_prerequisite: >-
+      {{- if not .infra.control_plane_present -}}
+      {{- fail "the Strimzi Cluster Operator must be installed in the target cluster before this realization emits its Kafka custom resource; once the operator is present, affirm the prerequisite by setting infra.control_plane_present to true in the Release" -}}
+      {{- end -}}
+    # The operator runs a Kafka cluster only at a Kafka version its own release
+    # carries images for, and refuses any other when it reconciles. The
+    # resources here are authored against the operator's 1.3.0 release, which
+    # carries Kafka 4.2.0, 4.2.1, 4.2.2, 4.3.0 and 4.3.1 — the versions its chart
+    # lists in the operator's Kafka image map — so any other engine_version
+    # halts here, naming the versions it may be, rather than rendering a
+    # resource the operator refuses.
+    kafka_version_supported: >-
+      {{- $supported := list "4.2.0" "4.2.1" "4.2.2" "4.3.0" "4.3.1" -}}
+      {{- if not (has (toString .infra.engine_version) $supported) -}}
+      {{- fail (printf "infra.engine_version is %q, which the Strimzi Cluster Operator release this realization is authored against, 1.3.0, does not run: it runs Kafka %s; set infra.engine_version to one of them in the Release" (toString .infra.engine_version) (join ", " $supported)) -}}
+      {{- end -}}
+    # Two Kafka keys name something the operator decides itself, so this
+    # realization cannot carry them. The KRaft cluster identity is generated by
+    # the operator when it creates the cluster, and no field of the Kafka
+    # resource sets it; the controller quorum listens on a port the operator
+    # fixes. A component whose key still holds the Component's default asks for
+    # nothing in particular and builds; one set to anything else halts, naming
+    # the key, rather than being accepted and ignored. The values compared
+    # against are the Component's own defaults for the two keys.
+    kafka_cluster_id_operator_owned: >-
+      {{- if ne (toString .values.cluster_id) "4L6g3nShT-eMCtK--X86sw" -}}
+      {{- fail (printf "values.cluster_id is %q, but on this realization the KRaft cluster identity is the Strimzi Cluster Operator's: it generates one when it creates the cluster and the Kafka resource has no field setting it; remove values.cluster_id, or select the synthesis recipe in the Manifest, which honours it" (toString .values.cluster_id)) -}}
+      {{- end -}}
+    kafka_controller_port_operator_owned: >-
+      {{- if ne (toString .infra.controller_port) "9093" -}}
+      {{- fail (printf "infra.controller_port is %q, but on this realization the controller quorum's port is the Strimzi Cluster Operator's: it fixes the port itself and the Kafka resource has no field setting it; remove infra.controller_port, or select the synthesis recipe in the Manifest, which honours it" (toString .infra.controller_port)) -}}
+      {{- end -}}
+    # A certificate attached to server_certificate is the TLS listener's own, so
+    # one attached while infra.client_tls is false has nothing to present it,
+    # and halts here naming client_tls. One whose attachment publishes no Secret
+    # name — a core/secret-value fill — gives the operator no Secret to read it
+    # from, and halts in the Kafka resource's template, which reads what the
+    # attachment publishes, naming the slot. Nothing attached with client_tls
+    # true is the default: the operator's cluster authority issues the
+    # listener's certificate.
+    kafka_server_certificate_pairing: >-
+      {{- $f := default dict .features -}}
+      {{- if hasKey $f "server_certificate" -}}
+      {{- if not .infra.client_tls -}}
+      {{- fail (printf "a certificate is attached to the server_certificate slot of %q, but infra.client_tls is false, so the Kafka listener serves plaintext and nothing presents the certificate; set infra.client_tls to true to serve TLS from it, or remove the attachment" .metadata.instance_id) -}}
+      {{- end -}}
+      {{- end -}}
+  # This Recipe reads from infra.overrides:
+  #   replicas      - integer (KafkaNodePool spec.replicas; default 1)
+  #   broker_config - map[string]scalar (replaces the whole spec.kafka.config block)
+  #
+  # Both keys exist because the custom resource carries cluster-shape knobs the
+  # Component's own schema does not enumerate. The node count is one: the
+  # default renders the single-node shape, where one node holds both the broker
+  # and controller roles, and a multi-node cluster raises it. The broker config
+  # map is the other: it is Kafka's own open-ended property set, versioned with
+  # Kafka rather than with this catalog, and its defaults here are the
+  # single-node set — one replica of every internal topic and no in-sync quorum
+  # to satisfy. A multi-node cluster needs different factors, so the whole
+  # block is replaced rather than merged key by key; supply the complete config
+  # map when overriding it.
+  #
+  # The Kafka resource and its node pool are written into the namespace the
+  # Release, or else the Aggregate, names for this component through the aggrega.ai/namespace
+  # annotation, on its boundary or its own entry — the pool must sit beside the
+  # resource it names — and the operator creates the nodes and the bootstrap
+  # Service there, so they land where a consumer reads that the cluster runs:
+  # the namespace it qualifies host with, and the one a scraper discovers the
+  # nodes in. The provider does not place an artifact on its own. Where no
+  # namespace is named the field is omitted, and both land wherever the applying
+  # tool puts them.
+  #
+  # With values.metrics_enabled true the Kafka resource's metrics configuration
+  # names the Strimzi metrics reporter and nothing more: the operator then
+  # configures it on every node with its own default selection of metrics and
+  # declares the tcp-prometheus port. That is the smallest configuration the
+  # operator documents — its own example for the reporter sets the type alone —
+  # and it needs no ConfigMap of exporter rules, which the older JMX exporter
+  # type does. The reporter type is taken by the operator from its 0.47.0
+  # release on. With the value false nothing of it is rendered.
+  #
+  # Both resources are written at the kafka.strimzi.io/v1 API, the one version
+  # the Strimzi Cluster Operator's definitions serve from its 1.0.0 release on,
+  # and authored against the definitions its 1.3.0 chart installs: every field
+  # written here is one those definitions declare, in the shape they declare it.
+  # The node-pool and KRaft annotations the older API needed are not written,
+  # because the operator has ignored them since KRaft and node pools became its
+  # only mode.
+  #
+  # With infra.client_tls true the one client listener is written with tls set
+  # true and named tls in place of plain, on the same port and of the same
+  # internal type, so the bootstrap Service and provides.host are unchanged and
+  # the port accepts TLS alone; it requests no client certificate. The operator
+  # issues the listener's certificate from its cluster certificate authority,
+  # naming the bootstrap Service in its plain and namespace-qualified forms, and
+  # publishes that authority's certificate as ca.crt in the Secret
+  # <instance>-cluster-ca-cert beside the Kafka resource. A consumer checks the
+  # broker against it through its server_ca slot; a Secret is read from the
+  # namespace of the pod mounting it, so a consumer in another namespace holds
+  # a copy of it there, kept current when the operator renews the authority.
+  # With a certificate attached to server_certificate, the listener presents it
+  # instead through the v1 API's configuration.brokerCertChainAndKey, from the
+  # Secret's tls.crt and tls.key, which the operator reads in the Kafka
+  # resource's namespace and takes with the key unencrypted in PKCS #8 form; a
+  # consumer then trusts the authority that signed it. After bootstrap a client
+  # dials each broker at its own address under the headless Service
+  # <instance>-kafka-brokers, so that certificate names
+  # *.<instance>-kafka-brokers and its namespace-qualified forms beside the
+  # bootstrap Service's, or every client refuses the broker. Nothing of either
+  # is rendered while client_tls is false.
+  #
+  # infra.compute sizes every node through the node pool's resources, requests
+  # and limits alike, as the synthesis realization sizes its broker; the `v1`
+  # API takes a node's CPU and memory from its node pool and not from the Kafka
+  # resource.
+  artifacts:
+    kafkanodepool.yaml: |
+      apiVersion: kafka.strimzi.io/v1
+      kind: KafkaNodePool
+      metadata:
+        name: {{ .context.instance_id }}-pool
+        {{- $ns := "" }}
+        {{- if .context.annotations }}
+          {{- $raw := optional (optional (default dict .context.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict .context.annotations) "aggregate" dict) "aggrega.ai/namespace" "") }}
+          {{- if $raw }}{{- $ns = $raw }}{{- end }}
+        {{- end }}
+        {{- with $ns }}
+        namespace: "{{ . }}"
+        {{- end }}
+        labels:
+          strimzi.io/cluster: {{ .context.instance_id }}
+      spec:
+        {{- if and .infra.overrides .infra.overrides.replicas }}
+        replicas: {{ .infra.overrides.replicas }}
+        {{- else }}
+        replicas: 1
+        {{- end }}
+        roles:
+          - broker
+          - controller
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+        storage:
+          type: persistent-claim
+          size: {{ .infra.storage.size }}
+          deleteClaim: false
+    kafka.yaml: |
+      {{- $certProvides := optional (optional (default dict .features) "server_certificate" dict) "provides" dict }}
+      {{- if and (hasKey (default dict .features) "server_certificate") (not (and (kindIs "map" $certProvides) (optional $certProvides "name" ""))) }}
+      {{- fail (printf "the server_certificate slot of %q is filled by an attachment that publishes no Secret name, but the Strimzi Cluster Operator reads the listener's certificate and key from a Secret named in the Kafka resource; bind the slot to core/referenced-secret, whose k8s-existing-secret realization names a Secret that already exists" .context.instance_id) }}
+      {{- end -}}
+      apiVersion: kafka.strimzi.io/v1
+      kind: Kafka
+      metadata:
+        name: {{ .context.instance_id }}
+        {{- $ns := "" }}
+        {{- if .context.annotations }}
+          {{- $raw := optional (optional (default dict .context.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict .context.annotations) "aggregate" dict) "aggrega.ai/namespace" "") }}
+          {{- if $raw }}{{- $ns = $raw }}{{- end }}
+        {{- end }}
+        {{- with $ns }}
+        namespace: "{{ . }}"
+        {{- end }}
+      spec:
+        kafka:
+          version: "{{ .infra.engine_version }}"
+          listeners:
+            {{- if .infra.client_tls }}
+            - name: tls
+              port: {{ .infra.broker_port }}
+              type: internal
+              tls: true
+              {{- with .features }}{{ with optional . "server_certificate" dict }}
+              configuration:
+                brokerCertChainAndKey:
+                  secretName: "{{ .provides.name }}"
+                  certificate: tls.crt
+                  key: tls.key
+              {{- end }}{{ end }}
+            {{- else }}
+            - name: plain
+              port: {{ .infra.broker_port }}
+              type: internal
+              tls: false
+            {{- end }}
+          config:
+            {{- if and .infra.overrides .infra.overrides.broker_config }}
+            {{- range $k, $v := .infra.overrides.broker_config }}
+            {{ $k }}: {{ $v }}
+            {{- end }}
+            {{- else }}
+            offsets.topic.replication.factor: 1
+            transaction.state.log.replication.factor: 1
+            transaction.state.log.min.isr: 1
+            default.replication.factor: 1
+            min.insync.replicas: 1
+            {{- end }}
+          {{- if .values.metrics_enabled }}
+          metricsConfig:
+            type: strimziMetricsReporter
+          {{- end }}
+        entityOperator:
+          topicOperator: {}
+          userOperator: {}

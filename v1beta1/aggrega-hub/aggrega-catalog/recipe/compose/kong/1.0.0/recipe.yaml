@@ -1,0 +1,449 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: kong
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    Kong, a database-backed API gateway, for local development via Docker
+    Compose, synthesized from the Workload kind by the compose provider. The
+    PostgreSQL backend on the `backend` edge is the system of record, so it
+    renders stateless with no volume. The connection's host, port, user and
+    database arrive on the inject pipe under the four KONG_PG_* variables the
+    edge's inject block names; an edge leaving any missing halts the build
+    naming the edge and the variables. A schema-provisioning step runs the same
+    image and connection before the gateway starts.
+
+    With no credential on the backend connection, the steps and the gateway
+    share the inline development default the PostgreSQL Recipe for this target
+    also falls back to; an attached one is rendered as KONG_PG_PASSWORD, the key
+    it must publish under.
+
+    Each model wired to the models socket gets a chat and a completion route
+    through Kong's AI proxy, in Kong's declarative configuration that a second
+    step imports into the database before the gateway starts. A connection's
+    credential is the value it publishes as AI_PROXY_<ALIAS>_API_KEY, written
+    into the bearer token the routes name through Kong's environment vault: a
+    Compose variable reference such as ${OPENAI_API_KEY} lands as that
+    reference, a literal as itself.
+
+    With `values.metrics_enabled` true the Status API moves off loopback to
+    port 8007 of every interface and provides.metrics_endpoint publishes
+    /metrics on it; false, that key is empty. While it is on, every peer on
+    the Compose network reaches that port, but only a GET of /status,
+    /status/ready or /metrics: the KongStatusGuard bundle refuses the rest,
+    POST /status/ready among them.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: compose
+  implements: core/gateway/kong:1.0.0
+  # This Recipe reads no infra.overrides keys.
+  #
+  # provides is evaluated before the workload and cannot read it, so the proxy
+  # port has one authored home in .infra.proxy_port that every reader
+  # dereferences — provides.port here, and below the gateway's own proxy listen
+  # address, the container port and the service entry; the literal is never
+  # repeated.
+  #
+  # The contract is key-for-key the one the Kubernetes realization publishes, so
+  # a consumer reads the same keys on either target. Only host is spelled
+  # differently: it is the name the compose provider gives the synthesized
+  # service, which is the component instance's own name, where the Kubernetes
+  # realization names its Service after the instance and the service key. A
+  # consumer on the same compose network resolves it directly.
+  #
+  # endpoint is the route the gateway serves for the model values.model names,
+  # under that alias in the path, on the same service name and port; model is
+  # that alias. With nothing wired to the models socket values.model is
+  # omitted — the component's assertion halts on any other combination — and
+  # both are empty.
+  #
+  # metrics_endpoint is the address Kong serves its own metrics at while
+  # values.metrics_enabled is true: /metrics on the Status API port of the
+  # service name, which any peer on the compose network reaches once the
+  # workload below binds that listener on every interface. The Prometheus
+  # plugin bundled with Kong answers it there with no plugin instance
+  # configured, and the Status API's allowlist lets a GET of it through. It is
+  # empty while the value is false, when the listener stays on the
+  # container's loopback address.
+  provides:
+    host: "{{ .context.instance_id }}"
+    port: "{{ .infra.proxy_port }}"
+    protocol: "http"
+    endpoint: '{{ with optional .values "model" "" }}http://{{ $.context.instance_id }}:{{ $.infra.proxy_port }}/{{ . }}/v1{{ end }}'
+    model: '{{ optional .values "model" "" }}'
+    metrics_endpoint: "{{ if .values.metrics_enabled }}http://{{ .context.instance_id }}:{{ .locals.status_port }}/metrics{{ end }}"
+  # The entries below are the values the workload shares with the
+  # KongModelRoutes bundle imported for the gateway's model routes. Each that
+  # the bundle reads has its home in the bundle, which stops the build naming
+  # the local when one is missing or differs from its own; the workload reads
+  # them here, because a workload cannot read the bundle.
+  # model_routes_delivery has the bundle emit one compose config, named
+  # model_routes_config_name, which the volume sources; model_routes_path, the
+  # file it is mounted as and the import step reads, is this Recipe's own,
+  # since a compose config carries no file name. A models connection's
+  # credential reaches the gateway as AI_PROXY_<ALIAS>_AUTHORIZATION, the
+  # bearer token its routes name, composed from the value the credential
+  # publishes as AI_PROXY_<ALIAS>_API_KEY — the connection's alias in capitals
+  # with every character other than a letter or a digit as an underscore,
+  # between the fixed parts here. A locals entry cannot read a connection, so
+  # the workload applies the alias rule itself, once.
+  #
+  # status_port is this Recipe's own rather than the bundle's: Kong's Status
+  # API port, the product's own default, and the single authored home for the
+  # listen address the workload sets while values.metrics_enabled is true and
+  # for provides.metrics_endpoint, which cannot read the workload.
+  #
+  # The last three entries are shared with the KongStatusGuard bundle imported
+  # for the Status API's allowlist. status_guard_delivery has the bundle
+  # declare one compose config, named status_guard_config_name, which the
+  # volume sources and the bundle checks against its own side;
+  # status_guard_path, the file it is mounted as and the gateway includes, is
+  # this Recipe's own, since a compose config carries no file name.
+  locals:
+    model_routes_delivery: compose_configs
+    model_routes_config_name: "{{ .context.instance_id }}-model-routes"
+    model_routes_path: /etc/kong/model-routes.yaml
+    connection_variable_prefix: AI_PROXY_
+    credential_variable_suffix: _API_KEY
+    header_variable_suffix: _AUTHORIZATION
+    status_port: "8007"
+    status_guard_delivery: compose_configs
+    status_guard_config_name: "{{ .context.instance_id }}-status-guard"
+    status_guard_path: /etc/kong/status-guard.conf
+  # The models the gateway serves, as Kong's own declarative configuration,
+  # from the KongModelRoutes bundle every Recipe running this gateway imports,
+  # so the routes and the rules they are written by have one text wherever the
+  # gateway runs; the import step below loads them into the backend database.
+  # Each connection on the models socket gets a chat and a completion route
+  # under its alias, through Kong's AI proxy to the endpoint and the model name
+  # the model publishes, and one carrying a credential has its routes name
+  # AI_PROXY_<ALIAS>_AUTHORIZATION through Kong's environment vault, never the
+  # value. A core/prompt-deny-patterns attachment adds Kong's AI Prompt Guard
+  # to every route, with the attachment's lists. With model_routes_delivery set
+  # to compose_configs the bundle declares one compose config, named
+  # model_routes_config_name, writing every $ in a string a model publishes or
+  # an expression the guard carries as $$, the compose file's spelling of a
+  # literal $; with nothing wired to the models socket it declares nothing. The
+  # bundle stops the build when a local above differs from its own side.
+  #
+  # The Status API's allowlist, from the KongStatusGuard bundle every Recipe
+  # running this gateway imports, so the line between what a scraper may ask
+  # and what nobody else may has one text wherever the gateway runs. With
+  # status_guard_delivery set to compose_configs the bundle declares one
+  # compose config, named status_guard_config_name, carrying a fragment of
+  # nginx configuration, and only while values.metrics_enabled is true — the
+  # only time the workload below binds the Status API off the container's
+  # loopback address; with the value false it declares nothing. The workload
+  # mounts it and has Kong include it in the Status API's own server block.
+  # From any address but the container's loopback one the fragment lets
+  # through a GET of /status, /status/ready or /metrics, and answers every
+  # other request 403 before Kong handles it. Each $ of the fragment is
+  # written as $$ there, as the model routes' are.
+  artifacts:
+    model-routes:
+      $import: KongModelRoutes#/artifacts/ModelRoutes
+    status-guard:
+      $import: KongStatusGuard#/artifacts/StatusGuard
+  # Synthesized-mode Workload: the image, the environment, the exposed port and
+  # the schema-provisioning step are translated from the Workload kind by the
+  # compose provider.
+  #
+  # One ordering limitation is worth knowing before this is deployed onto a
+  # cold host, and it is a property of the target rather than of this Recipe:
+  # in the rendered compose file the gateway's service waits on the provisioning
+  # step having completed, and the provisioning step is not ordered after the
+  # backend, so the step may run before the backend is accepting connections,
+  # fail, and leave the gateway unstarted until the step is run again. No
+  # readiness wait is hidden in a command line to
+  # compensate: that would move a lifecycle concern into a string nothing can
+  # inspect or diagnose, where a step that fails is a failed service an operator
+  # can read.
+  #
+  # With no credential on the backend connection, the provisioning step and the
+  # gateway share an inline development default, which is also the default the
+  # PostgreSQL Recipe for this target falls back to — so with no credential
+  # attached to either it comes up wired. With one on the connection, its value
+  # arrives on the inject pipe and is rendered as KONG_PG_PASSWORD on both, which
+  # is therefore also the key the attached credential must publish under;
+  # compose has no env-from-secret primitive, so a plain environment variable is
+  # the delivery this target has.
+  workload: |
+    {{- $devPassword := "apppass" -}}
+    {{- /* The backend connection: four variables of the inject pipe, which the
+           backend edge's inject block names from the backend's provides. The
+           pipe is read as a map so that a variable nothing delivered is told
+           apart from one delivered empty, and the build halts naming the edge
+           and every variable it leaves missing, rather than rendering a
+           connection setting with an empty value. The socket is required, so a
+           build whose Aggregate leaves it empty is refused before this
+           template runs; the message for an empty socket is what validating
+           this Recipe on its own, with no connection, reports. */ -}}
+    {{- $env := optional (default dict .context.inject) "env" dict -}}
+    {{- $missing := list -}}
+    {{- range (list "KONG_PG_HOST" "KONG_PG_PORT" "KONG_PG_USER" "KONG_PG_DATABASE") }}{{ if not (hasKey $env .) }}{{ $missing = append $missing . }}{{ end }}{{ end -}}
+    {{- if $missing -}}
+    {{- $backendEdges := list }}{{ range $alias, $edge := .context.uses }}{{ if eq $edge.socket "backend" }}{{ $backendEdges = append $backendEdges $alias }}{{ end }}{{ end -}}
+    {{- $shape := "inject: { env: [ { in: KONG_PG_HOST, from: host }, { in: KONG_PG_PORT, from: port }, { in: KONG_PG_USER, from: user }, { in: KONG_PG_DATABASE, from: database } ] }" -}}
+    {{- $halt := printf "core/gateway/kong %q composes its PostgreSQL connection from KONG_PG_HOST, KONG_PG_PORT, KONG_PG_USER and KONG_PG_DATABASE on its inject pipe, but nothing is wired to its backend socket to deliver them; wire the backend and give its edge an inject block naming each from the backend's provides — %s" .context.instance_id $shape -}}
+    {{- if $backendEdges -}}
+    {{- $halt = printf "core/gateway/kong %q composes its PostgreSQL connection from KONG_PG_HOST, KONG_PG_PORT, KONG_PG_USER and KONG_PG_DATABASE on its inject pipe, but the edge %q on its backend socket delivers no %s; give that edge an inject block naming each from the backend's provides — %s" .context.instance_id (join ", " $backendEdges) (join ", " $missing) $shape -}}
+    {{- end -}}
+    {{- fail $halt -}}
+    {{- end -}}
+    {{- /* Whether a `backend` connection carries a credential. Its value arrives
+           on the inject pipe under the key the credential publishes,
+           KONG_PG_PASSWORD. */ -}}
+    {{- $backendCredential := false -}}
+    {{- range $alias, $edge := .context.uses -}}
+    {{- if and (eq $edge.socket "backend") (hasKey (default dict $edge.features) "credential") -}}
+    {{- $backendCredential = true -}}
+    {{- end -}}
+    {{- end -}}
+    {{- /* The models connections, in alias order, and those of them carrying a
+           credential. A connection's credential arrives on the inject pipe as
+           the value it publishes, under AI_PROXY_<ALIAS>_API_KEY; one that
+           publishes it under any other name would leave the bearer token
+           empty with every request still sent, so the build halts naming the
+           connection and the name. The route set is written from each
+           connection's alias, the endpoint and model name its model
+           publishes, and whether it carries a credential, and, while a
+           core/prompt-deny-patterns attachment is on the component, from its
+           two lists, which the routes' prompt guard carries; their digest is
+           what re-creates the import step and the gateway when the route set
+           changes, below. */ -}}
+    {{- $wired := list -}}
+    {{- $tokens := list -}}
+    {{- $routeSet := list -}}
+    {{- range $alias, $edge := .context.uses -}}
+    {{- if eq $edge.socket "models" -}}
+    {{- $wired = append $wired $alias -}}
+    {{- $hasCredential := hasKey (default dict $edge.features) "credential" -}}
+    {{- $routeSet = append $routeSet (list $alias $edge.provides.endpoint $edge.provides.model $hasCredential) -}}
+    {{- if $hasCredential -}}
+    {{- $name := regexReplaceAll "[^A-Z0-9]" (upper $alias) "_" -}}
+    {{- $keyVar := printf "%s%s%s" $.locals.connection_variable_prefix $name $.locals.credential_variable_suffix -}}
+    {{- if not (hasKey $env $keyVar) -}}
+    {{- fail (printf "the models connection %s of %q carries a credential, but its inject pipe holds nothing named %s, the name this Recipe reads that credential under; publish it under %s, which with core/secret-value is values.key" $alias $.context.instance_id $keyVar $keyVar) -}}
+    {{- end -}}
+    {{- $tokens = append $tokens (dict "name" (printf "%s%s%s" $.locals.connection_variable_prefix $name $.locals.header_variable_suffix) "value" (index $env $keyVar)) -}}
+    {{- end -}}
+    {{- end -}}
+    {{- end -}}
+    {{- range $attachment := (default dict .features) -}}
+    {{- if eq (first (splitList ":" (toString $attachment.type))) "core/prompt-deny-patterns" -}}
+    {{- $values := default dict $attachment.values -}}
+    {{- $routeSet = append $routeSet (list "core/prompt-deny-patterns" (optional $values "deny_patterns" list) (optional $values "allow_patterns" list)) -}}
+    {{- end -}}
+    {{- end -}}
+    {{- $routesDigest := sha256sum (toJson $routeSet) -}}
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # Kong holds no durable state — the PostgreSQL backend is the system of
+    # record — so the stateless form is correct: there is nothing for a volume
+    # to outlive the container for, and none is declared.
+    form: stateless
+    # Compose serves one instance, so the replica count cannot be honoured. It
+    # is authored all the same, and the target reports it as an
+    # unsupported-field warning naming the setting rather than dropping it in
+    # silence. The count is the one the Kubernetes realization asks for.
+    replicas: 1
+    # Provision the database schema before the gateway serves. The init
+    # container becomes its own run-to-completion service and the gateway waits
+    # for it to finish — so the ordering is the target's, not something this
+    # recipe encodes into a command line where nothing could inspect or
+    # diagnose it. The step runs the gateway's own image and is given the same
+    # backend connection and the same password, so it provisions the schema
+    # with the credentials the gateway then connects with; only the arguments
+    # differ, and they replace the image's default command rather than its
+    # entrypoint. The bootstrap is idempotent, so re-running it against an
+    # already-provisioned database is a no-op.
+    #
+    # The entry is named so its service is named for its job. An entry with no
+    # name takes a positional one instead, which records the container's place
+    # in the list rather than what it does, and which moves if an entry is ever
+    # added ahead of it.
+    #
+    # What this step does not wait for, because it is a property of the target
+    # rather than of this Recipe: a dependency derived from a uses-edge is
+    # recorded on the component's own service and not on the run-to-completion
+    # services synthesized beside it. The gateway therefore waits for this step
+    # to complete, while this step carries no ordering against the backend and
+    # may run before the backend is accepting connections. Nothing is added to
+    # the command line to compensate — a readiness loop would move a lifecycle
+    # concern into a string nothing can inspect, where a step that fails is a
+    # failed service an operator can read.
+    initContainers:
+      - name: migrations
+        image: "kong:{{ .infra.engine_version }}"
+        args: [kong, migrations, bootstrap]
+        # $devPassword is the single authored home for the inline development
+        # default. This step provisions the schema with it and the gateway
+        # below connects with it, so the two have to be the same string — a
+        # drift between them would leave a gateway that cannot reach the
+        # database its own provisioning step created.
+        variables:
+          KONG_DATABASE: postgres
+          KONG_PG_HOST: "{{ $env.KONG_PG_HOST }}"
+          KONG_PG_PORT: "{{ $env.KONG_PG_PORT }}"
+          KONG_PG_USER: "{{ $env.KONG_PG_USER }}"
+          KONG_PG_DATABASE: "{{ $env.KONG_PG_DATABASE }}"
+    {{- if $backendCredential }}
+          KONG_PG_PASSWORD: "{{ index $env "KONG_PG_PASSWORD" | replace "\\" "\\\\" | replace "\"" "\\\"" }}"
+    {{- else }}
+          KONG_PG_PASSWORD: "{{ $devPassword }}"
+    {{- end }}
+    #
+    # While the models socket holds a connection, a second step imports the
+    # routes config the artifact above declares into the same database, with
+    # the same image, backend connection and password. The entry is named so
+    # its service is named for its job. The import adds and updates each
+    # service, route and plugin under an id Kong derives from its name, so a
+    # re-run writes the same rows again; it removes nothing, so a route whose
+    # connection is removed stays in the database until it is deleted through
+    # the Admin API, and so does the prompt guard a core/prompt-deny-patterns
+    # attachment wrote once the attachment is removed. The step reads no model
+    # credential: the routes hold a reference to one, which only the gateway
+    # resolves.
+    #
+    # docker compose up re-creates a service's container when the service's own
+    # definition changed since the container was created, and a config's
+    # content is no part of that definition. So this step and the gateway each
+    # carry the digest of what the route set is written from as
+    # MODEL_ROUTES_DIGEST, a variable nothing reads: a changed route set
+    # changes both definitions, and the next docker compose up re-creates the
+    # step, which imports the changed routes, and then the gateway, which
+    # starts serving them.
+    {{- if $wired }}
+      - name: model-routes
+        image: "kong:{{ .infra.engine_version }}"
+        args: [kong, config, db_import, "{{ .locals.model_routes_path }}"]
+        variables:
+          KONG_DATABASE: postgres
+          KONG_PG_HOST: "{{ $env.KONG_PG_HOST }}"
+          KONG_PG_PORT: "{{ $env.KONG_PG_PORT }}"
+          KONG_PG_USER: "{{ $env.KONG_PG_USER }}"
+          KONG_PG_DATABASE: "{{ $env.KONG_PG_DATABASE }}"
+          MODEL_ROUTES_DIGEST: "{{ $routesDigest }}"
+    {{- if $backendCredential }}
+          KONG_PG_PASSWORD: "{{ index $env "KONG_PG_PASSWORD" | replace "\\" "\\\\" | replace "\"" "\\\"" }}"
+    {{- else }}
+          KONG_PG_PASSWORD: "{{ $devPassword }}"
+    {{- end }}
+        volumeMounts:
+          - name: model-routes
+            path: "{{ .locals.model_routes_path }}"
+    {{- end }}
+    containers:
+      main:
+        image: "kong:{{ .infra.engine_version }}"
+        # No command or args override — the image's own default command starts
+        # the gateway. The backend identity resolved from the `backend`
+        # uses-edge arrives on the inject pipe and composes the KONG_PG_*
+        # connection, the same one the provisioning step above was given. The
+        # two listen addresses carry the operator's own port knobs; the admin
+        # API is reachable on the compose network only, because the service
+        # entry below publishes nothing to the host.
+        #
+        # Kong's Status API stays on the container's loopback address, the
+        # product's own default, unless values.metrics_enabled is true. Then
+        # KONG_STATUS_LISTEN binds it on every interface, so the published
+        # metrics address reaches it, and every peer on the compose network
+        # reaches it too. It checks no caller itself: beside /metrics it
+        # answers GET /status, GET /status/ready and GET /status/dns, and POST
+        # /status/ready, which with status=draining marks the node draining
+        # so it reports itself not ready until it restarts. So, under the same
+        # condition, KONG_NGINX_STATUS_INCLUDE has Kong include the allowlist
+        # mounted below in the Status API's own server block: from any address
+        # but the container's loopback one only a GET of /status,
+        # /status/ready or /metrics reaches the Status API, and every other
+        # request is answered 403. No port is declared for it: a compose
+        # service entry publishes nothing to the host, so the listen address
+        # is what opens it to the network.
+        variables:
+          KONG_DATABASE: postgres
+          KONG_PG_HOST: "{{ $env.KONG_PG_HOST }}"
+          KONG_PG_PORT: "{{ $env.KONG_PG_PORT }}"
+          KONG_PG_USER: "{{ $env.KONG_PG_USER }}"
+          KONG_PG_DATABASE: "{{ $env.KONG_PG_DATABASE }}"
+          KONG_PROXY_LISTEN: "0.0.0.0:{{ .infra.proxy_port }}, 0.0.0.0:8443 ssl"
+          KONG_ADMIN_LISTEN: "0.0.0.0:{{ .infra.admin_port }}"
+    {{- if .values.metrics_enabled }}
+          KONG_STATUS_LISTEN: "0.0.0.0:{{ .locals.status_port }}"
+          KONG_NGINX_STATUS_INCLUDE: "{{ .locals.status_guard_path }}"
+    {{- end }}
+    {{- if $backendCredential }}
+          KONG_PG_PASSWORD: "{{ index $env "KONG_PG_PASSWORD" | replace "\\" "\\\\" | replace "\"" "\\\"" }}"
+    {{- else }}
+          KONG_PG_PASSWORD: "{{ $devPassword }}"
+    {{- end }}
+    {{- /* Each models connection carrying a credential: the bearer token its
+           routes read through Kong's environment vault, composed from the
+           value the credential published, written as it was delivered. Then,
+           while a connection is wired, the route set's digest, which re-creates
+           the gateway when the route set changes. */ -}}
+    {{- range $tokens }}
+          {{ .name }}: {{ printf "Bearer %s" .value | toJson }}
+    {{- end }}
+    {{- if $wired }}
+          MODEL_ROUTES_DIGEST: "{{ $routesDigest }}"
+    {{- end }}
+        ports:
+          tcp: {{ .infra.proxy_port }}
+        # Kong reports readiness at /status/ready, but the image carries no
+        # HTTP client or socket tool to ask it from inside the container. The
+        # healthcheck is therefore the one the image itself declares, `kong
+        # health`, which reports whether the node's processes are running, with
+        # the image's own timing. A service keeps one healthcheck, so one probe
+        # is declared.
+        health:
+          ready:
+            exec: [kong, health]
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 10
+        # Each quantity is quoted because it is a string: a value with no unit
+        # suffix — a whole-core cpu count, say — would otherwise be read as a
+        # number and rejected before the target ever sees it.
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+    {{- /* The Status API's allowlist, the file KONG_NGINX_STATUS_INCLUDE
+           names, while values.metrics_enabled is true. */ -}}
+    {{- if .values.metrics_enabled }}
+        volumeMounts:
+          - name: status-guard
+            path: "{{ .locals.status_guard_path }}"
+    {{- end }}
+    # A ClusterIP service entry keeps the gateway on the compose network, which
+    # is where its consumers sit: a consumer wired to it resolves the service
+    # name and the port straight from the edge. Nothing is published to the
+    # host, so neither the proxy port nor the admin API is reachable from
+    # outside the network on this target.
+    {{- if or $wired .values.metrics_enabled }}
+    volumes:
+    {{- end }}
+    {{- if $wired }}
+      model-routes:
+        configmap:
+          source: "{{ .locals.model_routes_config_name }}"
+    {{- end }}
+    {{- if .values.metrics_enabled }}
+      status-guard:
+        configmap:
+          source: "{{ .locals.status_guard_config_name }}"
+    {{- end }}
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          tcp: {{ .infra.proxy_port }}

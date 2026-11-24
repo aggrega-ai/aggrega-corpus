@@ -1,0 +1,99 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: postgres-external
+  version: 1.0.0
+  description: >
+    A PostgreSQL server that already exists outside this deployment, reached as a
+    reference realization: nothing is provisioned and no compute runs. helm emits
+    an ExternalName Service that maps a stable in-cluster name onto the
+    operator-supplied endpoint. The same provides contract the provisioning
+    Recipes publish is published here, so a consumer's wiring is unchanged — only
+    the pointer string behind it differs. No credential is delivered by this
+    recipe: the credential for the referenced server is a referenceable secret
+    attached to the Component's optional password slot, because the
+    environment-variable name belongs to the consumer rather than to the endpoint.
+    Reach for this realization where the server already exists outside the
+    deployment and nothing is to be provisioned. Reach for the synthesis recipe to
+    stand a server up on a cluster that runs no PostgreSQL control plane, and for
+    the controller-driven recipe where that control plane is already in place.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/datastore/postgres:1.0.0
+
+  # This Recipe reads one key from infra.overrides:
+  #   host - string (required): the address the existing server answers on, as a
+  #          DNS name or an IP literal. It is a deterministic pointer string
+  #          piped through verbatim; nothing is looked up at build time.
+  #
+  # Port, user and database come from the Component's own infra.port and values
+  # keys — the same keys the provisioning Recipes read — rather than from a
+  # second spelling under overrides, so one concept keeps one name.
+  #
+  # The address is resolved once here and read from both provides.host and the
+  # workload below, so what a consumer receives and what the emitted Service
+  # aliases cannot drift apart. The presence check is written with optional
+  # because a Release that sets no overrides at all leaves the block absent, and
+  # a bare reference to an absent key halts before the assertion below can
+  # explain what is missing.
+  locals:
+    endpoint: '{{ optional (default dict .infra.overrides) "host" "" }}'
+
+  # The metrics keys are published empty: nothing runs here, and what a server
+  # this Release does not run exposes for scraping is not a fact this Recipe
+  # holds.
+  provides:
+    host: "{{ .locals.endpoint }}"
+    port: "{{ .infra.port }}"
+    user: "{{ .values.user }}"
+    database: "{{ .values.database }}"
+    protocol: "postgres"
+    metrics_pod_selector: ""
+    metrics_pod_port: ""
+    metrics_path: ""
+
+  # A referenced server has an address or it has nothing: with no address there
+  # is neither anything to alias nor anything to hand a consumer. The build halts
+  # here, where the fix is one line in the Release, rather than
+  # emitting a Service that aliases an empty name and a consumer wired to an
+  # empty host.
+  assertions:
+    external_host_supplied: >-
+      {{- if not .locals.endpoint -}}
+      {{- fail "the Manifest selects the referenced realization of PostgreSQL, which addresses a server it does not provision, but no address was supplied: set infra.overrides.host on this component in the Release to the DNS name or IP literal the existing server answers on" -}}
+      {{- end -}}
+    # infra.credentials chooses who owns the database's credentials on the
+    # controller-driven realization, and infra.credentials_secret names the
+    # Kubernetes Secret it reads them from. This realization provisions no
+    # server and delivers no credential: the referenced server's password is
+    # the credential attached to the password slot, such as
+    # core/referenced-secret naming an existing Kubernetes Secret. It reads
+    # neither key, so supplied, or any Secret name, would reach no byte of the
+    # output while the build reads as if it had chosen who owns the password.
+    # Refused here by name: infra.credentials other than generated, and any
+    # infra.credentials_secret. Not read: both, while they hold the Component's
+    # defaults, generated and empty.
+    infra_credentials: >-
+      {{- if ne (toString .infra.credentials) "generated" -}}
+      {{- fail (printf "infra.credentials is %q, which chooses who owns the database's credentials on the controller-driven realization, and this realization provisions no server and owns no credential, so the referenced server's password is the credential attached to the password slot, such as core/referenced-secret naming an existing Kubernetes Secret: remove infra.credentials from the Release" (toString .infra.credentials)) -}}
+      {{- end -}}
+      {{- with .infra.credentials_secret -}}
+      {{- fail (printf "infra.credentials_secret is %q, which names the Kubernetes Secret the controller-driven realization reads the database owner's credentials from, and this realization provisions no server and reads no Secret, so the referenced server's password is the credential attached to the password slot, such as core/referenced-secret naming an existing Kubernetes Secret: remove infra.credentials_secret from the Release" .) -}}
+      {{- end -}}
+
+  # form: reference is the no-compute shape: no controller, no containers, no
+  # storage. helm turns it into an ExternalName Service carrying the address, so
+  # a workload inside the cluster may reach the referenced server under a stable
+  # in-cluster name if it prefers that to the address itself.
+  workload: |
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    form: reference
+    endpoint: "{{ .locals.endpoint }}"
+    port: {{ .infra.port }}

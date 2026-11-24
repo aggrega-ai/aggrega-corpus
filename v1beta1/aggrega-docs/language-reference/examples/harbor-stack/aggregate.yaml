@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Aggregate
+metadata:
+  name: aggregate
+  version: "1.0.0"
+  description: >
+    A container registry, imported as a reusable module. The module is a
+    sub-aggregate composing one component, which describes the whole registry —
+    its API and token-service control plane, its OCI blob store and controller,
+    its web console, its worker tier, its vulnerability scanner, its relational
+    backend, its key-value cache, and the reverse proxy fronting them — as a
+    single unit deployed from the registry's own Helm chart. One in-cluster
+    address serves the console path and the registry and API paths, and the
+    module exports it under both of its public names: `registry`, the endpoint
+    image clients and the API talk to, and `ui`, the web endpoint. This
+    top-level Aggregate imports the module by name and passes three of the
+    registry's keys down to it from parameters the Release fulfills; the
+    operator sizes the module's component in the Release.
+spec:
+  parameters:
+    # The module takes three of the registry's keys as parameters of its own and
+    # has no default for any of them, so this Aggregate declares one for each
+    # and passes it down. With this example's Manifest, each value is the name
+    # of a Secret already in the target namespace, holding the key under the
+    # data key the parameter's description names.
+    csrf_key:
+      type: string
+      required: true
+      minLength: 1
+      description: Name of the Secret holding the 32-character key the control plane signs its cross-site request forgery tokens with, under the data key CSRF_KEY, created in the target namespace before the Release is applied.
+    jobservice_secret:
+      type: string
+      required: true
+      minLength: 1
+      description: Name of the Secret holding the 16-character secret the worker tier and the control plane authenticate to each other with, under the data key JOBSERVICE_SECRET, created in the target namespace before the Release is applied.
+    registry_http_secret:
+      type: string
+      required: true
+      minLength: 1
+      description: Name of the Secret holding the 16-character secret the blob store signs its upload state with, under the data key REGISTRY_HTTP_SECRET, created in the target namespace before the Release is applied.
+  aggregates:
+    harbor:
+      type: core/harbor
+      parameters:
+        csrf_key: "{{ .parameters.csrf_key }}"
+        jobservice_secret: "{{ .parameters.jobservice_secret }}"
+        registry_http_secret: "{{ .parameters.registry_http_secret }}"

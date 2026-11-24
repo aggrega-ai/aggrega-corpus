@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Manifest
+metadata:
+  name: manifest-cloudformation
+  version: "1.0.0"
+  description: >
+    Ops mapping for AWS through CloudFormation. The PostgreSQL component type
+    binds the Recipe that emits an RDS instance as a stack fragment, and the
+    server type binds the Recipe that emits an Amazon ECS service and its task
+    definition. The provider assembles every fragment a boundary holds into one
+    stack template.
+spec:
+  mappings:
+    components:
+      type:
+        # Provider-qualified for the same reason as on the Terraform Manifest:
+        # each component type has a Recipe on more than one target.
+        core/datastore/postgres:1.0.0: cloudformation/postgres-rds:1.0.0
+        core/compute/server:1.0.0: cloudformation/server-ecs:1.0.0
+    features:
+      type:
+        # The backup Feature binds the FeatureRecipe that leaves the backup to
+        # the instance's own automated backups. It renders nothing: the
+        # database Recipe reads the attachment and sets the instance's backup
+        # properties itself.
+        core/backup:1.0.0: cloudformation/backup-native:1.0.0

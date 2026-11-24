@@ -1,0 +1,1015 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: envoy-gateway
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    An Envoy Gateway ingress gateway via the project's own Helm chart, from a
+    container registry: the controller and its access control, the
+    certificate-generation job and — unless infra.install_crds is false, when
+    infra.control_plane_present must be true or the build halts — the routing
+    API's experimental-channel definitions.
+
+    Beside the chart this Recipe emits the gateway class, claimed under the
+    controller name the control plane answers for, and the gateway with one
+    HTTP listener. Where infra.tls_secret names a certificate Secret, the
+    gateway gains an `https` listener on port 443 terminating TLS with it; the
+    Secret is referenced and never emitted. It emits neither the data plane,
+    which the control plane creates, nor a namespace.
+
+    Wired to the AI gateway controller on the extension socket, the control
+    plane names it as its extension server, and the gateway must sit in
+    envoy-gateway-system. Each model on the models socket gets a rule of one
+    AI route and the resources reaching its published endpoint, its
+    credential named only by its Secret; the project's client traffic policy
+    raises the gateway's buffer to 50Mi. With a model wired, provides.host is
+    the data-plane Service Envoy Gateway creates and provides.endpoint its /v1
+    base URL, qualified with envoy-gateway-system.
+
+    The route's one traffic policy holds core/period-budget as a rate limit
+    on the route's token cost, counted in the cache socket's store, over TLS
+    to one publishing valkey-tls or redis-tls, core/retry-policy as a retry count, and
+    core/concurrency-limit as a per-model cap on requests in flight.
+    core/audit-logging is the gateway's access log, adding the model and token
+    counts.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/gateway/envoy-gateway:1.0.0
+
+  # The chart is distributed as an artifact in a container registry and
+  # referenced as one here. It is published by the project's own maintainers,
+  # covers the whole control plane, and carries the same version as the release
+  # it packages, so this Recipe maps the Component's surface into it rather than
+  # re-deriving the control plane by hand. The chart carries the controller and
+  # the access control it runs under, the certificate-generation job the
+  # authentication paths need, and — unless the Release turns that off — the
+  # custom-resource definitions the gateway and its routes are written against.
+  # Those definitions are the experimental channel of the routing API, which
+  # carries the standard channel's resources plus the TCP, TLS and UDP routes and
+  # the listener-set resource; a cluster already holding the standard channel
+  # installs them separately and sets infra.install_crds to false.
+  source:
+    kind: helm-oci-chart
+    url: oci://docker.io/envoyproxy/gateway-helm
+    # Default chart version. Override via infra.source_version.
+    version: "{{ optional .infra `source_version` \"v1.9.1\" }}"
+
+  # The fixed strings the templates below share, each written once here.
+  #
+  # controller_gateway_namespace is the namespace the AI gateway controller
+  # looks for this gateway's control plane in: the controller chart's default
+  # for its Envoy Gateway namespace at v1.1.0, the version the controller's
+  # Recipe pins, which that Recipe leaves in place. It is a deliberate second
+  # copy of that chart default, kept here so this Recipe can halt when the
+  # gateway is placed anywhere else; a controller Recipe moving that
+  # setting moves this line with it.
+  #
+  # model_header is the header Envoy AI Gateway writes the model name a request
+  # carries into, which a route rule matches to choose a backend.
+  #
+  # token_cost_namespace is the namespace of the request metadata Envoy AI
+  # Gateway writes a route's token costs into, where a traffic policy's rate
+  # limit reads the cost it charges and the access log reads the token counts
+  # and the model that answered.
+  locals:
+    controller_gateway_namespace: envoy-gateway-system
+    model_header: x-ai-eg-model
+    token_cost_namespace: io.envoy.ai_gateway
+
+  # host is the Service Envoy Gateway creates for this gateway's data plane —
+  # the entry point client traffic is sent to. Envoy Gateway names it from the
+  # gateway's namespace and name, `<namespace>/<name>` with the slash as a
+  # hyphen, cut to 48 characters with a trailing hyphen dropped, prefixed with
+  # `envoy-` and followed by a hyphen and the first eight hexadecimal digits of
+  # the SHA-256 digest of `<namespace>/<name>`, and places it in its own
+  # namespace, which this Recipe makes the gateway's. The expression below is a
+  # deliberate second copy of that naming, read from Envoy Gateway's source at
+  # v1.9.1, the chart version this Recipe defaults to, so the published name is
+  # the one the control plane creates without this Recipe emitting anything to
+  # pin it. The name carries no namespace; a consumer in another namespace
+  # qualifies it on its own side. port is the plain HTTP listener's port,
+  # which the Service exposes as it is.
+  #
+  # A published value can read neither the namespace the Release, or else the Aggregate, places the
+  # gateway in nor the gateway's connections, so the namespace hashed in is
+  # locals.controller_gateway_namespace, and only while values.model is set.
+  # A build gets that far only with a models connection, which needs the
+  # extension connection, which places the gateway in that namespace — the
+  # component's assertions and the halt in the value mapping below, in that
+  # order — so the name is the one Envoy Gateway gives. With values.model
+  # unset the namespace is not known here, and host is empty rather than a
+  # name hashed from a guess.
+  #
+  # endpoint is the base URL an OpenAI client takes for the models this gateway
+  # serves: the Service qualified with its namespace, its port and /v1, the
+  # path Envoy AI Gateway serves the OpenAI API under with the controller's
+  # chart defaults. Unlike host, it carries the namespace, so it resolves from
+  # any namespace a consumer sits in: it is written only while values.model is
+  # set, which is exactly when the namespace is fixed by construction to
+  # locals.controller_gateway_namespace, so the qualified name is always the
+  # true one. model is values.model, the alias a consumer names as its model.
+  # The Service name is spelled out again on purpose: a provides entry cannot
+  # read another provides entry and a locals entry cannot read the rendered
+  # name, so the repetition is forced, and the entries are edited together.
+  # With nothing wired to the models socket values.model is omitted — the
+  # component's assertion halts on any other combination — and host, endpoint
+  # and model are empty.
+  #
+  # The metrics keys say where a scraper finds the data plane's metrics:
+  # /stats/prometheus on the container port Envoy Gateway names metrics,
+  # 19001, on every proxy pod it runs for the gateway — a listener answering a
+  # GET of that one path, the administration interface it forwards to
+  # listening on the pod's loopback address. Envoy Gateway labels every proxy
+  # pod app.kubernetes.io/name envoy and app.kubernetes.io/component proxy,
+  # which leave out the control plane's own pod, whose metrics are not
+  # published, and with the gateway it serves, whose name is the rendered
+  # name, under gateway.envoyproxy.io/owning-gateway-name, which leaves out the
+  # proxies of the install's other gateways. By default Envoy Gateway runs the
+  # proxies in its control plane's own namespace, and this Recipe keeps that
+  # default, so they sit in the namespace the Release, or else the Aggregate, places the chart and the
+  # gateway in, the one a scraper reads from its connection; the owning
+  # gateway's namespace label is left out, since a published value carries no
+  # namespace. The labels, the port, the listener and the placement are Envoy
+  # Gateway's at v1.9.1, read from its source, and move with it like every
+  # other detail here.
+  provides:
+    host: '{{- with optional .values "model" "" }}{{- $key := printf "%s/%s" $.locals.controller_gateway_namespace $.context.rendered_name }}{{- $base := replace "/" "-" $key }}{{- if gt (len $base) 48 }}{{- $base = trimSuffix "-" (trunc 48 $base) }}{{- end }}envoy-{{ $base }}-{{ trunc 8 (sha256sum $key) }}{{ end }}'
+    port: "{{ .infra.port }}"
+    protocol: "http"
+    endpoint: '{{- with optional .values "model" "" }}{{- $key := printf "%s/%s" $.locals.controller_gateway_namespace $.context.rendered_name }}{{- $base := replace "/" "-" $key }}{{- if gt (len $base) 48 }}{{- $base = trimSuffix "-" (trunc 48 $base) }}{{- end }}http://envoy-{{ $base }}-{{ trunc 8 (sha256sum $key) }}.{{ $.locals.controller_gateway_namespace }}.svc.cluster.local:{{ $.infra.port }}/v1{{ end }}'
+    model: '{{ optional .values "model" "" }}'
+    metrics_pod_selector: "app.kubernetes.io/name=envoy,app.kubernetes.io/component=proxy,gateway.envoyproxy.io/owning-gateway-name={{ .context.rendered_name }}"
+    metrics_pod_port: "metrics"
+    metrics_path: "/stats/prometheus"
+
+  # The runtime prerequisite, declared rather than hoped for. By default this
+  # Release installs the custom-resource definitions alongside the controller
+  # that reconciles them, so the gateway class and the gateway it emits have
+  # both halves of their control plane in the same render. Where the Release
+  # does not install them, the definitions have to be in the cluster already —
+  # and the compiler runs ahead of time and cannot look, so it asks the operator
+  # to affirm it and halts when nobody has.
+  assertions:
+    custom_resource_definitions_prerequisite: |
+      {{- if and (not .infra.install_crds) (not .infra.control_plane_present) -}}
+      {{ fail "this Release does not install the custom-resource definitions the gateway class and the gateway are written against, because infra.install_crds is false; affirm that the target cluster already carries them by setting infra.control_plane_present to true on this component in the Release, or set infra.install_crds back to true and let this Release install them" }}
+      {{- end -}}
+
+  # This Recipe reads from infra.overrides:
+  #   ratelimit_image  - string (global.images.ratelimit.image; replaces the chart's pin, which reads
+  #                      USE_CALENDAR_MONTH_RATE_LIMIT; a replacement that does not counts a period
+  #                      budget of 1mo over 30 days instead)
+  #   data_plane_image - string (global.images.envoyProxy.image; replaces the control plane's built-in default)
+  #   requests         - { cpu: string, memory: string } (control-plane resource requests)
+  #   service_type     - string (service.type; default ClusterIP)
+  #   replicas         - integer (deployment.replicas)
+  #   nodeSelector     - map[string]string
+  #   tolerations      - []object
+  #
+  # The control-plane image is pinned to an explicit release tag for a
+  # reproducible render; override it through infra.image. Two further images are
+  # named by the render and neither floats — the rate-limit image the chart
+  # itself pins, and the data-plane image, left to the control plane's own
+  # built-in default, which the control-plane pin fixes in turn. Each is
+  # replaceable through infra.overrides.
+  valuesMapping: |
+    ## ── The extension server ───────────────────────────────────
+    ## The connection on the extension socket, if any; the Component's
+    ## assertion allows one. The controller it reaches looks for this gateway's
+    ## control plane in locals.controller_gateway_namespace, so with a
+    ## connection the gateway's own namespace — the one the Release, or else the Aggregate, declares,
+    ## or `default` — must be that one, and the build halts otherwise, naming
+    ## the namespace to declare. The controller's namespace qualifies the host
+    ## it publishes, which carries none.
+    {{- $extension := dict }}
+    {{- range $alias, $edge := .context.uses }}
+      {{- if eq $edge.socket "extension" }}
+        {{- $extension = $edge }}
+      {{- end }}
+    {{- end }}
+    {{- $controllerNamespace := "" }}
+    {{- with $extension }}
+      {{- $ns := optional (optional (default dict $.context.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict $.context.annotations) "aggregate" dict) "aggrega.ai/namespace" "") | default "default" }}
+      {{- if ne $ns $.locals.controller_gateway_namespace }}
+      {{- fail (printf "%q has %q wired to its extension socket, and that controller looks for this gateway's control plane in the %s namespace, but the gateway is placed in %q; declare the annotation aggrega.ai/namespace: %s on %q in the Release" $.context.instance_id .target $.locals.controller_gateway_namespace $ns $.locals.controller_gateway_namespace $.context.instance_id) }}
+      {{- end }}
+      {{- $controllerNamespace = optional (optional (default dict .annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict .annotations) "aggregate" dict) "aggrega.ai/namespace" "") | default "default" }}
+    {{- end }}
+
+    ## ── The period budget's store ──────────────────────────────
+    ## A core/period-budget attachment, which period-budget-envoy-gateway
+    ## realizes and checks, is counted by Envoy Gateway's rate-limit service,
+    ## which the control plane creates in its own namespace once its
+    ## configuration names a store. The store is the connection on the cache
+    ## socket, which that realization requires while the budget is attached;
+    ## with no attachment nothing here is written, whatever the cache socket
+    ## holds. The store must speak the Redis protocol, which a store publishes
+    ## as redis or valkey, or as valkey-tls or redis-tls when it is served over TLS alone, and
+    ## the build halts on any other, another value served over TLS included.
+    ## A server_ca on the connection publishing no Secret name halts, as does
+    ## one on a store served without TLS. Its published
+    ## host carries no namespace, so a host with no dot and no colon is
+    ## qualified with the namespace the Release, or else the Aggregate, places the store in, or
+    ## `default` where it declares none. The connection's credential, where it
+    ## carries one, is handed to the service as a reference to the Secret it
+    ## publishes; one publishing no Secret name and data key halts the build,
+    ## since the service would then have no reference to read it from.
+    {{- $budget := dict }}
+    {{- range $name, $attachment := (default dict .features) }}
+      {{- if eq (first (splitList ":" (toString $attachment.type))) "core/period-budget" }}
+        {{- $budget = $attachment }}
+      {{- end }}
+    {{- end }}
+    {{- $store := dict }}
+    {{- if $budget }}
+      {{- range $alias, $edge := .context.uses }}
+        {{- if eq $edge.socket "cache" }}
+          {{- $store = $edge }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- $storeAddress := "" }}
+    {{- $storeSecret := dict }}
+    {{- $storeTLS := false }}
+    {{- $storeCA := "" }}
+    {{- with $store }}
+      {{- $protocol := toString (optional (default dict .provides) "protocol" "") }}
+      {{- if has $protocol (list "valkey-tls" "redis-tls") }}
+      {{- $storeTLS = true }}
+      {{- else if hasSuffix "-tls" $protocol }}
+      {{- fail (printf "the cache socket of %q is wired to %q, whose published protocol is %q, a store served over TLS that Envoy Gateway's rate-limit service is not taught to reach: it speaks the Redis protocol, over TLS to a store publishing valkey-tls or redis-tls; wire a Redis-protocol store to the cache socket" $.context.instance_id .target $protocol) }}
+      {{- else if not (has $protocol (list "redis" "valkey")) }}
+      {{- fail (printf "the cache socket of %q is wired to %q, whose published protocol is %q, but Envoy Gateway's rate-limit service keeps a period budget's count in a store speaking the Redis protocol, which a store publishes as redis or valkey; wire a core/datastore/redis to the cache socket instead" $.context.instance_id .target $protocol) }}
+      {{- end }}
+      {{- $host := lower (toString .provides.host) }}
+      {{- if not (or (contains "." $host) (contains ":" $host)) }}
+      {{- $host = printf "%s.%s.svc.cluster.local" $host (optional (optional (default dict .annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict .annotations) "aggregate" dict) "aggrega.ai/namespace" "") | default "default") }}
+      {{- end }}
+      {{- $storeAddress = printf "%s:%v" $host .provides.port }}
+      {{- with optional (default dict .features) "credential" dict }}
+        {{- $locator := optional . "provides" dict }}
+        {{- if not (and (optional $locator "name" "") (optional $locator "key" "")) }}
+        {{- fail (printf "the credential on the cache connection of %q publishes no Secret name and data key, so Envoy Gateway's rate-limit service could not be given a reference to read the store's password from; attach a credential publishing both, such as core/referenced-secret" $.context.instance_id) }}
+        {{- end }}
+        {{- $storeSecret = $locator }}
+      {{- end }}
+      {{- if hasKey (default dict .features) "server_ca" }}
+        {{- $caLocator := optional (optional (default dict .features) "server_ca" dict) "provides" dict }}
+        {{- if not (and (kindIs "map" $caLocator) (optional $caLocator "name" "")) }}
+        {{- fail (printf "the server_ca on the cache connection of %q publishes no Secret name, so no Secret could be mounted into Envoy Gateway's rate-limit service: attach a server_ca publishing one, such as core/referenced-secret" $.context.instance_id) }}
+        {{- end }}
+        {{- if not $storeTLS }}
+        {{- fail (printf "the cache connection of %q holds a server_ca, but the store it reaches, %q, publishes protocol %s, served without TLS, so no TLS handshake takes place to check a certificate in: turn client_tls on for that store, or remove the server_ca" $.context.instance_id .target (default "none" $protocol)) }}
+        {{- end }}
+        {{- $storeCA = $caLocator.name }}
+      {{- end }}
+    {{- end }}
+    {{- $calendarMonth := false }}
+    {{- with $budget }}
+      {{- $calendarMonth = eq (toString (optional (default dict .infra) "period" "")) "1mo" }}
+    {{- end }}
+
+    ## ── Resource naming ────────────────────────────────────────
+    ## Bind the chart's own name prefix to the rendered name, the release name
+    ## the helm provider gives the chart, so every object it renders is named
+    ## after the component the Aggregate declared, spelled in the alphabet a
+    ## Kubernetes name allows.
+    fullnameOverride: "{{ .context.rendered_name }}"
+
+    ## ── Image pins ─────────────────────────────────────────────
+    ## Pin the control-plane image explicitly for a reproducible render;
+    ## override it via infra.image. The rate-limit image the chart pins and the
+    ## data-plane image the control plane defaults to are each replaceable
+    ## through infra.overrides, and neither is restated here — restating a pin
+    ## the upstream already makes would be a second copy that drifts from it.
+    global:
+      images:
+        envoyGateway:
+          image: "{{ .infra.image }}"
+        {{- if and .infra.overrides .infra.overrides.ratelimit_image }}
+        ratelimit:
+          image: "{{ .infra.overrides.ratelimit_image }}"
+        {{- end }}
+        {{- if and .infra.overrides .infra.overrides.data_plane_image }}
+        envoyProxy:
+          image: "{{ .infra.overrides.data_plane_image }}"
+        {{- end }}
+
+    ## ── Custom-resource definitions ────────────────────────────
+    ## Install the definitions the gateway and its routes are written against,
+    ## together with the upgrade-safety policy that guards them. Set
+    ## infra.install_crds to false where the cluster manages them separately.
+    crds:
+      enabled: {{ .infra.install_crds }}
+
+    ## ── Gateway class controller name ──────────────────────────
+    ## The control plane answers for this name and the gateway class this Recipe
+    ## emits is claimed under it, so the two halves read one value.
+    config:
+      envoyGateway:
+        gateway:
+          controllerName: "{{ .infra.controller_name }}"
+        {{- with $extension }}
+        ## ── The AI gateway extension ─────────────────────────────
+        ## Written as the AI gateway's installation configures Envoy Gateway
+        ## at the controller's version: the Backend resource and the patch
+        ## policies admitted, and the controller's extension server called
+        ## after Envoy Gateway translates its configuration, for every
+        ## listener, route, cluster and secret, at the address the controller
+        ## publishes. Nothing here is written while the extension socket is
+        ## empty, so the configuration is then the chart's own.
+        extensionApis:
+          enableEnvoyPatchPolicy: true
+          enableBackend: true
+        extensionManager:
+          hooks:
+            xdsTranslator:
+              translation:
+                listener:
+                  includeAll: true
+                route:
+                  includeAll: true
+                cluster:
+                  includeAll: true
+                secret:
+                  includeAll: true
+              post:
+                - Translation
+                - Cluster
+                - Route
+          service:
+            fqdn:
+              hostname: "{{ .provides.host }}.{{ $controllerNamespace }}.svc.cluster.local"
+              port: {{ .provides.port }}
+        {{- end }}
+        {{- with $storeAddress }}
+        ## ── The rate-limit service ───────────────────────────────
+        ## Envoy Gateway's own rate-limit service, which counts a period
+        ## budget, keeping the count in the store above. The control plane
+        ## creates it from this configuration and turns it on for every
+        ## gateway it serves. failClosed keeps the budget while its count
+        ## cannot be checked: while the store or the service cannot be
+        ## reached, or a check takes longer than Envoy's rate-limit timeout,
+        ## 20 ms by default, a model request is refused with HTTP 500 rather
+        ## than served and not counted, the product's default. The setting is
+        ## the control plane's, so it holds for every rate limit this install
+        ## keeps, and a rate limit applied to it by hand fails closed too. A
+        ## request admitted just before an outage is still served and not
+        ## counted, because its tokens are charged after the reply. The
+        ## password reaches the service as REDIS_AUTH, read from the Secret
+        ## the cache connection's credential publishes, which the service
+        ## resolves in its own namespace, the gateway's. A store publishing
+        ## valkey-tls or redis-tls is reached over TLS: redis.tls turns REDIS_TLS on in the
+        ## service, which then checks the store's certificate and the host name
+        ## it dials, against the authority in REDIS_TLS_CACERT where the
+        ## connection holds a server_ca and otherwise against the image's
+        ## default trust store. The control plane mounts a volume named
+        ## redis-certs at /redis-certs into the service whenever redis.tls is
+        ## set, but adds that volume itself only for a client certificate,
+        ## which a store here does not ask for, so the volume is supplied here:
+        ## the server_ca's Secret, in the gateway's namespace, whose ca.crt the
+        ## service reads, or an empty directory where none is held. Read from
+        ## the controller's source at v1.9.1 and the rate-limit service's at
+        ## the commit its chart pins. For a budget of one
+        ## calendar month the service is told, through
+        ## USE_CALENDAR_MONTH_RATE_LIMIT, to count a Month from the first day
+        ## of a calendar month to its last; the setting is the service's, so it
+        ## applies to every Month rate limit this install keeps. Any other
+        ## budget leaves it at its default, under which a Month is 30 days.
+        rateLimit:
+          backend:
+            type: Redis
+            redis:
+              url: {{ . | toJson }}
+              {{- if $storeTLS }}
+              tls: {}
+              {{- end }}
+          failClosed: true
+        {{- if or $storeSecret $calendarMonth $storeTLS }}
+        provider:
+          kubernetes:
+            rateLimitDeployment:
+              {{- if or $storeSecret $calendarMonth $storeCA }}
+              container:
+                env:
+                  {{- with $storeSecret }}
+                  - name: REDIS_AUTH
+                    valueFrom:
+                      secretKeyRef:
+                        name: {{ .name | toJson }}
+                        key: {{ .key | toJson }}
+                  {{- end }}
+                  {{- if $calendarMonth }}
+                  - name: USE_CALENDAR_MONTH_RATE_LIMIT
+                    value: "true"
+                  {{- end }}
+                  {{- if $storeCA }}
+                  - name: REDIS_TLS_CACERT
+                    value: /redis-certs/ca.crt
+                  {{- end }}
+              {{- end }}
+              {{- if $storeTLS }}
+              pod:
+                volumes:
+                  - name: redis-certs
+                    {{- if $storeCA }}
+                    secret:
+                      secretName: {{ $storeCA | toJson }}
+                    {{- else }}
+                    emptyDir: {}
+                    {{- end }}
+              {{- end }}
+        {{- end }}
+        {{- end }}
+
+    ## ── Control-plane workload ─────────────────────────────────
+    deployment:
+      {{- if and .infra.overrides .infra.overrides.replicas }}
+      replicas: {{ .infra.overrides.replicas }}
+      {{- end }}
+      envoyGateway:
+        resources:
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          {{- if and .infra.overrides .infra.overrides.requests }}
+          requests:
+            cpu: "{{ .infra.overrides.requests.cpu }}"
+            memory: "{{ .infra.overrides.requests.memory }}"
+          {{- end }}
+      {{- if .infra.overrides }}
+      {{- if or .infra.overrides.nodeSelector .infra.overrides.tolerations }}
+      pod:
+        {{- if .infra.overrides.nodeSelector }}
+        nodeSelector: {{ toJson .infra.overrides.nodeSelector }}
+        {{- end }}
+        {{- if .infra.overrides.tolerations }}
+        tolerations: {{ toJson .infra.overrides.tolerations }}
+        {{- end }}
+      {{- end }}
+      {{- end }}
+
+    ## ── Control-plane service ──────────────────────────────────
+    ## This Service carries the configuration stream the data plane reads. It is
+    ## not the client entry point: client traffic reaches the Service the control
+    ## plane creates for the gateway.
+    service:
+      {{- if and .infra.overrides .infra.overrides.service_type }}
+      type: "{{ .infra.overrides.service_type }}"
+      {{- else }}
+      type: ClusterIP
+      {{- end }}
+
+  # Beside the chart this Recipe emits the two resources the chart leaves to its
+  # user: the gateway class, claimed under the same controller name the control
+  # plane is configured to answer for, and the gateway itself with one HTTP
+  # listener. Where the Release names a certificate Secret (infra.tls_secret),
+  # the gateway gains a second listener, `https`, on port 443 with protocol
+  # HTTPS, terminating TLS with the certificate that Secret holds — the port and
+  # protocol the routing API names as its core pairing for a route served over
+  # HTTPS — and a route attaches to it by naming that listener; the Secret is
+  # referenced and never emitted, and with the key unset the gateway carries the
+  # HTTP listener alone. It does not emit the data plane — the control plane
+  # creates that when it reconciles the gateway — and it does not emit a
+  # namespace.
+  #
+  # The gateway is placed in the namespace the Release, or else the Aggregate, declares for the
+  # component through the aggrega.ai/namespace annotation, the namespace the
+  # chart's own objects land in. Where no namespace is declared it is placed in
+  # `default`, the namespace the chart is then rendered against.
+  #
+  # The two resources the chart leaves to its user: the gateway class is
+  # cluster-scoped, and one gateway serves every route attached to it, so both
+  # belong to the install rather than to any single application. The gateway
+  # is named by the same rendered name the chart's own objects are.
+  #
+  # The HTTPS listener is emitted only where infra.tls_secret names a
+  # certificate Secret. It takes its own name, because a route attaches to one
+  # listener by naming it, and its own port, because two listeners must differ
+  # in port, protocol or hostname; 443 is the port the routing API pairs with
+  # HTTPS for a route. It carries no hostname, so it accepts every hostname the
+  # routes attached to it declare. The certificate reference is written out in
+  # full, kind and group included, which is the form the cluster stores it in.
+  #
+  # The models the gateway serves, as the resources Envoy AI Gateway and Envoy
+  # Gateway define, all in the gateway's own namespace, written into
+  # models.yaml. With nothing
+  # wired to the models socket the template writes nothing, and no file is
+  # emitted.
+  #
+  # One AI route, named after the gateway with -models appended, attached to
+  # this gateway, holds a rule per connection in alias order: a request whose
+  # model name, which Envoy AI Gateway writes into locals.model_header, is the
+  # connection's alias goes to that connection's AI service backend, asking
+  # for the model name the model publishes in place of the alias. The route
+  # takes fifteen rules, so a sixteenth connection stops the build.
+  #
+  # Beside the route, the client traffic policy Envoy AI Gateway's own basic
+  # example and configuration generator write at the controller's version: it
+  # targets this gateway and raises the buffer Envoy Gateway allows each
+  # incoming connection from its default of 32768 bytes to 50Mi, because the AI
+  # gateway's external processor reads each request's whole body, in buffered
+  # mode, to find the model it names. It targets the gateway, so the raised
+  # buffer applies to every route attached to it, model routes or not. It is
+  # named after the gateway rather than with the project's fixed name, because
+  # every gateway serving a model sits in the same namespace.
+  #
+  # Then one traffic policy, named like the AI route after the gateway with
+  # -models appended, targets the HTTP route Envoy AI Gateway's controller
+  # creates for the AI route, under the AI route's own name, so what it carries
+  # covers model traffic and no other route on the gateway. Envoy Gateway
+  # attaches one traffic policy to a route and refuses a second one naming
+  # it, so this one policy carries every control written onto the model
+  # route: the period budget's rate limit, the retry policy's retry and the
+  # concurrency limit's circuit breaker, in that order. It is
+  # written while any of them is attached; with none, no policy is written.
+  #
+  # A core/period-budget attachment, which period-budget-envoy-gateway
+  # realizes and checks, is written as Envoy Gateway's usage-based rate limit.
+  # The AI route gains one token cost, the count unit names as Envoy AI
+  # Gateway calls it — TotalToken, InputToken or OutputToken, which it reads
+  # from the total_tokens, prompt_tokens and completion_tokens a reply reports
+  # — written into the request's metadata under locals.token_cost_namespace.
+  # The traffic policy's rate limit charges nothing when a request arrives
+  # and that cost when its reply completes, against
+  # limit tokens per one unit of Envoy Gateway's rate limit: period's length
+  # in seconds names the unit — 1 a Second, 60 a Minute, 3600 an Hour, 86400
+  # a Day, 604800 a Week, 2592000 a Month of 30 days, 31536000 a Year of 365
+  # days — and 1mo a Month counted as a calendar month, under the setting the
+  # value mapping above turns on. The realization's assertion keeps the same
+  # list of lengths, deliberately a second copy, because an assertion cannot
+  # hand a value to this Recipe; the two are edited together, and a period
+  # this template cannot map halts the build here. Scope gateway writes one
+  # rule, counting every model request on the route together; scope model
+  # writes one per connection on the models socket, in alias order, matching
+  # the model name Envoy AI Gateway writes into locals.model_header, so each
+  # wired model is counted apart. Every rule is shared, which keeps one count
+  # across the route's rules rather than one per rule. With no such
+  # attachment no rate limit is written, and the route carries a token cost
+  # only while core/audit-logging, below, asks for all three.
+  #
+  # A core/retry-policy attachment, which retry-policy-envoy-gateway realizes
+  # and checks, is written as the traffic policy's retry, and this is the one
+  # place its count is computed. max_attempts counts every send, the first
+  # included, while Envoy Gateway's numRetries counts the sends after the
+  # first, so numRetries is max_attempts less one. A send is repeated on a
+  # refused connection or stream, on a reset — an upstream that does not
+  # answer at all — and on a reply of 429, 503 or 504; the list is written
+  # out because Envoy Gateway's own default retries neither a 429 nor a
+  # reset. No per-send timeout is written, so the AI route's request timeout
+  # spans every send, and a model that answers nothing within it is not sent
+  # again. The retry applies to every rule of the route, and each rule holds
+  # one backend, so a request for any wired model is sent at most
+  # max_attempts times.
+  #
+  # A core/concurrency-limit attachment, which concurrency-limit-envoy-gateway
+  # realizes and checks, is written as the traffic policy's circuit breaker,
+  # and this is the one place its numbers are computed. Envoy Gateway applies
+  # it to the backend of each rule of the route, and each rule holds one
+  # wired model's backend, so each wired model is capped on its own:
+  # maxParallelRequests, the most requests Envoy sends to that backend at
+  # once, is max_in_flight. A request past it is answered 503 and is not sent
+  # again, and a send the retry repeats is counted like the first, so one
+  # that finds the cap full is answered 503 in its place. The count is each
+  # running data-plane replica's own.
+  #
+  # Two more of the circuit breaker's limits stand in front of that one, each
+  # 1024 by default. Envoy sends a request on a connection to the backend and
+  # queues one waiting for a connection to open, and the circuit breaker
+  # bounds both the connections and the queue; over HTTP/1.1, which a backend
+  # reached over plain http speaks, a connection carries one request at a
+  # time. With the defaults kept, a max_in_flight above 1024 would let no
+  # more than 1024 requests reach the model at once, the rest waiting in the
+  # queue, and a max_in_flight level with the connection limit would leave a
+  # request past the cap waiting for a connection rather than refused. So
+  # maxConnections and maxPendingRequests are each max_in_flight plus that
+  # default of 1024, held at 4294967295, the most either takes: neither stops
+  # a request within the cap, and a request past it is refused on a
+  # connection of its own. The realization refuses a max_in_flight above
+  # 4294967295, the most maxParallelRequests takes. The circuit breaker's
+  # retry limit is left to Envoy Gateway, which writes 1024 for every route
+  # whether or not a circuit breaker is written, so the retry above is sent
+  # as it would be without the cap. With no such attachment no circuit
+  # breaker is written, and the policy is as it would be without one.
+  #
+  # A core/audit-logging attachment, which audit-logging-envoy-gateway
+  # realizes and checks, is written as the gateway's access log, and this is
+  # the one place its fields are written. Envoy AI Gateway writes the model
+  # that answered and a route's token costs into the request's metadata,
+  # under locals.token_cost_namespace, once a reply completes, and only on a
+  # route declaring some cost. So while the attachment is present the AI
+  # route declares all three token counts — InputToken, OutputToken and
+  # TotalToken, the prompt, completion and total tokens a reply reports —
+  # under the keys a period budget charges from. A budget attached beside it
+  # finds its own key among the three and is charged as it would be without
+  # the audit attachment. With a cost declared, Envoy AI Gateway also asks a
+  # model to report its usage at the end of a streamed reply.
+  #
+  # The access log is an EnvoyProxy resource in models.yaml, named after the
+  # gateway with -access-log appended, in the gateway's namespace, which the
+  # gateway names in its infrastructure parameters, so it applies to this
+  # gateway alone, and to every route attached to it, model routes or not.
+  # The gateway names it only while a model is wired, the condition
+  # models.yaml is written under, so the reference never names a resource no
+  # file holds; the two templates read the attachment alike and are edited
+  # together. With no access log configured, Envoy Gateway writes one JSON
+  # line per request to the data plane's standard output, and a configured
+  # one replaces that line, so this one keeps it: the same output, the same
+  # placement — every route, and the listener for a request no route matches
+  # — and the fields Envoy Gateway writes by default. Those fields are a
+  # deliberate second copy of its default set, read from its source at
+  # v1.9.1, the chart version this Recipe defaults to; a version moving that
+  # set moves these lines with it. To them it adds the model the request
+  # named, read from locals.model_header, the model that answered, as the
+  # reply names it, and the three token counts. A request the model did not
+  # answer is written with no model that answered and no token count. No
+  # field names a caller the gateway verified: the client's address and the
+  # headers it sends are written as they arrive, unchecked.
+  #
+  # The resource is merged over the configuration Envoy Gateway applies to
+  # every data plane it creates rather than taking its place. An EnvoyProxy a
+  # gateway names otherwise replaces the control plane's own defaults, which
+  # hold the data-plane image set through infra.overrides.data_plane_image,
+  # and that image would be dropped for this gateway. With no such
+  # attachment neither the resource nor the gateway's reference to it is
+  # written, and the gateway logs as Envoy Gateway does by default.
+  #
+  # Each connection's resources are named after the gateway and the alias, in
+  # lowercase with every underscore as a hyphen, the characters a Kubernetes
+  # name allows; an alias ending in a hyphen or an underscore, or two aliases
+  # giving one name, stop the build, naming the connections. Per connection:
+  # an Envoy Gateway Backend for the host and port of the endpoint the model
+  # publishes — the port the scheme implies where the endpoint names none, and
+  # an address endpoint where the host is an address. A host carrying no dot is
+  # a Service name published without a namespace, which the data plane in this
+  # gateway's namespace could not resolve, so the Backend qualifies it, as a
+  # consumer in another namespace does, with the namespace the Release, or else the Aggregate, places
+  # the model in, or `default` where it declares none:
+  # `<host>.<namespace>.svc.cluster.local`. A host carrying a dot, a managed
+  # API's included, is written as published. Then an AI service backend
+  # for the OpenAI API whose prefix is the endpoint's path, `/` where it has
+  # none, so a request reaches the model under the path it publishes; where
+  # the endpoint is https, a TLS policy on the Backend checking the server's
+  # certificate against the system's trust anchors for the Backend's host,
+  # the Gateway API's own policy at its v1 version, which Envoy Gateway serves
+  # at the chart version this Recipe pins; and, where the connection carries a
+  # credential, a backend security policy of the API-key type naming the
+  # Secret the credential publishes. The policy writes no namespace: the
+  # controller reads the key from that Secret in the policy's own namespace,
+  # under the data key apiKey, so a credential publishing another data key
+  # stops the build, naming both. An endpoint that is not an absolute http or
+  # https URL stops the build, naming the connection, and so does an https
+  # endpoint whose host is an address, which the TLS policy cannot name.
+  artifacts:
+    gatewayclass.yaml: |
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: GatewayClass
+      metadata:
+        name: {{ .values.gateway_class_name }}
+      spec:
+        controllerName: {{ .infra.controller_name }}
+    gateway.yaml: |
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: Gateway
+      metadata:
+        name: {{ .context.rendered_name }}
+        {{- $ns := "default" }}
+        {{- if .context.annotations }}
+          {{- $raw := optional (optional (default dict .context.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict .context.annotations) "aggregate" dict) "aggrega.ai/namespace" "") }}
+          {{- if $raw }}{{- $ns = $raw }}{{- end }}
+        {{- end }}
+        namespace: "{{ $ns }}"
+      spec:
+        gatewayClassName: {{ .values.gateway_class_name }}
+        listeners:
+          - name: http
+            port: {{ .infra.port }}
+            protocol: HTTP
+            allowedRoutes:
+              namespaces:
+                from: {{ .values.allowed_route_namespaces }}
+          {{- with .infra.tls_secret }}
+          - name: https
+            port: 443
+            protocol: HTTPS
+            tls:
+              mode: Terminate
+              certificateRefs:
+                - kind: Secret
+                  group: ""
+                  name: {{ . }}
+            allowedRoutes:
+              namespaces:
+                from: {{ $.values.allowed_route_namespaces }}
+          {{- end }}
+        {{- $audit := false }}
+        {{- range $name, $attachment := (default dict .features) }}
+          {{- if eq (first (splitList ":" (toString $attachment.type))) "core/audit-logging" }}
+            {{- $audit = true }}
+          {{- end }}
+        {{- end }}
+        {{- $wired := false }}
+        {{- range $alias, $edge := .context.uses }}
+          {{- if eq $edge.socket "models" }}
+            {{- $wired = true }}
+          {{- end }}
+        {{- end }}
+        {{- if and $audit $wired }}
+        infrastructure:
+          parametersRef:
+            group: gateway.envoyproxy.io
+            kind: EnvoyProxy
+            name: {{ .context.rendered_name }}-access-log
+        {{- end }}
+    models.yaml: |
+      {{- $ns := optional (optional (default dict .context.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict .context.annotations) "aggregate" dict) "aggrega.ai/namespace" "") | default "default" }}
+      {{- $wired := list }}
+      {{- $names := dict }}
+      {{- range $alias, $edge := .context.uses }}
+      {{- if eq $edge.socket "models" }}
+      {{- $wired = append $wired $alias }}
+      {{- $name := printf "%s-%s" $.context.rendered_name (lower (replace "_" "-" $alias)) }}
+      {{- if hasSuffix "-" $name }}{{ fail (printf "the models connection %s of %q gives its resources the name %q, which ends in a hyphen and so is no Kubernetes name; rename the connection so its alias ends in a letter or a digit" $alias $.context.instance_id $name) }}{{ end }}
+      {{- range $other, $taken := $names }}{{ if eq $taken $name }}{{ fail (printf "the models connections %s and %s of %q would each name their resources %q, because the gateway names a connection's resources after its alias in lowercase with every underscore as a hyphen; rename one of the two connections" $other $alias $.context.instance_id $name) }}{{ end }}{{ end }}
+      {{- $_ := set $names $alias $name }}
+      {{- end }}
+      {{- end }}
+      {{- if gt (len $wired) 15 }}{{ fail (printf "%q has %d connections on its models socket, but the AI route serving them holds at most 15 rules, one per connection; serve the others through a second gateway" .context.instance_id (len $wired)) }}{{ end }}
+      {{- $budget := dict }}
+      {{- $retry := dict }}
+      {{- $cap := dict }}
+      {{- $audit := dict }}
+      {{- range $name, $attachment := (default dict .features) }}
+      {{- $type := first (splitList ":" (toString $attachment.type)) }}
+      {{- if eq $type "core/period-budget" }}{{ $budget = $attachment }}{{ end }}
+      {{- if eq $type "core/retry-policy" }}{{ $retry = $attachment }}{{ end }}
+      {{- if eq $type "core/concurrency-limit" }}{{ $cap = $attachment }}{{ end }}
+      {{- if eq $type "core/audit-logging" }}{{ $audit = $attachment }}{{ end }}
+      {{- end }}
+      {{- $tokenCosts := dict "prompt_tokens" (dict "type" "InputToken" "key" "llm_input_token") "completion_tokens" (dict "type" "OutputToken" "key" "llm_output_token") "total_tokens" (dict "type" "TotalToken" "key" "llm_total_token") }}
+      {{- $cost := dict }}
+      {{- $unit := "" }}
+      {{- with $budget }}
+      {{- $cost = get $tokenCosts (toString .values.unit) }}
+      {{- if not $cost }}{{ fail (printf "core/period-budget attachment on %q asks for unit %v, which Envoy AI Gateway counts no token cost for; set unit to total_tokens, prompt_tokens or completion_tokens" $.context.instance_id .values.unit) }}{{ end }}
+      {{- if not (has (toString .values.scope) (list "gateway" "model")) }}{{ fail (printf "core/period-budget attachment on %q asks for scope %v, which this gateway does not count; set scope to gateway or model" $.context.instance_id .values.scope) }}{{ end }}
+      {{- $count := atoi (regexFind "^[0-9]+" (toString .infra.period)) }}
+      {{- $suffix := regexFind "[a-z]+$" (toString .infra.period) }}
+      {{- if eq $suffix "mo" }}
+      {{- if eq $count 1 }}{{ $unit = "Month" }}{{ end }}
+      {{- else if has $suffix (list "s" "m" "h" "d") }}
+      {{- $unit = get (dict "1" "Second" "60" "Minute" "3600" "Hour" "86400" "Day" "604800" "Week" "2592000" "Month" "31536000" "Year") (toString (mul $count (index (dict "s" 1 "m" 60 "h" 3600 "d" 86400) $suffix))) }}
+      {{- end }}
+      {{- if not $unit }}{{ fail (printf "core/period-budget attachment on %q asks for a period of %v, which is no whole unit of Envoy Gateway's rate limit; set period to 1s, 1m, 1h, 1d, 7d, 30d, 365d or 1mo" $.context.instance_id .infra.period) }}{{ end }}
+      {{- end }}
+      {{- $costs := list }}
+      {{- if $audit }}
+      {{- range $count := list "prompt_tokens" "completion_tokens" "total_tokens" }}{{ $costs = append $costs (get $tokenCosts $count) }}{{ end }}
+      {{- else if $cost }}
+      {{- $costs = list $cost }}
+      {{- end }}
+      {{- if $wired -}}
+      apiVersion: aigateway.envoyproxy.io/v1beta1
+      kind: AIGatewayRoute
+      metadata:
+        name: {{ .context.rendered_name }}-models
+        namespace: "{{ $ns }}"
+      spec:
+        parentRefs:
+          - name: {{ .context.rendered_name }}
+            kind: Gateway
+            group: gateway.networking.k8s.io
+      {{- with $costs }}
+        llmRequestCosts:
+      {{- range . }}
+          - metadataKey: {{ .key }}
+            type: {{ .type }}
+      {{- end }}
+      {{- end }}
+        rules:
+      {{- range $alias := $wired }}
+      {{- $edge := get $.context.uses $alias }}
+          - matches:
+              - headers:
+                  - type: Exact
+                    name: {{ $.locals.model_header }}
+                    value: {{ $alias | toJson }}
+            backendRefs:
+              - name: {{ get $names $alias }}
+                modelNameOverride: {{ $edge.provides.model | toJson }}
+      {{- end }}
+      ---
+      apiVersion: gateway.envoyproxy.io/v1alpha1
+      kind: ClientTrafficPolicy
+      metadata:
+        name: {{ .context.rendered_name }}-client-buffer-limit
+        namespace: "{{ $ns }}"
+      spec:
+        targetRefs:
+          - group: gateway.networking.k8s.io
+            kind: Gateway
+            name: {{ .context.rendered_name }}
+        connection:
+          bufferLimit: 50Mi
+      {{- with $audit }}
+      {{- $md := $.locals.token_cost_namespace }}
+      ---
+      apiVersion: gateway.envoyproxy.io/v1alpha1
+      kind: EnvoyProxy
+      metadata:
+        name: {{ $.context.rendered_name }}-access-log
+        namespace: "{{ $ns }}"
+      spec:
+        mergeType: JSONMerge
+        telemetry:
+          accessLog:
+            settings:
+              - sinks:
+                  - type: File
+                    file:
+                      path: /dev/stdout
+                format:
+                  type: JSON
+                  json:
+                    start_time: "%START_TIME%"
+                    method: "%REQ(:METHOD)%"
+                    x-envoy-origin-path: "%REQ(X-ENVOY-ORIGINAL-PATH?:PATH)%"
+                    protocol: "%PROTOCOL%"
+                    response_code: "%RESPONSE_CODE%"
+                    response_flags: "%RESPONSE_FLAGS%"
+                    response_code_details: "%RESPONSE_CODE_DETAILS%"
+                    connection_termination_details: "%CONNECTION_TERMINATION_DETAILS%"
+                    upstream_transport_failure_reason: "%UPSTREAM_TRANSPORT_FAILURE_REASON%"
+                    bytes_received: "%BYTES_RECEIVED%"
+                    bytes_sent: "%BYTES_SENT%"
+                    duration: "%DURATION%"
+                    x-envoy-upstream-service-time: "%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%"
+                    x-forwarded-for: "%REQ(X-FORWARDED-FOR)%"
+                    user-agent: "%REQ(USER-AGENT)%"
+                    x-request-id: "%REQ(X-REQUEST-ID)%"
+                    ":authority": "%REQ(:AUTHORITY)%"
+                    upstream_host: "%UPSTREAM_HOST%"
+                    upstream_cluster: "%UPSTREAM_CLUSTER%"
+                    upstream_local_address: "%UPSTREAM_LOCAL_ADDRESS%"
+                    downstream_local_address: "%DOWNSTREAM_LOCAL_ADDRESS%"
+                    downstream_remote_address: "%DOWNSTREAM_REMOTE_ADDRESS%"
+                    requested_server_name: "%REQUESTED_SERVER_NAME%"
+                    route_name: "%ROUTE_NAME%"
+                    gen_ai.request.model: "%REQ({{ $.locals.model_header }})%"
+                    gen_ai.response.model: "%DYNAMIC_METADATA({{ $md }}:response_model)%"
+                    gen_ai.usage.input_tokens: "%DYNAMIC_METADATA({{ $md }}:{{ (get $tokenCosts "prompt_tokens").key }})%"
+                    gen_ai.usage.output_tokens: "%DYNAMIC_METADATA({{ $md }}:{{ (get $tokenCosts "completion_tokens").key }})%"
+                    gen_ai.usage.total_tokens: "%DYNAMIC_METADATA({{ $md }}:{{ (get $tokenCosts "total_tokens").key }})%"
+      {{- end }}
+      {{- if or $budget $retry $cap }}
+      ---
+      apiVersion: gateway.envoyproxy.io/v1alpha1
+      kind: BackendTrafficPolicy
+      metadata:
+        name: {{ $.context.rendered_name }}-models
+        namespace: "{{ $ns }}"
+      spec:
+        targetRefs:
+          - group: gateway.networking.k8s.io
+            kind: HTTPRoute
+            name: {{ $.context.rendered_name }}-models
+      {{- with $budget }}
+      {{- $rules := list "" }}
+      {{- if eq .values.scope "model" }}{{ $rules = $wired }}{{ end }}
+        rateLimit:
+          global:
+            rules:
+      {{- range $alias := $rules }}
+              - limit:
+                  requests: {{ int64 $budget.infra.limit }}
+                  unit: {{ $unit }}
+      {{- with $alias }}
+                clientSelectors:
+                  - headers:
+                      - name: {{ $.locals.model_header }}
+                        type: Exact
+                        value: {{ . | toJson }}
+      {{- end }}
+                shared: true
+                cost:
+                  request:
+                    from: Number
+                    number: 0
+                  response:
+                    from: Metadata
+                    metadata:
+                      namespace: {{ $.locals.token_cost_namespace }}
+                      key: {{ $cost.key }}
+      {{- end }}
+      {{- end }}
+      {{- with $retry }}
+        retry:
+          numRetries: {{ sub .values.max_attempts 1 }}
+          retryOn:
+            triggers:
+              - connect-failure
+              - refused-stream
+              - reset
+              - retriable-status-codes
+            httpStatusCodes:
+              - 429
+              - 503
+              - 504
+      {{- end }}
+      {{- with $cap }}
+      {{- $max := int64 .infra.max_in_flight }}
+      {{- $room := min 4294967295 (add $max 1024) }}
+        circuitBreaker:
+          maxConnections: {{ $room }}
+          maxPendingRequests: {{ $room }}
+          maxParallelRequests: {{ $max }}
+      {{- end }}
+      {{- end }}
+      {{- range $alias := $wired }}
+      {{- $edge := get $.context.uses $alias }}
+      {{- $name := get $names $alias }}
+      {{- $u := urlParse $edge.provides.endpoint }}
+      {{- if not (and (has $u.scheme (list "http" "https")) $u.host) }}{{ fail (printf "the models connection %s of %q reaches %q, whose published endpoint %q is not an absolute http or https URL, so the gateway cannot write the backend it forwards to" $alias $.context.instance_id $edge.target $edge.provides.endpoint) }}{{ end }}
+      {{- $hostport := $u.host }}
+      {{- $port := ternary "443" "80" (eq $u.scheme "https") }}
+      {{- with regexFind ":[0-9]+$" $hostport }}{{ $port = trimPrefix ":" . }}{{ $hostport = trimSuffix . $hostport }}{{ end }}
+      {{- $hostname := lower (trimSuffix "]" (trimPrefix "[" $hostport)) }}
+      {{- $address := or (regexMatch "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$" $hostname) (contains ":" $hostname) }}
+      {{- if and $address (eq $u.scheme "https") }}{{ fail (printf "the models connection %s of %q reaches %q, whose published endpoint %q is https on an address, but the gateway checks an https endpoint's certificate against the host name it names, and an address names none; publish an endpoint naming the server's host" $alias $.context.instance_id $edge.target $edge.provides.endpoint) }}{{ end }}
+      {{- if not (or $address (contains "." $hostname)) }}
+      {{- $hostname = printf "%s.%s.svc.cluster.local" $hostname (optional (optional (default dict $edge.annotations) "release" dict) "aggrega.ai/namespace" (optional (optional (default dict $edge.annotations) "aggregate" dict) "aggrega.ai/namespace" "") | default "default") }}
+      {{- end }}
+      ---
+      apiVersion: gateway.envoyproxy.io/v1alpha1
+      kind: Backend
+      metadata:
+        name: {{ $name }}
+        namespace: "{{ $ns }}"
+      spec:
+        endpoints:
+      {{- if $address }}
+          - ip:
+              address: {{ $hostname | toJson }}
+              port: {{ $port }}
+      {{- else }}
+          - fqdn:
+              hostname: {{ $hostname | toJson }}
+              port: {{ $port }}
+      {{- end }}
+      {{- if eq $u.scheme "https" }}
+      ---
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: BackendTLSPolicy
+      metadata:
+        name: {{ $name }}
+        namespace: "{{ $ns }}"
+      spec:
+        targetRefs:
+          - group: gateway.envoyproxy.io
+            kind: Backend
+            name: {{ $name }}
+        validation:
+          wellKnownCACertificates: System
+          hostname: {{ $hostname | toJson }}
+      {{- end }}
+      ---
+      apiVersion: aigateway.envoyproxy.io/v1beta1
+      kind: AIServiceBackend
+      metadata:
+        name: {{ $name }}
+        namespace: "{{ $ns }}"
+      spec:
+        schema:
+          name: OpenAI
+          prefix: {{ default "/" $u.path | toJson }}
+        backendRef:
+          name: {{ $name }}
+          kind: Backend
+          group: gateway.envoyproxy.io
+      {{- with optional (default dict $edge.features) "credential" dict }}
+      {{- if ne .provides.key "apiKey" }}{{ fail (printf "the models connection %s of %q carries a credential publishing the data key %q, but Envoy AI Gateway reads an API key from its Secret under the data key apiKey alone, so the key would not be found; set the credential's key to apiKey" $alias $.context.instance_id .provides.key) }}{{ end }}
+      ---
+      apiVersion: aigateway.envoyproxy.io/v1beta1
+      kind: BackendSecurityPolicy
+      metadata:
+        name: {{ $name }}
+        namespace: "{{ $ns }}"
+      spec:
+        targetRefs:
+          - group: aigateway.envoyproxy.io
+            kind: AIServiceBackend
+            name: {{ $name }}
+        type: APIKey
+        apiKey:
+          secretRef:
+            name: {{ .provides.name | toJson }}
+      {{- end }}
+      {{- end }}
+      {{- end }}

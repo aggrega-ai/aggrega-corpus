@@ -1,0 +1,238 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/security/keycloak
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    Keycloak, a database-backed identity and access-management server. Keycloak
+    serves its account console and token endpoints on an HTTP port and keeps its
+    realms, clients, and users in a PostgreSQL backend wired through its
+    `backend` uses-socket, and it provisions and migrates its own schema on
+    startup against that backend. Keycloak holds no persistent state of its own,
+    so it renders as a stateless server.
+
+    On Kubernetes there are two realizations and the Manifest chooses between
+    them. `keycloak` synthesizes the server as a single stateless workload and
+    fetches nothing, so it is the one to reach for where the build must complete
+    with no chart repository reachable. `keycloak-chart` renders the codecentric
+    Keycloak.X Helm chart, which additionally carries what the server needs to
+    run as more than one replica, so reach for it where a chart repository is
+    reachable at build time and the server will be scaled out.
+
+    In both, `infra.external_base_url` becomes the server's hostname and the
+    realms in `values.realm_imports` are imported when it starts.
+
+    With `values.metrics_enabled` true, both serve the server's own metrics on
+    its management port and publish their address as `metrics_endpoint`; false,
+    that key is empty.
+
+    The management port, which checks no caller, stays inside the cluster on
+    `keycloak-chart` whatever `infra.overrides.service_type` says; LoadBalancer
+    or NodePort publishes the console alone on `<rendered_name>-external`.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: security
+    component.aggrega.ai/upstream-licensing: osi-approved
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # Self-inject allowlist: the component may inject resolved uses-edge values
+  # into the env delivery mechanism.
+  inject: [env]
+
+  usesSchema:
+    # The PostgreSQL backend Keycloak stores its realms, clients, and users in.
+    # The selected component's provides host, port, user, and database arrive on
+    # the injection context and compose Keycloak's database connection. The
+    # database is the system of record, and Keycloak provisions and migrates its
+    # own schema on startup against it, so no separate migration step is needed
+    # and it starts against a ready schema.
+    backend:
+      selector: "component.aggrega.ai/type=stateful-server"
+      inject: [env]
+      required: true
+      # A statement about this connection's target, authored on the connection:
+      # the backend it reaches takes no credential. It changes nothing this
+      # component renders.
+      valueSchema:
+        unauthenticated:
+          type: boolean
+          default: false
+          description: Declares that the backend this connection reaches takes no credential, so a connection carrying none is intended rather than an omission. It changes nothing this component renders.
+      # Optional password credential, held on the connection it is presented on
+      # and shared with the backend. When attached, supplies the database
+      # password via the credential subsystem; when unattached, the Recipe falls
+      # back to its inline default.
+      # To replace the Recipe's development default, attach core/random-password
+      # on the connection: the cluster generates it, and the backend takes the
+      # same credential by core/referenced-secret.
+      featuresSchema:
+        credential:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [env]
+          description: "Optional password the server presents to the backend this connection reaches, shared with that backend. When attached, supplies the backend password via the credential subsystem. Unattached, helm/keycloak and helm/keycloak-chart present the development literal `apppass`, which this catalog publishes, so every Release that leaves the slot unattached shares that password."
+
+  featuresSchema:
+    # Optional credential slot for the bootstrap admin account, local to
+    # Keycloak (distinct from the shared backend password). When attached,
+    # supplies the admin password via the credential subsystem; when unattached,
+    # the Recipe falls back to its inline default.
+    # To replace the Recipe's development default, attach core/random-password: the
+    # cluster generates the credential when it deploys.
+    admin_password:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      description: "Optional credential for the Keycloak bootstrap admin account. When attached, supplies the admin password via the credential subsystem. Unattached, helm/keycloak and helm/keycloak-chart set the bootstrap admin password to the development literal `admin`, which this catalog publishes, so every Release that leaves the slot unattached shares that password."
+
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      admin_user:
+        type: string
+        default: admin
+        description: Bootstrap admin account username, seeded on first startup.
+      # Both realizations mount these into the server's import directory and
+      # import them when it starts, so a realm is part of what the Release
+      # renders rather than something applied to a running server afterwards.
+      realm_imports:
+        type: object
+        valuesType: string
+        description: >
+          Realms the server imports when it starts. Each key is a file name and
+          each value is that file's content: a realm representation in JSON, the
+          format the server's own realm export writes. The server reads a file as
+          a realm only when it is named `<realm>-realm.json`, and it refuses one
+          whose realm carries a different name, so the Recipes halt the build on
+          a key ending any other way. A realm that already exists is left as it
+          is, so an import seeds a realm once rather than keeping it in step with
+          this value. The content is rendered into the Release's output exactly
+          as written and is readable by anyone who can read that output, so it
+          carries no credential material: a confidential client's secret, a
+          user's password or an identity provider's client secret belongs in a
+          credential slot, not here. Omitted, no realm is imported and the server
+          starts with only its administrative realm.
+      # The server's own metrics, in the Prometheus format, served on the
+      # management port beside its health endpoints, which are the only other
+      # thing that port serves. `keycloak` switches the metrics on and puts the
+      # management port on its Service; `keycloak-chart` runs a chart that
+      # switches them on already, and publishes the port on its console Service
+      # whatever this value says, so there false leaves them on and only stops
+      # their address being published.
+      metrics_enabled:
+        type: boolean
+        default: false
+        description: Turns on the server's own metrics, in the Prometheus format, and publishes their address as `metrics_endpoint`; while false that key is empty. They are served on the management port, which checks no caller, so anything that reaches that port can read them.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      http_port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 8080
+        description: HTTP port serving the account console, token endpoints, and admin API; consumers connect here.
+      # Both realizations switch on the server's health endpoints and probe them
+      # on this port, so a rollout reports the server ready only once it answers
+      # requests.
+      management_port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 9000
+        description: Management port serving health and metrics endpoints, which check no caller. `keycloak` puts it on its in-cluster Service only while values.metrics_enabled is true; `keycloak-chart` renders a chart that always puts it on the console Service, which that realization keeps inside the cluster whatever infra.overrides.service_type says, publishing an exposed console alone on `<rendered_name>-external`.
+      # Both realizations deliver this the same way, as the server's hostname,
+      # so the tokens it issues and the links it writes carry that address
+      # rather than whichever one a request arrived on.
+      external_base_url:
+        type: string
+        description: >
+          Externally reachable base URL of the server, as assembled at the ingress
+          tier, including any path the ingress serves it under — for example
+          https://id.example.com. The server composes from this the issuer it
+          writes into every token and publishes in its discovery document, the
+          address of every endpoint it advertises, and the links it puts in an
+          email or redirects a browser to, so a token it issues verifies wherever
+          it is presented. An application that reaches the server in-cluster and
+          reads its discovery document is sent to this address too. Omitted, the
+          Recipe leaves the server to take its address from each incoming request,
+          which is correct for a server nobody reaches except at its in-cluster
+          address.
+      engine_version:
+        type: string
+        default: "26.7.0"
+        description: Keycloak server container image tag. Selects the image tag on container targets; the chart-backed realization pins its own image tag.
+      # The chart-backed realization, keycloak-chart, additionally carries what
+      # the server needs to run as more than one replica — ordered pods behind a
+      # headless Service, the database-backed cache stack sessions replicate
+      # over, and the proxy header mode it trusts.
+      source_version:
+        type: string
+        description: Version of the Helm chart the chart-backed realization pulls. Read only by that realization; the workload-synthesis realization pulls no source artifact and ignores it. Changing it away from the Recipe's default does not guarantee value-mapping compatibility with the new chart.
+      compute:
+        cpu:
+          type: string
+          default: 250m
+        memory:
+          type: string
+          default: 512Mi
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name of the Service fronting the account console, the
+          token endpoints and the admin API. An application that redeems
+          tokens dials this name together with `port`.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port that Service accepts requests on. It carries the HTTP port
+          an operator set, never the management port, so a consumer reaches
+          the endpoints it is meant to use.
+      protocol:
+        type: string
+        description: How the published address is spoken to — `http`, so a consumer composes an issuer URL on that scheme.
+      # The address a Prometheus server scrapes the server's own metrics at:
+      # /metrics on the management port, under the path each realization serves
+      # the server at, while values.metrics_enabled is true. Every Recipe
+      # publishes it spelled out in full from its own host and port, because a
+      # provides entry cannot read another.
+      metrics_endpoint:
+        type: string
+        description: >
+          The full address Prometheus scrapes this component's metrics at —
+          scheme, host, port and path, `http://<host>:<management port>/metrics`
+          under the path the realization serves the server at. Empty while
+          values.metrics_enabled is false.
+
+  # A connection to a target its catalog labels a managed service
+  # (component.aggrega.ai/hosting: managed) carries a credential, or says on the
+  # connection that its target takes none. The rule reads the target's labels,
+  # the connection's unauthenticated value and its credential slot, all known
+  # before a Recipe binds, so it holds whichever Recipe renders this component;
+  # a self-hosted target draws nothing. The list names every socket of this
+  # component that declares unauthenticated.
+  assertions:
+    managed_target_needs_a_credential: >-
+      {{- range $socket := list "backend" -}}
+      {{- range $alias, $connection := (optional $.uses $socket dict) -}}
+      {{- $managed := eq (optional $connection.labels "component.aggrega.ai/hosting" "") "managed" -}}
+      {{- $optedOut := optional $connection.values "unauthenticated" false -}}
+      {{- if and $managed (not (hasKey $connection.features "credential")) (not $optedOut) -}}
+      {{- fail (printf "the %s connection %s of %q reaches %q, whose component.aggrega.ai/hosting label is managed, with no credential: attach one under credential on that connection, or set unauthenticated: true in its values" $socket $alias $.metadata.instance_id $connection.target) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- end -}}

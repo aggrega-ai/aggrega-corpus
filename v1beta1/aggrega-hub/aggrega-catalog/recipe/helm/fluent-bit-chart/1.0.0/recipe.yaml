@@ -1,0 +1,239 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: fluent-bit-chart
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    Fluent Bit log processor and forwarder on Kubernetes via the official Fluent
+    Helm chart, served from that project's HTTPS chart repository. The chart
+    deploys Fluent Bit in its node-collector shape: one pod per node reading the
+    container log files that node writes, a filter that enriches every record
+    with the pod, namespace and label metadata it reads back from the cluster,
+    and the ServiceAccount, ClusterRole and ClusterRoleBinding that filter needs
+    to do so — a grant a forwarder assembled as a plain workload lacks, so it can
+    neither read the node's log files nor enrich a record with the workload it
+    came from. The sink wired on the `forward_target` uses-socket becomes the
+    `forward` output, exactly as in the workload-synthesis realization.
+    Reach for this realization where a chart repository is reachable at build
+    time and log records are to be collected from the cluster itself; reach for
+    `fluent-bit`, the workload-synthesis realization, where the build must
+    complete with nothing fetched, or where a single forwarding pod with its own
+    inputs is what is wanted rather than a per-node collector. The forwarder image
+    tag is pinned. Default chart version in source.version; override via
+    infra.source_version. provides.host and provides.metrics_service name the
+    in-cluster Service, with no namespace, for a scraper to discover every node's
+    collector behind it; metrics_endpoint stays empty, as one address reaches one
+    node per scrape. That Service carries the monitoring port alone, which checks
+    no caller, so it stays inside the cluster: an `infra.overrides.service_type`
+    other than ClusterIP halts the build. The Fluent Bit server is Apache-2.0.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/observability/fluent-bit:1.0.0
+
+  source:
+    kind: helm-https-chart
+    url: https://fluent.github.io/helm-charts
+    chart: fluent-bit
+    # Default chart version. Override via infra.source_version.
+    version: "{{ optional .infra `source_version` \"0.58.2\" }}"
+
+  # provides.host is the Service fronting the monitoring endpoint, which is what
+  # the Component's provides contract promises. The valuesMapping below pins the
+  # chart's fullnameOverride to the rendered name, the release name the helm
+  # provider gives the chart, which spells the Component's name in the alphabet
+  # a Kubernetes name allows. This chart names its Service from that value with
+  # no suffix, so the Service is named exactly "<rendered_name>" with no
+  # namespace segment, and the Recipe is independent of where it is deployed. A
+  # same-namespace consumer reaches it under this name directly; a
+  # cross-namespace consumer qualifies it caller-side. protocol is "http" — the
+  # monitoring endpoint speaks HTTP.
+  #
+  # The metrics keys say where a scraper finds Fluent Bit's own metrics, served
+  # in the Prometheus format at /api/v2/metrics/prometheus on the monitoring
+  # endpoint. This chart runs one collector pod per node behind the one Service
+  # named above, so a single address would reach a different node's collector
+  # on each scrape: metrics_endpoint is published empty, and metrics_service,
+  # metrics_service_port and metrics_path name that same Service, the name of
+  # its port and the path, for a scraper that discovers each endpoint behind
+  # it. The Service name is spelled out again because a provides entry cannot
+  # read another; the port name, http, is the one the chart gives the Service's
+  # monitoring port (and the container port it targets), read from its 0.58.2
+  # templates, and moves with the chart like every other detail here.
+  provides:
+    host: "{{ .context.rendered_name }}"
+    port: "{{ .infra.port }}"
+    protocol: "http"
+    metrics_endpoint: ""
+    metrics_service: "{{ .context.rendered_name }}"
+    metrics_service_port: "http"
+    metrics_path: "/api/v2/metrics/prometheus"
+
+  # The forward output the value mapping writes speaks the Fluentd forward
+  # protocol to whatever is wired on forward_target, a socket whose selector
+  # admits any server. The check that each wired sink publishes forward lives
+  # in the TargetProtocol library's Check bundle, imported under artifacts by
+  # every Recipe of this Component. These locals are what it reads — the
+  # socket, the protocol, why Fluent Bit needs it and a component publishing it
+  # — and it stops the build, naming the connection, on a sink publishing
+  # another protocol or none. It writes no file.
+  locals:
+    check_socket: forward_target
+    check_protocol: forward
+    check_reason: "Fluent Bit ships its records through a forward output, which speaks the Fluentd forward protocol a sink publishes as the protocol forward"
+    check_example: core/observability/fluentd
+  artifacts:
+    target-protocol:
+      $import: TargetProtocol#/artifacts/Check
+
+  # The chart's Service carries the monitoring port alone (its extra ports are
+  # left empty here), and that port answers metrics, health, uptime and build
+  # and plugin listings to any caller, so the Service stays ClusterIP and there
+  # is nothing else to publish outside the cluster. infra.overrides.service_type
+  # set to anything but ClusterIP would otherwise be dropped without a word, so
+  # it halts here, where the fix is one value in the Release. A number written
+  # there, 0 included, halts too: an assertion reads a 0 as empty, so the key's
+  # presence is tested.
+  assertions:
+    service_type_accepted: >-
+      {{- $o := optional .infra "overrides" dict | default dict -}}
+      {{- $raw := optional $o "service_type" "" -}}
+      {{- $type := "" -}}
+      {{- if or $raw (and (hasKey $o "service_type") (has (kindOf $raw) (list "int64" "float64"))) }}{{ $type = toString $raw }}{{ end -}}
+      {{- if and $type (ne $type "ClusterIP") -}}
+      {{- fail (printf "infra.overrides.service_type is %q, but this realization's Service carries Fluent Bit's monitoring port alone, which answers metrics, health, uptime and build and plugin listings to any caller, so it stays inside the cluster as ClusterIP; leave service_type unset, or set it to ClusterIP" $type) -}}
+      {{- end -}}
+
+  # This Recipe reads from infra.overrides:
+  #   image        - map[string]string (image.* fields; overrides the tag pin)
+  #   service_type - string (ClusterIP only; any other value halts the build,
+  #                  see the assertion above — service.type is always ClusterIP)
+  #   requests     - { cpu: string, memory: string } (container resource requests)
+  #   nodeSelector - map[string]string (pod scheduling)
+  #   tolerations  - []object (pod scheduling)
+  valuesMapping: |
+    {{- /*
+      The connection variables this Recipe reads off the inject pipe, under the
+      socket whose edge delivers them, each beside the provides key the edge's
+      inject block names it from. The pipe is read as a map, and every read of
+      these variables below goes through it, so a variable nothing delivered is
+      told apart from one delivered empty: an edge on one of these sockets
+      leaving any of its variables missing halts the build, naming the edge, the
+      variables and the inject block to write, rather than rendering a
+      connection setting with an empty value. A socket in $required is read
+      whether or not anything is wired to it, so leaving it empty halts too.
+    */ -}}
+    {{- $env := optional (default dict .context.inject) "env" dict -}}
+    {{- $reads := dict "forward_target" (dict "FLUENT_FORWARD_HOST" "host" "FLUENT_FORWARD_PORT" "port") -}}
+    {{- $required := list -}}
+    {{- $gaps := list }}{{ $wired := list -}}
+    {{- range $alias, $edge := .context.uses }}{{ with get $reads $edge.socket -}}
+    {{- $wired = append $wired $edge.socket }}{{ $missing := list }}{{ $shape := list -}}
+    {{- range $var, $from := . }}{{ if not (hasKey $env $var) }}{{ $missing = append $missing $var }}{{ end }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- if $missing }}{{ $gaps = append $gaps (printf "the edge %q on its %s socket delivers no %s, so give that edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $alias $edge.socket (join " or " $missing) (join ", " $shape)) }}{{ end -}}
+    {{- end }}{{ end -}}
+    {{- range $socket := $required }}{{ if not (has $socket $wired) -}}
+    {{- $vars := list }}{{ $shape := list }}{{ range $var, $from := get $reads $socket }}{{ $vars = append $vars $var }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- $gaps = append $gaps (printf "nothing is wired to its %s socket to deliver %s, so wire one and give its edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $socket (join " and " $vars) (join ", " $shape)) -}}
+    {{- end }}{{ end -}}
+    {{- if $gaps }}{{ fail (printf "core/observability/fluent-bit %q composes its connection settings from variables its edges deliver on its inject pipe, but %s" .context.instance_id (join "; and " $gaps)) }}{{ end -}}
+    ## ── Pin the chart's resource names to the rendered name ────
+    ## Names the monitoring Service exactly "<rendered_name>", matching
+    ## provides.host. This chart's fullname helper reads the top-level override
+    ## and every resource it names derives from it, so one pin covers them all.
+    fullnameOverride: "{{ .context.rendered_name }}"
+
+    ## ── Forwarder image pin ────────────────────────────────────
+    ## The chart leaves the tag empty and falls back to its own appVersion, which
+    ## makes the render move whenever the chart moves; pin it explicitly instead.
+    ## The repository is the chart's own default, so the image this realization
+    ## runs is the one its chart is tested against. This is why the Component's
+    ## engine_version says the chart-backed realization pins its own tag.
+    ## Override the whole block via infra.overrides.image.
+    image:
+      {{- if and .infra.overrides .infra.overrides.image }}
+      {{- range $k, $v := .infra.overrides.image }}
+      {{ $k }}: "{{ $v }}"
+      {{- end }}
+      {{- else }}
+      repository: cr.fluentbit.io/fluent/fluent-bit
+      tag: "5.1.2"
+      {{- end }}
+
+    ## ── Chart extras this Component does not describe ──────────
+    ## The chart can also render a connectivity test Pod under a Helm test hook.
+    ## A test hook is not part of the deployed system and the Component describes
+    ## nothing like it, so it is switched off rather than written into the output.
+    testFramework:
+      enabled: false
+
+    ## ── Cluster read grants ────────────────────────────────────
+    ## The record-enrichment filter below reads pod and namespace metadata back
+    ## from the cluster, so the chart's ServiceAccount and cluster-scoped read
+    ## grants are created. This is the capability the workload-synthesis
+    ## realization cannot express, and switching it off would leave the filter
+    ## failing every lookup at run time while the render stayed green.
+    rbac:
+      create: true
+    serviceAccount:
+      create: true
+
+    ## ── Monitoring endpoint ────────────────────────────────────
+    ## infra.port sets both the port the HTTP monitoring server binds and the
+    ## port its Service carries, so the published address and the listener move
+    ## together. The Service is always ClusterIP, whatever
+    ## infra.overrides.service_type says: the monitoring port is all it carries,
+    ## and that port checks no caller, so a type exposing it would expose the
+    ## endpoint outside the cluster. The assertion above halts on any other value.
+    metricsPort: {{ .infra.port }}
+    service:
+      type: ClusterIP
+      port: {{ .infra.port }}
+
+    ## ── Resources ──────────────────────────────────────────────
+    resources:
+      limits:
+        cpu: "{{ .infra.compute.cpu }}"
+        memory: "{{ .infra.compute.memory }}"
+      {{- if and .infra.overrides .infra.overrides.requests }}
+      requests:
+        cpu: "{{ .infra.overrides.requests.cpu }}"
+        memory: "{{ .infra.overrides.requests.memory }}"
+      {{- end }}
+
+    ## ── Scheduling overrides ───────────────────────────────────
+    {{- if .infra.overrides }}
+    {{- if .infra.overrides.nodeSelector }}
+    nodeSelector: {{ toJson .infra.overrides.nodeSelector }}
+    {{- end }}
+    {{- if .infra.overrides.tolerations }}
+    tolerations: {{ toJson .infra.overrides.tolerations }}
+    {{- end }}
+    {{- end }}
+
+    ## ── Output pipeline ────────────────────────────────────────
+    ## The component wired on the `forward_target` socket becomes the forward
+    ## output: its host and port arrive on the inject pipe under the two
+    ## variables the edge's inject block names, exactly as the workload-synthesis
+    ## realization reads them, and become the output's Host and Port; the
+    ## developer's forward_match value selects which records are shipped. One
+    ## output is written, as the pipe carries one host and one port. With nothing
+    ## wired to the socket no output is written. Only `outputs` is authored here
+    ## — the chart's own service, input and filter sections are what encode the
+    ## node-collector shape and the metadata enrichment, and re-deriving them by
+    ## hand is exactly what this realization exists not to do.
+    config:
+      outputs: |
+      {{- if has "forward_target" $wired }}
+        [OUTPUT]
+            Name   forward
+            Match  {{ $.values.forward_match }}
+            Host   {{ $env.FLUENT_FORWARD_HOST }}
+            Port   {{ $env.FLUENT_FORWARD_PORT }}
+      {{- end }}

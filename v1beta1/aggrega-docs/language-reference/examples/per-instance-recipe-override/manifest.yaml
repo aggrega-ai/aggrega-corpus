@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Manifest
+metadata:
+  name: manifest
+  version: "1.0.0"
+  description: >
+    Recipe selection for the greeter target. The type tier maps every
+    example/compute/greeter instance to the default (blue) Recipe in bulk; the name tier
+    overrides the single instance `greeter-special` to the green Recipe. Name
+    wins over type, so greeter-special resolves to green while every other
+    greeter instance resolves to blue.
+spec:
+  mappings:
+    components:
+      type:
+        example/compute/greeter:1.0.0: compose/greeter-blue:1.0.0
+      name:
+        greeter-special: compose/greeter-green:1.0.0

@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Feature
+metadata:
+  name: core/prometheus-exporter
+  version: 1.0.0
+  description: >
+    Marks a component as a Prometheus scrape target. Its FeatureRecipe
+    (component-scope) emits one ServiceMonitor per attached component, a custom
+    resource the Prometheus Operator reads, so a cluster not running that
+    operator scrapes nothing through it. The scrape knobs — interval, named port, and metrics path — are all operator sizing
+    (infra): monitoring is operational configuration, set by the platform, not
+    application intent. Designed to be attached in bulk via a Manifest
+    features.annotations binding — one annotation on a boundary expands to every
+    contained component, routing the scrape knobs into each component's feature
+    infra — as well as by a per-component features: block.
+  annotations:
+    security.aggrega.ai/class: "cloud_native"
+    routing.aggrega.ai/tier: "none"
+  maintainers:
+    - name: "Massimiliano Ferrero"
+      email: "m.ferrero@cognitio.it"
+spec:
+  appliesTo: "component.aggrega.ai/type in (server, worker)"
+  interoperability:
+    conflictsWith: []
+  schema:
+    values:
+      $ref: "BaseComponents#/schemas/BaseFeatureParameter"
+    infra:
+      # Operational scrape configuration — filled by the Operator (commonly
+      # routed from a monitoring annotation via the Manifest features.annotations
+      # binding, one annotation expanding to every component in a boundary).
+      interval:
+        type: string
+        default: "60s"
+        description: Prometheus scrape interval.
+      port:
+        type: string
+        default: metrics
+        description: Named Service port the ServiceMonitor scrapes.
+      path:
+        type: string
+        default: "/metrics"
+        description: Metrics path the ServiceMonitor scrapes.

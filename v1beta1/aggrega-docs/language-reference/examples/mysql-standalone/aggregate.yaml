@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Aggregate
+metadata:
+  name: aggregate
+  version: "1.0.0"
+  description: >
+    A single MySQL database for the local Docker Compose target. The
+    Kubernetes target builds aggregate-helm-synth.yaml and
+    aggregate-helm-synth-auth.yaml, which declare the same component and
+    values and are rendered by the helm provider's Workload synthesis on the
+    official mysql image. The same developer intent drives both; only the
+    Recipe layer selected by the Manifest differs per target.
+spec:
+  components:
+    db:
+      type: core/datastore/mysql
+      values:
+        database: appdb
+        user: appuser
+        charset: utf8mb4
+        collation: utf8mb4_general_ci
+      # Credentials are attachments on the features: pillar like any other
+      # Feature; the feature.aggrega.ai/kind: secret label names what they
+      # produce. The Component's
+      # featuresSchema declares two slots: root_password (black-box) and
+      # user_password (transparent). Both are delivered as inject-value
+      # credentials here so the value lands on .context.inject.env.<VAR>,
+      # which the compose Recipe reads directly.
+      features:
+        root_password:
+          type: core/secret-value
+          values:
+            key: MYSQL_ROOT_PASSWORD
+            origin: dev-root-pw-change-me
+        user_password:
+          type: core/secret-value
+          values:
+            key: MYSQL_PASSWORD
+            origin: dev-app-pw-change-me

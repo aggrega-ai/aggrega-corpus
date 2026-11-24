@@ -1,0 +1,601 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: harbor-chart
+  version: 1.0.0
+  # The packaged Harbor registry is Apache-2.0.
+  license: Apache-2.0
+  description: >
+    A Harbor container registry on Kubernetes via the product's own Helm chart,
+    served from its project's HTTPS chart repository. The chart deploys the
+    whole registry as one unit, in the order its services need, with the wiring
+    the product's own maintainers keep in step with it. Its Ingress and
+    transport security are left switched off, and the reverse proxy is
+    published as one cluster-internal Service.
+
+    `values.metrics_enabled` turns the chart's metrics on and publishes the
+    four Services serving them. The same chart setting opens the blob store's
+    debug listener — profiling, execution traces and runtime variables, with no
+    caller check — to every in-cluster caller.
+
+    Every image the chart runs is pinned to a resolvable release tag — one tag,
+    which infra.engine_version selects for all of them — and the chart version
+    is pinned in source.version. Every secret the chart would otherwise
+    generate at render time is supplied instead, so the output is
+    byte-identical across renders: the token-signing key and its certificate,
+    the services' three shared secrets, the request-forgery key and the key
+    stored credentials are encrypted with always from the attached credential
+    by name, the administrator's password by name where attached, and every
+    password the Release leaves unset from a fixed development value. No key is
+    written into the rendered artifact.
+
+    The address the registry reports as its own — the token-service address it
+    returns to a container client and the commands its console shows — is the
+    chart's `externalURL`: `infra.external_base_url` when set, and the build
+    halts when that address carries a path; unset, the published in-cluster
+    Service address.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/devtool/harbor:1.0.0
+
+  # The chart deploys the whole registry as one unit, in the order its services
+  # need, which is what this Component describes: the API and token-service
+  # control plane, the OCI blob store and its controller, the web console, the
+  # asynchronous worker tier, the vulnerability scanner, the relational
+  # backend, the key-value cache, and the reverse proxy that fronts them.
+  source:
+    kind: helm-https-chart
+    url: https://helm.goharbor.io
+    chart: harbor
+    # Default chart version. Override via infra.source_version.
+    version: "{{ optional .infra `source_version` \"1.19.2\" }}"
+
+  # provides.host is the name of the Service fronting the reverse proxy, which
+  # is the single address the Component's provides contract promises.
+  #
+  # 🔴 IT IS THE BARE RENDERED NAME, AND THAT IS NOT WHAT PINNING THE CHART'S
+  # TOP-LEVEL NAME GIVES YOU. The rendered name is the release name the helm
+  # provider gives the chart, which spells the Component's name in the alphabet
+  # a Kubernetes name allows. This chart derives every other resource name from
+  # its top-level name knob and then SUFFIXES it — the control plane's Service is
+  # "<rendered_name>-core", the console's "<rendered_name>-portal", the blob
+  # store's "<rendered_name>-registry", and so on for the worker tier, the
+  # scanner, the backend and the cache. Nothing is named by the bare pinned name.
+  # The published Service is named by a SEPARATE, exposure-scoped knob whose own
+  # default is the fixed literal "harbor", independent of the top-level name — so
+  # a Recipe that pinned only the top-level name would publish an address no
+  # Service answers to, and two instances in one namespace would both emit a
+  # Service called "harbor" and collide. Both knobs are set from the rendered
+  # name in the valuesMapping below, and the resulting Service name was read
+  # from a render of the chart, not assumed.
+  #
+  # provides.host is the bare, self-contained in-cluster Service name of the
+  # reverse proxy: it carries no namespace, so the Recipe is independent of
+  # where it is deployed; a consumer in another namespace qualifies the host
+  # with the target namespace on its own side (caller-side routing).
+  #
+  # Publishing any of the suffixed Services instead would publish one service of
+  # the registry rather than the registry: a container client needs the console
+  # path and the registry and API paths served from one address, which is what
+  # the reverse proxy behind this Service does.
+  #
+  # port follows the Service port the operator set. The reverse proxy itself
+  # always listens on the port the chart fixes and the Service forwards to it, so
+  # moving infra.port moves the published address and not the listener — which is
+  # why infra.port admits the privileged ports a registry is conventionally
+  # reached on.
+  #
+  # The metrics keys are published while values.metrics_enabled is true, and
+  # empty otherwise. The chart serves the metrics of four services, each on
+  # port 8001 at /metrics, and names that port http-metrics on each one's
+  # Service: the control plane's "<rendered_name>-core", the blob store's
+  # "<rendered_name>-registry", the worker tier's "<rendered_name>-jobservice"
+  # and the exporter's "<rendered_name>-exporter", the names the valuesMapping
+  # below derives from the rendered name. The port is http-metrics because
+  # this Recipe leaves the chart's internal transport security off; under it
+  # the chart would name the port https-metrics.
+  provides:
+    host: "{{ .context.rendered_name }}"
+    port: "{{ .infra.port }}"
+    protocol: "http"
+    metrics_service: "{{ if .values.metrics_enabled }}{{ .context.rendered_name }}-core,{{ .context.rendered_name }}-registry,{{ .context.rendered_name }}-jobservice,{{ .context.rendered_name }}-exporter{{ end }}"
+    metrics_service_port: "{{ if .values.metrics_enabled }}http-metrics{{ end }}"
+    metrics_path: "{{ if .values.metrics_enabled }}/metrics{{ end }}"
+
+  assertions:
+    # The blob store checks a presented account against a bcrypt line of the form
+    # `<username>:<hash>`, and the registry's own services present the plaintext.
+    # That one line names BOTH halves of the account, so the three keys describing
+    # it are one setting written three ways and they move as a unit. A Release
+    # that moves some of them renders a registry whose own services cannot
+    # authenticate to their own blob store — a build that succeeds and a registry
+    # that rejects every push.
+    #
+    # 🔴 The rule is ALL THREE OR NONE, rather than a per-key pairing, and the
+    # reason is that no template can check a bcrypt hash against a plaintext. Any
+    # narrower rule would have to GUESS which key the operator meant to be
+    # authoritative, and a guess that halts refuses configurations that are
+    # perfectly legal — a new account name over the development password is one.
+    # Asking for all three states what was meant, costs the operator one line
+    # they already know, and leaves no case where the build is wrong and silent.
+    registry_account_complete: >-
+      {{- $un := .infra.registry_username -}}
+      {{- $pw := optional .infra `registry_password` "" -}}
+      {{- $ht := optional .infra `registry_htpasswd` "" -}}
+      {{- if and (or (ne $un "harbor_registry_user") $pw $ht) (or (not $pw) (not $ht)) -}}
+      {{- fail "this Release changes part of the account the registry's own services present to its blob store, but that account is one setting written three ways — infra.registry_username, infra.registry_password, and infra.registry_htpasswd, which is the other two hashed into a single line — so a partial change leaves the blob store checking one account while the services present another and every push is rejected: set all three together, producing the third with `htpasswd -nbB <infra.registry_username> <infra.registry_password>`, or set none of them to take the Recipe's development account" -}}
+      {{- end -}}
+
+    # A Release may write a key of an infra group as an empty string —
+    # `compute.cpu: ""`, or `storage.size: ""` — and a key written that way
+    # replaces the Component's default rather than falling back to it. Rendered,
+    # that would emit a control plane with no CPU or memory limit, or a volume
+    # for the image layers that requests no size: a Release materially different
+    # from the one the Component's declared defaults describe, with nothing in
+    # the output saying so. The build halts here instead, naming the key and the
+    # group it belongs to. A key the Release leaves out takes the Component's
+    # default. The storage class is not checked: left unset, every volume the
+    # registry claims is provisioned from the cluster's default storage class.
+    compute_group_complete: >-
+      {{- if not (optional (default dict .infra.compute) "cpu" "") -}}
+      {{- fail "this Release sets part of infra.compute on the registry but leaves compute.cpu empty, so the rendered control plane would carry no CPU request or limit: set both compute.cpu and compute.memory together, or remove the compute block entirely to take the component's defaults" -}}
+      {{- end -}}
+      {{- if not (optional (default dict .infra.compute) "memory" "") -}}
+      {{- fail "this Release sets part of infra.compute on the registry but leaves compute.memory empty, so the rendered control plane would carry no memory request or limit: set both compute.cpu and compute.memory together, or remove the compute block entirely to take the component's defaults" -}}
+      {{- end -}}
+    storage_group_complete: >-
+      {{- if not (optional (default dict .infra.storage) "size" "") -}}
+      {{- fail "this Release leaves storage.size empty on the registry, so the rendered volume for image layers and manifests would request no size: set storage.size to the size the volume needs, or leave it out of the Release to take the component's default" -}}
+      {{- end -}}
+
+    # The chart takes the registry's external address as protocol://domain[:port],
+    # and a container client addresses a registry at the root of a host, so an
+    # address carrying a path would hand clients commands and a token-service
+    # address that do not resolve to the registry. Halt on one here, where the
+    # fix is one value in the Release.
+    external_base_url_is_an_origin: >-
+      {{- with optional .infra "external_base_url" "" -}}
+      {{- $u := urlParse . -}}
+      {{- if and $u.host $u.path (ne $u.path "/") -}}
+      {{- fail (printf "infra.external_base_url %q carries the path %q, but a container client addresses a registry at the root of a host, so the push and pull commands and the token-service address the registry hands out would not reach it; set it to the scheme, host and port alone, for example https://registry.example.com" . $u.path) -}}
+      {{- end -}}
+      {{- end -}}
+
+  # This Recipe reads from infra.overrides:
+  #   image_prefix - string, the registry and namespace every pinned image is
+  #                  named under, for a Release pulling from a mirror
+  #                  (default docker.io/goharbor)
+  #   image        - map keyed by service — nginx, portal, core, jobservice,
+  #                  registry, registryctl, trivy, database, redis, exporter —
+  #                  each value a map of image fields replacing that ONE
+  #                  service's pin. The registry runs ten images, so an override
+  #                  names which of them it means.
+  #   requests     - { cpu: string, memory: string } (control-plane requests)
+  #   nodeSelector - map[string]string (pod scheduling)
+  #   tolerations  - []object (pod scheduling)
+  #
+  # Under this configuration the chart renders a Deployment for the reverse
+  # proxy, the console, the control plane, the worker tier and the blob store; a
+  # StatefulSet for the backend, the cache and the scanner; a persistent volume
+  # claim for the blob store and one for the worker tier's logs; the
+  # configuration maps and secrets each service reads; and eight Services. The
+  # chart's Ingress is left switched off and the reverse proxy exposed as a
+  # cluster-internal Service instead, because the Component publishes an
+  # in-cluster address rather than an external hostname. Transport security and
+  # the Prometheus-operator monitor are left switched off too, because the
+  # Component describes neither.
+  #
+  # With values.metrics_enabled true the chart's metrics are on: the control
+  # plane, the worker tier and the blob store serve theirs, and the chart adds
+  # the metrics exporter — a Deployment, its configuration map and secret, and a
+  # ninth Service — and puts the metrics port on the Services of all four.
+  # 🔴 That one chart setting also moves the blob store's debug listener from
+  # the pod's loopback address onto every interface, on the metrics port its
+  # Service now names. The listener checks no caller and serves, beside the
+  # metrics, the profiling routes — CPU profiles and execution traces on
+  # request, heap and goroutine dumps, the command line — and the runtime
+  # variables, so turning the metrics on opens those to every in-cluster caller
+  # that reaches the pod. It has no route that changes the registry. The chart
+  # moves the listener and the metrics together, so this Recipe cannot turn one
+  # on without the other.
+  #
+  # What it carries that a hand-assembled workload does not is the wiring the
+  # product's own maintainers keep in step with it: the reverse-proxy
+  # configuration that routes the console path to the console and the registry
+  # and API paths to the control plane, the token-service key the control plane
+  # checks every pull and push against, the connection settings each service
+  # reads for the backend and the cache, the logical-database split that keeps
+  # the services' cache keyspaces apart, and start-up ordering and probes for
+  # each service.
+  #
+  # 🔴 The chart mints its own material when none is supplied — the control
+  # plane's shared and token-signing secrets, the worker tier's and the blob
+  # store's secrets, the cross-site-request-forgery key, and the blob store's
+  # hashed password are each generated at render time if left empty, so two
+  # renders of identical input would differ. Every one of them is supplied here
+  # instead. The token-signing key and its certificate, the three shared
+  # secrets, the request-forgery key, and the key stored credentials are
+  # encrypted with — which the chart would otherwise take from a fixed value of
+  # its own — come from the attached credential BY NAME and nowhere else: the
+  # Component requires those six slots, and a fill that publishes no Secret
+  # name halts the build below, so no key every reader of this catalog holds is
+  # ever written. The administrator's password comes from the attached
+  # credential by name where its slot is filled, and the passwords left unset
+  # take a fixed development value. Nothing is left for the chart to generate,
+  # so the output is byte-identical across renders.
+  #
+  # Every image the chart runs is pinned to a resolvable release tag for
+  # reproducible renders. The product ships them all on one tag, so
+  # infra.engine_version selects every one at once. A Release pulling from a
+  # mirror moves them together with infra.overrides.image_prefix, and replaces
+  # any single one of them through infra.overrides.image, which is keyed by
+  # service.
+  valuesMapping: |
+    ## ── Pin every derived name to the rendered name ────────────
+    ## This knob names the control plane, the console, the blob store, the worker
+    ## tier, the scanner, the backend and the cache, each with its own suffix. It
+    ## does NOT name the published Service; that is the exposure knob below.
+    fullnameOverride: "{{ .context.rendered_name }}"
+
+    ## ── The single published address ───────────────────────────
+    ## Exposing the reverse proxy as a cluster-internal Service is what gives the
+    ## registry one in-cluster address, which is what provides.host publishes.
+    ## The chart's Ingress path is not taken: it names an external hostname the
+    ## Component does not describe, and it renders no in-cluster Service at all.
+    ##
+    ## 🔴 `clusterIP.name` is a SEPARATE knob from fullnameOverride above, and its
+    ## own default is the fixed literal "harbor". Left alone it would publish a
+    ## Service named "harbor" whatever the instance is called — an address
+    ## provides.host does not name, and one that two instances in a namespace
+    ## would both claim. It is pinned to the rendered name here for both reasons.
+    ##
+    ## 🔴 Transport security is switched OFF deliberately, and it is a
+    ## correctness requirement rather than a preference. The chart's own
+    ## certificate source GENERATES a certificate authority and a signed
+    ## certificate at render time, so two renders of identical input would
+    ## differ. Left off, neither is reached.
+    expose:
+      type: clusterIP
+      tls:
+        enabled: false
+      clusterIP:
+        name: "{{ .context.rendered_name }}"
+        ports:
+          httpPort: {{ .infra.port }}
+
+    ## ── The address the registry reports as its own ────────────
+    ## The control plane returns this to container clients as the token-service
+    ## address and prints it in the console's copyable commands, so it must be
+    ## the address consumers actually reach. With infra.external_base_url set it
+    ## is that address, the one the ingress tier publishes; unset, it is the
+    ## published Service above, reached in-cluster.
+    {{- with .infra.external_base_url }}
+    externalURL: "{{ . }}"
+    {{- else }}
+    externalURL: "http://{{ .context.rendered_name }}:{{ .infra.port }}"
+    {{- end }}
+
+    ## ── Log verbosity ──────────────────────────────────────────
+    ## Emitted only when the Aggregate set it, so a bare declaration renders no
+    ## redundant setting and each service keeps the product's own default.
+    {{- with .values.log_level }}
+    logLevel: "{{ . }}"
+    {{- end }}
+
+    ## ── Metrics ────────────────────────────────────────────────
+    ## Emitted only while values.metrics_enabled is true, so a bare declaration
+    ## renders exactly what the chart's own default does. The chart's one switch
+    ## turns on the metrics of the control plane, the worker tier, the blob store
+    ## and the exporter, and also moves the blob store's debug listener onto
+    ## every interface of its pod, as the comment above this mapping describes.
+    ## The ports and paths stay the chart's own, which provides publishes.
+    {{- if .values.metrics_enabled }}
+    metrics:
+      enabled: true
+    {{- end }}
+
+    ## ── Every image the registry runs ──────────────────────────
+    ## The chart's own tags track the version of the software it packages, so
+    ## leaving them unset makes the render move whenever the chart moves. Each is
+    ## pinned explicitly from infra.engine_version, which is one value because
+    ## the product ships every one of these images on a single tag. The
+    ## repositories are the chart's own, so the images this realization runs are
+    ## the ones its chart is tested against.
+    ##
+    ## The metrics exporter is pinned with the rest; the chart runs it only
+    ## while values.metrics_enabled is true.
+    ##
+    ## 🔴 AN OVERRIDE NAMES ONE SERVICE. The registry runs ten images, so a
+    ## single replacement map would point all ten at whichever one it named —
+    ## infra.overrides.image is keyed by service and replaces that service's pin
+    ## alone. The one case where all ten do move together is a Release pulling
+    ## from a mirror, and infra.overrides.image_prefix is the knob for it.
+    {{- $prefix := "docker.io/goharbor" }}
+    {{- $img := dict }}
+    {{- if .infra.overrides }}
+    {{- if .infra.overrides.image_prefix }}
+    {{- $prefix = .infra.overrides.image_prefix }}
+    {{- end }}
+    {{- if .infra.overrides.image }}
+    {{- $img = .infra.overrides.image }}
+    {{- end }}
+    {{- end }}
+    nginx:
+      image:
+        {{- if hasKey $img "nginx" }}
+        {{- range $k, $v := index $img "nginx" }}
+        {{ $k }}: "{{ $v }}"
+        {{- end }}
+        {{- else }}
+        repository: {{ $prefix }}/nginx-photon
+        tag: "{{ .infra.engine_version }}"
+        {{- end }}
+    portal:
+      image:
+        {{- if hasKey $img "portal" }}
+        {{- range $k, $v := index $img "portal" }}
+        {{ $k }}: "{{ $v }}"
+        {{- end }}
+        {{- else }}
+        repository: {{ $prefix }}/harbor-portal
+        tag: "{{ .infra.engine_version }}"
+        {{- end }}
+    jobservice:
+      image:
+        {{- if hasKey $img "jobservice" }}
+        {{- range $k, $v := index $img "jobservice" }}
+        {{ $k }}: "{{ $v }}"
+        {{- end }}
+        {{- else }}
+        repository: {{ $prefix }}/harbor-jobservice
+        tag: "{{ .infra.engine_version }}"
+        {{- end }}
+
+      ## ── The worker tier's shared secret ────────────────────
+      ## Generated by the chart when left empty. The Component requires the
+      ## jobservice_secret slot, so the build has already halted, naming the
+      ## slot, where it is empty; a fill that publishes no Secret name and data
+      ## key halts here, naming the slot, rather than rendering an empty name
+      ## the chart would read as "generate one". The control plane, the worker
+      ## tier and the blob store's controller read it from the Secret and data
+      ## key the credential publishes, and no value is ever written.
+      {{- $jobservice := optional (optional (default dict .features) "jobservice_secret" dict) "provides" dict }}
+      {{- if not (and (optional $jobservice "name" "") (optional $jobservice "key" "")) }}
+      {{- fail (printf "the jobservice_secret credential of the Harbor registry %q publishes no Secret name and data key, so the worker tier and the control plane could not be pointed at the secret they authenticate to each other with: attach a credential publishing both, such as core/referenced-secret or core/random-password" .context.instance_id) }}
+      {{- end }}
+      existingSecret: "{{ $jobservice.name }}"
+      existingSecretKey: "{{ $jobservice.key }}"
+    trivy:
+      image:
+        {{- if hasKey $img "trivy" }}
+        {{- range $k, $v := index $img "trivy" }}
+        {{ $k }}: "{{ $v }}"
+        {{- end }}
+        {{- else }}
+        repository: {{ $prefix }}/trivy-adapter-photon
+        tag: "{{ .infra.engine_version }}"
+        {{- end }}
+    exporter:
+      image:
+        {{- if hasKey $img "exporter" }}
+        {{- range $k, $v := index $img "exporter" }}
+        {{ $k }}: "{{ $v }}"
+        {{- end }}
+        {{- else }}
+        repository: {{ $prefix }}/harbor-exporter
+        tag: "{{ .infra.engine_version }}"
+        {{- end }}
+
+    ## ── The API and token-service control plane ────────────────
+    core:
+      image:
+        {{- if hasKey $img "core" }}
+        {{- range $k, $v := index $img "core" }}
+        {{ $k }}: "{{ $v }}"
+        {{- end }}
+        {{- else }}
+        repository: {{ $prefix }}/harbor-core
+        tag: "{{ .infra.engine_version }}"
+        {{- end }}
+
+      ## ── The control plane's three keys, none with a default ─
+      ## The Component requires the core_secret, csrf_key and token_key slots,
+      ## so the build has already halted, naming the slot, where any of them is
+      ## empty. What a fill publishes is known only here: one that names no
+      ## Secret leaves nothing to point the software at, so it halts the build,
+      ## naming the slot, rather than rendering an empty name the chart would
+      ## read as "generate one". No value for any of the three is ever written,
+      ## and the chart, which mints each of them at render time when it is left
+      ## empty, never reaches its own generator.
+      {{- $features := default dict .features }}
+      {{- $coreSecret := optional (optional $features "core_secret" dict) "provides" dict }}
+      {{- if not (optional $coreSecret "name" "") }}
+      {{- fail (printf "the core_secret credential of the Harbor registry %q publishes no Secret name, so the registry's services could not be pointed at the secret they authenticate to each other with: attach a credential that names a Kubernetes Secret holding it under the data key secret, such as core/referenced-secret or core/random-password" .context.instance_id) }}
+      {{- end }}
+      {{- $csrf := optional (optional $features "csrf_key" dict) "provides" dict }}
+      {{- if not (and (optional $csrf "name" "") (optional $csrf "key" "")) }}
+      {{- fail (printf "the csrf_key credential of the Harbor registry %q publishes no Secret name and data key, so the control plane could not be pointed at the key it signs its request-forgery tokens with: attach a credential publishing both, such as core/referenced-secret or core/random-password" .context.instance_id) }}
+      {{- end }}
+      {{- $token := optional (optional $features "token_key" dict) "provides" dict }}
+      {{- if not (optional $token "name" "") }}
+      {{- fail (printf "the token_key credential of the Harbor registry %q publishes no Secret name, so the token service could not be pointed at the key it signs its tokens with: attach a credential that names a Kubernetes Secret holding the key under tls.key and its certificate under tls.crt, such as core/referenced-secret bound to k8s-existing-secret" .context.instance_id) }}
+      {{- end }}
+
+      ## The shared secret the control plane, the worker tier and the blob
+      ## store's controller authenticate to each other with. The chart points
+      ## all three at the named Secret under the fixed data key `secret`, so the
+      ## data key the credential publishes is not read.
+      existingSecret: "{{ $coreSecret.name }}"
+
+      ## The cross-site-request-forgery signing key, read from the Secret and
+      ## data key the credential publishes.
+      existingXsrfSecret: "{{ $csrf.name }}"
+      existingXsrfSecretKey: "{{ $csrf.key }}"
+
+      ## The token-service signing key and the certificate over it. The chart
+      ## reads both from the named Secret under the fixed data keys tls.key and
+      ## tls.crt, mounting the key into the control plane itself, so the data
+      ## key the credential publishes is not read. Named, the chart writes
+      ## neither into its own Secret and generates no certificate authority,
+      ## which it otherwise does on every render.
+      secretName: "{{ $token.name }}"
+
+      ## Control-plane sizing. The other services take the product's own sizes;
+      ## infra.overrides reaches each of them by name for a Release that needs to
+      ## size them individually.
+      resources:
+        limits:
+          cpu: "{{ .infra.compute.cpu }}"
+          memory: "{{ .infra.compute.memory }}"
+        {{- if and .infra.overrides .infra.overrides.requests }}
+        requests:
+          cpu: "{{ .infra.overrides.requests.cpu }}"
+          memory: "{{ .infra.overrides.requests.memory }}"
+        {{- end }}
+
+    ## ── The administrator account ──────────────────────────────
+    ## Attached, the control plane reads the credential BY NAME and no password
+    ## reaches the rendered artifact; unattached, a fixed development value the
+    ## product itself documents stands in.
+    {{- if hasKey (default dict .features) "admin_password" }}
+    existingSecretAdminPassword: "{{ .features.admin_password.provides.name }}"
+    existingSecretAdminPasswordKey: "{{ .features.admin_password.provides.key }}"
+    {{- else }}
+    harborAdminPassword: "Harbor12345"
+    {{- end }}
+
+    ## ── The key stored credentials are encrypted with ──────────
+    ## The control plane encrypts the credentials of upstream registries it
+    ## replicates with this key. The Component requires the secret_key slot, so
+    ## the build has already halted, naming the slot, where it is empty; a fill
+    ## that names no Secret halts here, naming the slot. Named, the chart mounts
+    ## the key into the control plane from that Secret under the fixed data key
+    ## secretKey, so the data key the credential publishes is not read, and it
+    ## writes neither its own key nor the fixed one its defaults carry.
+    {{- $secretKey := optional (optional (default dict .features) "secret_key" dict) "provides" dict }}
+    {{- if not (optional $secretKey "name" "") }}
+    {{- fail (printf "the secret_key credential of the Harbor registry %q publishes no Secret name, so the control plane could not be pointed at the key it encrypts stored credentials with: attach a credential that names a Kubernetes Secret holding the key under the data key secretKey, such as core/referenced-secret or core/random-password" .context.instance_id) }}
+    {{- end }}
+    existingSecretSecretKey: "{{ $secretKey.name }}"
+
+    ## ── The OCI blob store ─────────────────────────────────────
+    registry:
+      registry:
+        image:
+          {{- if hasKey $img "registry" }}
+          {{- range $k, $v := index $img "registry" }}
+          {{ $k }}: "{{ $v }}"
+          {{- end }}
+          {{- else }}
+          repository: {{ $prefix }}/registry-photon
+          tag: "{{ .infra.engine_version }}"
+          {{- end }}
+      controller:
+        image:
+          {{- if hasKey $img "registryctl" }}
+          {{- range $k, $v := index $img "registryctl" }}
+          {{ $k }}: "{{ $v }}"
+          {{- end }}
+          {{- else }}
+          repository: {{ $prefix }}/harbor-registryctl
+          tag: "{{ .infra.engine_version }}"
+          {{- end }}
+
+      ## The secret the blob store signs upload state with, shared across its
+      ## replicas. Generated by the chart when left empty. The Component
+      ## requires the registry_http_secret slot, so the build has already
+      ## halted, naming the slot, where it is empty; a fill that publishes no
+      ## Secret name and data key halts here, naming the slot. The blob store
+      ## and its controller read it from the Secret and data key the credential
+      ## publishes, and no value is ever written.
+      {{- $registryHTTP := optional (optional (default dict .features) "registry_http_secret" dict) "provides" dict }}
+      {{- if not (and (optional $registryHTTP "name" "") (optional $registryHTTP "key" "")) }}
+      {{- fail (printf "the registry_http_secret credential of the Harbor registry %q publishes no Secret name and data key, so the blob store could not be pointed at the secret it signs its upload state with: attach a credential publishing both, such as core/referenced-secret or core/random-password" .context.instance_id) }}
+      {{- end }}
+      existingSecret: "{{ $registryHTTP.name }}"
+      existingSecretKey: "{{ $registryHTTP.key }}"
+
+      ## The account the control plane and the worker tier present to the blob
+      ## store. The hashed form is what the blob store checks against, and the
+      ## chart HASHES the plaintext itself when the hashed form is left empty —
+      ## with a fresh salt each time, so two renders would differ. It is always
+      ## supplied here. An assertion above refuses a Release that moves one of
+      ## the pair without the other.
+      credentials:
+        username: "{{ .infra.registry_username }}"
+        password: "{{ optional .infra `registry_password` "harbor_registry_password" }}"
+        htpasswdString: "{{ optional .infra `registry_htpasswd` "harbor_registry_user:$2y$05$1Et1ScpXwbTCYeJthIjUdub8Zi2Z/frt3OJu5l2XOGRXs6W5VetZe" }}"
+
+    ## ── The relational backend ─────────────────────────────────
+    ## Part of the unit rather than a separate component, so the registry stands
+    ## up with nothing else declared beside it.
+    database:
+      type: internal
+      internal:
+        image:
+          {{- if hasKey $img "database" }}
+          {{- range $k, $v := index $img "database" }}
+          {{ $k }}: "{{ $v }}"
+          {{- end }}
+          {{- else }}
+          repository: {{ $prefix }}/harbor-db
+          tag: "{{ .infra.engine_version }}"
+          {{- end }}
+        password: "{{ optional .infra `database_password` "apppass" }}"
+
+    ## ── The key-value cache ────────────────────────────────────
+    redis:
+      type: internal
+      internal:
+        image:
+          {{- if hasKey $img "redis" }}
+          {{- range $k, $v := index $img "redis" }}
+          {{ $k }}: "{{ $v }}"
+          {{- end }}
+          {{- else }}
+          repository: {{ $prefix }}/valkey-photon
+          tag: "{{ .infra.engine_version }}"
+          {{- end }}
+
+    ## ── Volumes ────────────────────────────────────────────────
+    ## The image layers and manifests are the point of this component rather than
+    ## a cache of something else, so that volume is sized from infra. The storage
+    ## class is applied to every volume the registry claims, because a cluster
+    ## that needs a named class needs it for all of them. It is passed only when
+    ## the Release names one; unset, the chart names no class on any claim, and
+    ## the cluster's default storage class provisions them.
+    persistence:
+      enabled: true
+      persistentVolumeClaim:
+        registry:
+          size: "{{ .infra.storage.size }}"
+          {{- with .infra.storage.type }}
+          storageClass: "{{ . }}"
+          {{- end }}
+        {{- with .infra.storage.type }}
+        jobservice:
+          jobLog:
+            storageClass: "{{ . }}"
+        database:
+          storageClass: "{{ . }}"
+        redis:
+          storageClass: "{{ . }}"
+        trivy:
+          storageClass: "{{ . }}"
+        {{- end }}
+
+    ## ── Scheduling overrides ───────────────────────────────────
+    {{- if .infra.overrides }}
+    {{- if .infra.overrides.nodeSelector }}
+    nodeSelector: {{ toJson .infra.overrides.nodeSelector }}
+    {{- end }}
+    {{- if .infra.overrides.tolerations }}
+    tolerations: {{ toJson .infra.overrides.tolerations }}
+    {{- end }}
+    {{- end }}

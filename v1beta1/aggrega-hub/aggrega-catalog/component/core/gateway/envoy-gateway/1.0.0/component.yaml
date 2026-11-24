@@ -1,0 +1,530 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/gateway/envoy-gateway
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    An Envoy Gateway ingress gateway, programmed through the Gateway API. Its
+    control plane watches the cluster's GatewayClass, Gateway and route
+    resources and configures an Envoy data plane, which terminates client HTTP
+    traffic — and HTTPS too, where the Release names a certificate
+    Secret through tls_secret — and load-balances it to the Services those
+    routes name. This Component installs the control plane and claims the
+    gateway class and the gateway itself. An application reaches it by
+    declaring a route naming the gateway as its parent, and the gateway is
+    named after the component the Aggregate declares. Realized on Kubernetes
+    through a Helm Recipe; it has no standalone local-container form, so no
+    Compose Recipe is provided. It publishes the pod label, port name and path
+    a scraper discovers its proxies' metrics by.
+
+    It also serves models through Envoy AI Gateway. Wired to the AI gateway
+    controller on its extension socket, it calls that controller as its
+    extension server, and the Release must place it in envoy-gateway-system
+    or the build halts. Each model on its models socket is served under /v1
+    at the gateway's address to a request naming the connection's alias,
+    with that connection's credential. The gateway publishes that address as
+    its endpoint, qualified with envoy-gateway-system so an agent in any
+    namespace reaches it, and values.model as its model. While a model is
+    wired, every route on the gateway takes the 50Mi per-connection request
+    buffer Envoy AI Gateway configures. It realizes core/period-budget in
+    tokens, core/retry-policy, core/concurrency-limit per model, and
+    core/audit-logging with no cost or verified caller.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: gateway
+    component.aggrega.ai/hosting: self-hosted
+    component.aggrega.ai/upstream-licensing: osi-approved
+    # Model API: the endpoint this gateway publishes answers the OpenAI API —
+    # the routes Envoy AI Gateway serves under /v1 for the models wired to the
+    # models socket, each chosen by the model name a request carries — so a
+    # consumer drives it with an OpenAI client whichever model answers behind
+    # it. It is what lets a model socket selecting this key admit the gateway
+    # beside the models themselves; the gateway publishes the endpoint and the
+    # model name such a socket's consumers read. The value names what the
+    # product serves, not a configured state: with nothing wired to the models
+    # socket the gateway serves no model, and both of those are empty.
+    model.aggrega.ai/api: openai
+    # The gateway capability dimension: on the route serving the models wired
+    # to the models socket, Envoy AI Gateway's external processor reads each
+    # request's body — the model it names — and the tokens each reply reports,
+    # so a runtime control that has to parse a model payload can attach here.
+    # The value names what the product does on such a route, not a configured
+    # state: with nothing wired to the models socket no route parses a model
+    # payload, and each Feature selecting this value says, through its
+    # realization, what this gateway honours of it.
+    gateway.aggrega.ai/intelligence: semantic
+    # Data-path capability labels. Each states what this gateway is able to do,
+    # never what a given Release has switched on — the two read alike to a
+    # developer and only the first is a property of the product.
+    #
+    # Request mirroring: a route rule may copy a matching request to a second
+    # service and discard that service's response, and the share of requests
+    # copied is settable as a percentage or as a fraction, so this gateway
+    # offers the sampled fidelity rather than only the whole stream.
+    dataplane.aggrega.ai/request-mirroring: sampled
+    # Caller identity: the gateway can pass the details of the client's own TLS
+    # certificate — its subject, the certificate itself, the chain, and the DNS
+    # and URI names it carries — to the service behind the route. The identity
+    # that travels is the client's certificate rather than a header composed
+    # after the gateway authenticates the caller, which is a different fidelity
+    # and is why this axis carries the mechanism in the value.
+    dataplane.aggrega.ai/caller-identity: client-certificate
+    # Upstream TLS: a route may require the service it forwards to present a
+    # certificate chaining to a trust anchor the Release supplies, and to match
+    # a named hostname. The capability is what the label asserts; whether a
+    # given route turns it on is that route's own configuration.
+    dataplane.aggrega.ai/upstream-tls: trust-anchor
+    # Period budget: the gateway can refuse model requests once the tokens it
+    # has counted over a period exceed a limit set in its configuration — the
+    # tokens each model's reply reports reading, writing or both, which Envoy
+    # AI Gateway reads and Envoy Gateway's rate limit counts — which is the
+    # fidelity this value names. It prices nothing, so it counts no cost. It
+    # refuses nothing until core/period-budget is attached; the Recipe then
+    # writes the budget onto the route serving the models wired to the models
+    # socket, and turns on the rate-limit service that counts it. While the
+    # store or that service cannot be reached, or a check takes longer than
+    # Envoy's rate-limit timeout, model requests are refused with HTTP 500,
+    # under a setting the Recipe turns on for every rate limit that install
+    # keeps, so a rate limit applied to it by hand fails closed too, and a
+    # request admitted just before an outage is still served and not counted,
+    # because its tokens are charged after the reply.
+    dataplane.aggrega.ai/period-budget: tokens
+    # Concurrency cap: the gateway can refuse a request once the requests in
+    # flight to one backend of a route rule reach a cap — a traffic policy's
+    # circuit breaker, whose maxParallelRequests Envoy keeps as the most
+    # requests outstanding to that backend at once — so it keeps one cap for
+    # each upstream target it sends to and none on their total, and a request
+    # past a cap is answered 503. Envoy's worker threads each check the count
+    # and then add to it, so requests arriving together can each pass the
+    # check and take the count briefly above the cap: in Envoy's own source,
+    # "it is possible for resources to temporarily go above the supplied
+    # maximums". The capability is what the label asserts; no cap applies
+    # until core/concurrency-limit is attached. Read in Envoy Gateway's API
+    # and source at v1.9.1, the version infra.image defaults to, and in the
+    # circuit-breaking reference of the Envoy v1.39.1 it runs,
+    # https://www.envoyproxy.io/docs/envoy/v1.39.1/intro/arch_overview/upstream/circuit_breaking,
+    # on 2026-10-12.
+    dataplane.aggrega.ai/concurrency-cap: per-target
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # Why the period budget, and each AI gateway control that selects
+  # gateway.aggrega.ai/intelligence: semantic, is or is not realized here:
+  # - core/period-budget: Envoy Gateway's usage-based rate limit, counting the
+  #   tokens each reply reports, which the Recipe writes onto the one traffic
+  #   policy of the route serving the wired models;
+  #   period-budget-envoy-gateway refuses what that rate limit cannot keep.
+  # - core/retry-policy: a retry count on the same traffic policy, which the
+  #   Recipe writes and retry-policy-envoy-gateway checks.
+  # - core/fallback-chain: not realized here. Envoy AI Gateway falls back by
+  #   retrying onto further backends of a model's rule, in priority order,
+  #   and Envoy Gateway writes the one traffic policy's retry count onto
+  #   every rule of the route serving the wired models, while a retried
+  #   request cycles through its own rule's backends until that count is
+  #   spent. So a fallback list gets exactly its sends only where every
+  #   wired model's list has the same length, and an attachment halts the
+  #   build.
+  # - core/concurrency-limit: a cap on the requests in flight to each wired
+  #   model, written as the circuit breaker of the same traffic policy, which
+  #   Envoy Gateway applies to each route rule's backend, and each wired model
+  #   has a rule of its own; concurrency-limit-envoy-gateway refuses scope
+  #   gateway, because Envoy Gateway holds no cap on the total across
+  #   everything the gateway serves, its connection limit counting
+  #   connections rather than requests.
+  # - core/semantic-caching: neither Envoy Gateway nor Envoy AI Gateway keeps
+  #   a reply to answer a later request with.
+  # - core/response-validation: neither checks a reply against a schema;
+  #   Envoy AI Gateway's schema handling converts the schema a request names
+  #   for a provider whose own decoding follows it.
+  # - core/target-selection: none of Envoy Gateway's balancers picks by
+  #   observed latency or by cost, and each wired model's rule holds one
+  #   backend, so there is nothing to choose between.
+  # - core/audit-logging: the gateway's access log, which the Recipe names
+  #   from the gateway while the attachment is present: a line per request on
+  #   the data plane's standard output, with the fields Envoy Gateway writes
+  #   by default, the model that answered and the token counts each reply
+  #   reports. audit-logging-envoy-gateway refuses by name what that log does
+  #   not keep: what a request cost, since the per-request cost Envoy AI
+  #   Gateway can compute has no unit and the gateway keeps no prices; a
+  #   caller the gateway verified, since nothing on this path verifies the
+  #   caller; and a retention, since the access log has no store and no
+  #   retention setting. So it realizes an attachment that turns
+  #   require_cost and require_verified_caller off and gives no
+  #   retention_days.
+  usesSchema:
+    # The Envoy AI Gateway controller the control plane calls as its extension
+    # server. The selector takes a component labelled
+    # gateway.aggrega.ai/extension-server: envoy-gateway, which states that it
+    # serves Envoy Gateway's extension protocol, so any other gateway is
+    # refused here. The selected component's provides host and port arrive on
+    # the connection and compose the extension server's address in the control
+    # plane's configuration: the host qualified by the namespace the Release
+    # places the controller in, or `default` where it declares none, because a
+    # published host carries no namespace. The same configuration admits the
+    # Backend resources and the patch policies the controller writes, as the
+    # AI gateway's own installation configures Envoy Gateway. The control
+    # plane calls one extension server, so a second connection here halts the
+    # build.
+    #
+    # The controller expects this gateway's control plane in the
+    # envoy-gateway-system namespace, so with a connection here the Release
+    # places the gateway there, and a Release placing it elsewhere halts the
+    # build naming the namespace to declare.
+    #
+    # Optional: with nothing wired, the control plane carries no extension and
+    # its rendered output is the same as a gateway without this socket.
+    extension:
+      selector: "gateway.aggrega.ai/extension-server=envoy-gateway"
+    # The models the gateway serves through Envoy AI Gateway, each wired as a
+    # connection: any ai-model Component, managed or self-hosted, one or
+    # several. Each connection becomes a rule of one AI route attached to this
+    # gateway: a request whose model name is the connection's alias is sent to
+    # the endpoint the model publishes, asking for the model name it publishes
+    # in place of the alias — pointers the compiler pipes into the resources
+    # and never resolves. A host the model publishes with no dot in it is a
+    # Service name carrying no namespace, so the gateway qualifies it with the
+    # namespace the Release places the model in, or `default` where it
+    # declares none, and reaches a self-hosted model in any namespace; a
+    # managed API's host is used as published. So every wired model is served
+    # at the gateway's own address under /v1, and the model name a request
+    # carries chooses the model. One route holds fifteen rules, so a sixteenth
+    # connection halts the build. The gateway reaches a wired model over the
+    # OpenAI API alone, so a connection whose target's model.aggrega.ai/api is
+    # not openai halts the build, naming it. The alias names the connection's
+    # resources too, in lowercase with every underscore as a hyphen, so two
+    # aliases giving one name, or an alias ending in a hyphen or an underscore,
+    # halt the build where the resources are rendered.
+    #
+    # The AI gateway controller reconciles those resources, so a connection
+    # here needs the controller wired to the extension socket, and the build
+    # halts naming both sockets while it is not.
+    #
+    # The credential the gateway presents to a wired model is the one its
+    # connection carries in the credential slot: the connection's backend
+    # security policy names the Secret the credential publishes, the
+    # controller reads the key from that Secret in the gateway's namespace
+    # under the data key apiKey, and the gateway sends it as a bearer token in
+    # the Authorization header, so no rendered file carries the key. A
+    # credential publishing any other data key halts the build, naming both. A
+    # connection carrying none renders no security policy, so the gateway adds
+    # no credential of its own. A connection to a target labelled
+    # component.aggrega.ai/hosting: managed with no credential halts the build
+    # unless its values set unauthenticated: true. A self-hosted server that
+    # checks a key holds it in a slot of its own, and its connection carries a
+    # credential holding the same key.
+    #
+    # Optional: with nothing wired, the gateway serves no model and its rendered
+    # output is the same as a gateway without this socket.
+    models:
+      selector: "component.aggrega.ai/category=ai-model"
+      valueSchema:
+        unauthenticated:
+          type: boolean
+          default: false
+          description: Declares that the model this connection reaches takes no credential, so a connection carrying none is intended rather than an omission. It changes nothing this component renders.
+      # No inject list: no container of this component receives the
+      # credential. The Recipe names its Secret in a policy, and the AI
+      # gateway reads the key from the Secret itself.
+      featuresSchema:
+        credential:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          description: "Optional credential the gateway presents to the model this connection reaches, as a bearer token. When attached, the connection's backend security policy names the Secret the credential publishes, and the AI gateway controller reads the key from that Secret, in the gateway's namespace, under the data key apiKey, which the credential must publish: any other data key halts the build. The key appears in no rendered file. Unattached, the gateway adds no credential."
+    # The Redis-protocol store Envoy Gateway's rate-limit service keeps a
+    # period budget's count in. The selector admits the key-value stores; the
+    # Recipe halts on one whose published protocol is neither redis nor
+    # valkey, the two that speak the protocol the service talks, nor
+    # valkey-tls nor redis-tls: a store publishing either is reached over TLS,
+    # the service checking its certificate and the name dialed against the
+    # authority in server_ca where one is attached, and against the image's
+    # default trust store where not, and another value served over TLS halts
+    # the build, naming the connection. The selected
+    # component's provides host and port arrive on the connection and compose
+    # the store's address in the control plane's configuration, a host
+    # carrying no dot qualified with the namespace the Release places the
+    # store in, or `default` where it declares none, because the service runs
+    # in the gateway's namespace. The control plane creates that service from
+    # its configuration and turns rate limiting on for every gateway it serves.
+    #
+    # Optional: wired alone it changes nothing rendered, because the
+    # rate-limit service is configured only while core/period-budget is
+    # attached, and that attachment halts the build unless this socket holds a
+    # connection. The service keeps its count in one store, so a second
+    # connection halts the build.
+    #
+    # The password the service presents to the store is the connection's own,
+    # in its credential slot, for a store that requires one:
+    # core/datastore/redis does once a credential is attached to its own
+    # password slot, and a credential holding the same password is attached
+    # here, both reading one parameter. With none, the service presents no
+    # password.
+    cache:
+      selector: "datastore.aggrega.ai/engine=kv"
+      valueSchema:
+        unauthenticated:
+          type: boolean
+          default: false
+          description: Declares that the store this connection reaches takes no credential, so a connection carrying none is intended rather than an omission. It changes nothing this component renders.
+      # No inject list: no container of this component receives the credential
+      # through it. The Recipe names its Secret in the control plane's
+      # configuration, and the rate-limit service the control plane creates
+      # reads the password from that Secret.
+      featuresSchema:
+        credential:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          description: "Optional password the gateway's rate-limit service presents to the Redis-protocol store this connection reaches. When attached, the Recipe hands the service a reference to the Secret the credential publishes, under the data key it publishes, and the service reads the password from that Secret in the gateway's namespace, so the password appears in no rendered file; a credential publishing no Secret name and data key halts the build. Unattached, the service connects with no password, which is what the shipped store components expect by default."
+        # The authority the rate-limit service checks the store's certificate
+        # against, for a store whose certificate an authority the image does
+        # not already trust signs. Secret-kind-pinned because a referenceable
+        # Secret is what the Recipe mounts, and so marked sensitive as every
+        # secret-kind slot is, though the authority's certificate is not itself
+        # secret; delivered as a file.
+        server_ca:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [file]
+          description: "Optional authority the gateway's rate-limit service checks the store's certificate against while the store publishes protocol valkey-tls or redis-tls, where the image does not already trust the authority that signs it. Its Secret holds ca.crt and sits in the gateway's namespace, where the service runs. The Recipe mounts the whole Secret into the service and points the service at the file. The build halts on a server_ca publishing no Secret name, and on one wired to a store served without TLS. Fill it with core/referenced-secret."
+
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      #
+      # This Component claims the gateway class and the gateway itself because
+      # both belong to the install rather than to any single application: a
+      # gateway class is cluster-scoped, and one gateway serves every route
+      # attached to it.
+      gateway_class_name:
+        type: string
+        default: "envoy-gateway"
+        description: Name of the gateway class this install claims. The gateway declares this class, and the class is cluster-scoped, so two installs sharing a cluster need two different names.
+      allowed_route_namespaces:
+        type: string
+        enum: [Same, All]
+        default: Same
+        description: Which namespaces may attach a route to the gateway's listeners. `Same` accepts routes from the gateway's own namespace only, which is what the routing API assumes when nothing says otherwise; `All` accepts routes from every namespace. Stated explicitly so the narrower of the two is a choice a reader can see rather than a default they meet later.
+      # The alias this gateway publishes as its model. A component wired to the
+      # gateway's address over a model socket — an agent, a tool, a memory store
+      # — reads one endpoint and one model name off the edge, the same keys a
+      # model publishes; the endpoint is the gateway's base URL and the model
+      # name is the alias, which the gateway's route sends to the model wired
+      # under it. A Recipe writes the gateway's published values from what the
+      # gateway itself was given, which holds none of its connections, so the
+      # published alias is named here rather than taken from the socket: with a
+      # connection on the models socket this value is required, and with none
+      # it is omitted.
+      model:
+        type: string
+        description: The alias of a connection on the models socket that this gateway publishes as its model, the model name a component wired to the gateway sends. It must be an alias a models connection carries, and the build halts naming this value otherwise; it is required while the models socket holds a connection, and omitted while it holds none.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      image:
+        type: string
+        default: "docker.io/envoyproxy/gateway:v1.9.1"
+        description: Control-plane container image the gateway's controller runs. Set this to pull the same release from a mirror or a private registry.
+      controller_name:
+        type: string
+        default: "gateway.envoyproxy.io/gatewayclass-controller"
+        description: Controller name the gateway class is claimed under. The control plane is configured to answer for this same name, so the two halves cannot disagree; change it only where a second control plane in the cluster already answers for the default.
+      port:
+        type: integer
+        min: 1
+        max: 65535
+        default: 80
+        description: HTTP port the gateway's plain HTTP listener accepts client traffic on. Most operators should omit this and let the Recipe assign the default (80).
+      # The certificate the gateway presents to clients — the same concept, and
+      # the same key, as the one the public-ingress Feature carries for an
+      # Ingress, one scope over. Which Secret, issued by which issuer, differs
+      # per cluster, so it is operator sizing, and it carries no default because
+      # no Secret name could be right for every cluster.
+      tls_secret:
+        type: string
+        description: Name of an existing Secret of type kubernetes.io/tls, in the gateway's own namespace, holding the certificate and private key the gateway presents to clients. Set, the gateway gains a second listener named `https`, on port 443 with protocol HTTPS, which terminates TLS with that certificate beside the plain HTTP listener; a route attaches to it alone by naming that listener, and to both by naming none. Left unset, the gateway carries its plain HTTP listener alone. The Secret is referenced and never created here; it is the operator's, or a certificate controller's, to provide.
+      install_crds:
+        type: boolean
+        default: true
+        description: Whether this Release installs the custom-resource definitions the gateway and its routes are written against, together with the upgrade-safety policy that guards them. Set false where the cluster manages those definitions separately, and affirm control_plane_present when you do.
+      control_plane_present:
+        type: boolean
+        default: false
+        description: Affirms that the custom-resource definitions this Release does not install are already present in the target cluster. The compiler runs ahead of time and cannot inspect a cluster, so it asks rather than checks. With install_crds set false and this left unaffirmed, the build halts rather than emitting a gateway class and a gateway that nothing would reconcile.
+      source_version:
+        type: string
+        description: Source artifact version (Helm chart). Overrides the Recipe's default source version. Changing from default does not guarantee value mapping compatibility.
+      compute:
+        cpu:
+          type: string
+          default: 100m
+        memory:
+          type: string
+          default: 256Mi
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      #
+      # host is not required, unlike port: Envoy Gateway names the Service
+      # after the gateway's namespace, which a published value cannot read, and
+      # a Recipe publishes it only while a model is served, when the extension
+      # socket fixes that namespace.
+      host:
+        type: string
+        description: >
+          In-cluster DNS name of the Service Envoy Gateway creates for this
+          gateway's data plane, in the gateway's own namespace, the name alone
+          without a namespace; a consumer in another namespace qualifies it
+          with envoy-gateway-system, where the gateway sits while a model is
+          wired, as endpoint already does. A consumer sends its client traffic
+          here rather than to the service behind the gateway. Empty while
+          nothing is wired to the models socket.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port that Service accepts the gateway's plain HTTP listener on,
+          infra.port.
+      protocol:
+        type: string
+        description: How the published address is spoken to — `http`, so a consumer composes an address on that scheme.
+      # endpoint and model together are the contract every model component
+      # publishes, which is what lets a model socket take this gateway in place
+      # of a model with its consumer's Recipe unchanged. Neither is required:
+      # with nothing wired to the models socket the gateway serves no model and
+      # publishes both empty.
+      endpoint:
+        type: string
+        description: >
+          Full base URL of the OpenAI-compatible API the gateway serves for the
+          models wired to its models socket, with the host, the port and the
+          /v1 path already composed. The host is qualified with
+          envoy-gateway-system, the namespace the build requires the gateway
+          to sit in whenever a model is wired, so the URL resolves from any
+          namespace. A caller hands it to a client library as its base URL and
+          names values.model as its model; every other wired model is served at
+          the same URL under its own alias as the model name. Empty while
+          nothing is wired to the models socket.
+      model:
+        type: string
+        description: >
+          The alias a consumer wired to the gateway sends as its model name:
+          values.model. The gateway's route sends a request naming it to the
+          model wired under that alias, asking for the model name that model
+          publishes. Empty while nothing is wired to the models socket.
+      # Where Prometheus finds the data plane's metrics. Envoy Gateway runs the
+      # gateway's Envoy proxies as pods of their own, and every proxy pod serves
+      # its metrics at /stats/prometheus on a container port named metrics,
+      # 19001, in plain HTTP with no caller check. That port is a listener
+      # answering a GET of that one path and nothing else, forwarded to Envoy's
+      # administration interface, which listens on the pod's loopback address.
+      # The Service Envoy Gateway creates for the gateway carries its listener
+      # ports alone, and each proxy serves only its own counters, so a scraper
+      # discovers the proxy pods directly. The control plane serves metrics of
+      # its own; they are not published, since a target publishes one set of
+      # facts, its data plane's.
+      # None of the keys carries a namespace: Envoy Gateway runs the proxies in
+      # its control plane's namespace, the one the Release places this
+      # component in, and a scraper reads it from its own connection.
+      metrics_pod_selector:
+        type: string
+        description: >
+          Kubernetes label selector matching this gateway's Envoy proxy pods,
+          for a scraper that discovers those pods directly rather than scraping
+          one address. Published beside `metrics_pod_port` and `metrics_path`.
+      metrics_pod_port:
+        type: string
+        description: >
+          Name of the container port on those pods that carries the metrics,
+          `metrics`.
+      metrics_path:
+        type: string
+        description: >
+          Path the metrics are served at on that port, `/stats/prometheus`.
+
+  # The rules of the extension, models and cache sockets, with the credential
+  # rule every socket declaring unauthenticated carries. Each reads what the
+  # Aggregate and the Release wrote — the values, and each connection's target
+  # labels, values and attachments — all known before a Recipe binds, so each
+  # holds whichever Recipe renders this component and halts before anything
+  # renders.
+  assertions:
+    # The control plane's configuration names one extension server.
+    one_extension_server: >-
+      {{- $servers := sortAlpha (keys (optional .uses "extension" dict)) -}}
+      {{- if gt (len $servers) 1 -}}
+      {{- fail (printf "%q has %s on its extension socket, but Envoy Gateway calls one extension server; keep one of them" .metadata.instance_id (join " and " $servers)) -}}
+      {{- end -}}
+    # The control plane's configuration names one store for its rate-limit
+    # service.
+    one_counter_store: >-
+      {{- $stores := sortAlpha (keys (optional .uses "cache" dict)) -}}
+      {{- if gt (len $stores) 1 -}}
+      {{- fail (printf "%q has %s on its cache socket, but Envoy Gateway's rate-limit service keeps its count in one store; keep one of them" .metadata.instance_id (join " and " $stores)) -}}
+      {{- end -}}
+    # A wired model's route and backends are custom resources of Envoy AI
+    # Gateway, which only its controller reconciles, and the gateway's control
+    # plane calls that controller only through the extension socket. With a
+    # model wired and no extension, the resources would sit in the cluster and
+    # nothing would serve them.
+    models_need_the_extension: >-
+      {{- $models := sortAlpha (keys (optional .uses "models" dict)) -}}
+      {{- if and $models (not (optional .uses "extension" dict)) -}}
+      {{- fail (printf "%q serves %s from its models socket, but nothing is wired to its extension socket, so no Envoy AI Gateway controller would reconcile the route and backends rendered for them; wire core/gateway/envoy-ai-gateway-operator to the extension socket, or remove the models connections" .metadata.instance_id (join ", " $models)) -}}
+      {{- end -}}
+    # The model the gateway publishes must be one it serves. values.model names
+    # the alias of a connection on the models socket, and is required while the
+    # socket holds one, because the published values are written from what the
+    # gateway was given and a connection is not among it. With nothing wired, a
+    # value naming an alias names a model the gateway does not serve.
+    published_model_is_a_wired_alias: >-
+      {{- $wired := sortAlpha (keys (optional .uses "models" dict)) -}}
+      {{- with optional .values "model" "" -}}
+      {{- if not (has . $wired) -}}
+      {{- if $wired -}}
+      {{- fail (printf "values.model is %q, but no connection on the models socket carries that alias, so a component wired to this gateway would ask for a model it does not serve; set values.model to one of the aliases the models socket carries: %s" . (join ", " $wired)) -}}
+      {{- else -}}
+      {{- fail (printf "values.model is %q, but nothing is wired to the models socket, so the gateway serves no model to publish under that alias; wire a model to the models socket under that alias, or remove values.model" .) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- else -}}
+      {{- if $wired -}}
+      {{- fail (printf "values.model is not set, but the models socket carries %s, so the gateway cannot tell which of them a component wired to it asks for, and the alias a connection is served under is not among what its published values are written from; set values.model to one of them" (join ", " $wired)) -}}
+      {{- end -}}
+      {{- end -}}
+    # A wired model's backend is written from the endpoint and the model name
+    # the model publishes, for the AI gateway to reach over the OpenAI API,
+    # which is what model.aggrega.ai/api: openai asserts answers at that
+    # endpoint. A model whose API is another needs the backend's own schema for
+    # that provider, which nothing the model publishes names, so it halts
+    # rather than being written as a guess.
+    wired_model_speaks_the_openai_api: >-
+      {{- range $alias, $connection := (optional .uses "models" dict) -}}
+      {{- $api := optional $connection.labels "model.aggrega.ai/api" "" -}}
+      {{- if ne $api "openai" -}}
+      {{- fail (printf "the models connection %s of %q reaches %q, whose model.aggrega.ai/api is %q, but the gateway writes a wired model's backend from the endpoint and model name it publishes for the OpenAI API alone, so it cannot write a backend for it; wire a model whose model.aggrega.ai/api is openai instead" $alias $.metadata.instance_id $connection.target $api) -}}
+      {{- end -}}
+      {{- end -}}
+    # A connection to a target its catalog labels a managed service
+    # (component.aggrega.ai/hosting: managed) carries a credential, or says on
+    # the connection that its target takes none. The rule reads the target's
+    # labels, the connection's unauthenticated value and its credential slot,
+    # all known before a Recipe binds, so it holds whichever Recipe renders this
+    # component; a self-hosted target draws nothing. The list names every
+    # socket of this component that declares unauthenticated.
+    managed_target_needs_a_credential: >-
+      {{- range $socket := list "models" "cache" -}}
+      {{- range $alias, $connection := (optional $.uses $socket dict) -}}
+      {{- $managed := eq (optional $connection.labels "component.aggrega.ai/hosting" "") "managed" -}}
+      {{- $optedOut := optional $connection.values "unauthenticated" false -}}
+      {{- if and $managed (not (hasKey $connection.features "credential")) (not $optedOut) -}}
+      {{- fail (printf "the %s connection %s of %q reaches %q, whose component.aggrega.ai/hosting label is managed, with no credential: attach one under credential on that connection, or set unauthenticated: true in its values" $socket $alias $.metadata.instance_id $connection.target) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- end -}}

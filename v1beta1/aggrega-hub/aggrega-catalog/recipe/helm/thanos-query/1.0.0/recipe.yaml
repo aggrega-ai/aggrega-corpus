@@ -1,0 +1,175 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: thanos-query
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    Thanos Query, the query front end of a Thanos metrics stack, on Kubernetes
+    via the helm provider's Workload synthesis (a stateless Deployment plus a
+    ClusterIP Service on the HTTP port). Query holds no local state — it reads
+    through the Store Gateway — so it renders stateless, with no persistent
+    volume. The Store Gateway identity resolved from the `store` uses-edge (host,
+    port) arrives on .context.inject.env and composes the StoreAPI endpoint Query
+    dials on its `--endpoint` flag; a component wired to `store` that publishes
+    a protocol other than grpc, or none, halts the build, naming the
+    connection. Query reads no object store and needs no
+    credentials of its own. With `infra.external_base_url` set, it reaches Query
+    as its `--alert.query-url`, the base of the links its web interface writes
+    back to itself. Where that address carries a path, Query also takes the path
+    as `--web.external-prefix`, so the links and redirects of its own pages carry
+    it, and `--web.route-prefix=/` keeps it serving at its root; unset, none of
+    these flags is emitted. Query serves its own metrics in the Prometheus
+    format at /metrics on the HTTP port, at the root whatever that address
+    says, published as provides.metrics_endpoint. provides.host is the bare,
+    self-contained in-cluster service name of the synthesized Service — it
+    carries no namespace, so the recipe is independent of where it is deployed.
+    A consumer in another namespace qualifies the host with the target namespace
+    on its own side (caller-side routing).
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/observability/thanos-query:1.0.0
+  # This Recipe reads no infra.overrides keys.
+  #
+  # provides.host is the bare Service name "<rendered_name>-default" — the helm
+  # provider names the synthesized ClusterIP Service "<rendered_name>-<service-key>"
+  # (here "<rendered_name>-default"), with no namespace segment. provides.port is
+  # the HTTP PromQL/UI port consumers connect to; protocol is "http".
+  #
+  # metrics_endpoint is the address Query serves its own metrics at, in the
+  # Prometheus format: /metrics on the HTTP port, always on and asking no
+  # credential. Thanos registers it at the root of that port, beside the
+  # health endpoints, so --web.route-prefix leaves it where it is. It is
+  # spelled out in full on purpose: a provides entry cannot read another.
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ .infra.http_port }}"
+    protocol: "http"
+    metrics_endpoint: "http://{{ .context.rendered_name }}-default:{{ .infra.http_port }}/metrics"
+
+  # Query speaks the StoreAPI to the store, a gRPC API, which a store publishes
+  # as the protocol grpc, and the `store` socket's selector admits any server.
+  # The check that each wired store publishes grpc lives in the TargetProtocol
+  # library's Check bundle, imported under artifacts. These locals are what it
+  # reads — the socket, the protocol, why Query needs it and a component
+  # publishing it — and it stops the build, naming the connection, on a
+  # component publishing another protocol or none. It writes no file.
+  locals:
+    check_socket: store
+    check_protocol: grpc
+    check_reason: "Thanos Query dials every store over the StoreAPI, a gRPC API a store publishes as the protocol grpc"
+    check_example: core/observability/thanos-store
+  artifacts:
+    target-protocol:
+      $import: TargetProtocol#/artifacts/Check
+
+  workload: |
+    {{- /*
+      The connection variables this Recipe reads off the inject pipe, under the
+      socket whose edge delivers them, each beside the provides key the edge's
+      inject block names it from. The pipe is read as a map, and every read of
+      these variables below goes through it, so a variable nothing delivered is
+      told apart from one delivered empty: an edge on one of these sockets
+      leaving any of its variables missing halts the build, naming the edge, the
+      variables and the inject block to write, rather than rendering a
+      connection setting with an empty value. A socket in $required is read
+      whether or not anything is wired to it, so leaving it empty halts too.
+    */ -}}
+    {{- $env := optional (default dict .context.inject) "env" dict -}}
+    {{- $reads := dict "store" (dict "THANOS_STORE_HOST" "host" "THANOS_STORE_PORT" "port") -}}
+    {{- $required := list "store" -}}
+    {{- $gaps := list }}{{ $wired := list -}}
+    {{- range $alias, $edge := .context.uses }}{{ with get $reads $edge.socket -}}
+    {{- $wired = append $wired $edge.socket }}{{ $missing := list }}{{ $shape := list -}}
+    {{- range $var, $from := . }}{{ if not (hasKey $env $var) }}{{ $missing = append $missing $var }}{{ end }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- if $missing }}{{ $gaps = append $gaps (printf "the edge %q on its %s socket delivers no %s, so give that edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $alias $edge.socket (join " or " $missing) (join ", " $shape)) }}{{ end -}}
+    {{- end }}{{ end -}}
+    {{- range $socket := $required }}{{ if not (has $socket $wired) -}}
+    {{- $vars := list }}{{ $shape := list }}{{ range $var, $from := get $reads $socket }}{{ $vars = append $vars $var }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- $gaps = append $gaps (printf "nothing is wired to its %s socket to deliver %s, so wire one and give its edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $socket (join " and " $vars) (join ", " $shape)) -}}
+    {{- end }}{{ end -}}
+    {{- if $gaps }}{{ fail (printf "core/observability/thanos-query %q composes its connection settings from variables its edges deliver on its inject pipe, but %s" .context.instance_id (join "; and " $gaps)) }}{{ end -}}
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # Query holds no durable state — it reads through the Store Gateway — so the
+    # default stateless form (a Deployment on the helm provider) is correct: no
+    # form: stateful, no persistentTemplate volume, no PVC.
+    replicas: 1
+    containers:
+      main:
+        image: "quay.io/thanos/thanos:{{ .infra.engine_version }}"
+        # `thanos query` answers PromQL and fans out over the StoreAPI. The Store
+        # Gateway identity resolved from the `store` uses-edge arrives on the
+        # inject pipe (.context.inject.env) and composes the --endpoint address.
+        # With infra.external_base_url set, --alert.query-url carries it: the
+        # base of the link the web interface writes beside every rule and
+        # alert, back to its own query page. Where the address carries a path,
+        # --web.external-prefix carries that path, so the links, asset paths
+        # and redirects of the web interface's own pages follow the address
+        # the ingress serves them under. Query would otherwise also move its
+        # API and web interface under that path, so --web.route-prefix=/ keeps
+        # them at the root, where every consumer composing its address from
+        # provides reaches them; the probes below are served at the root
+        # either way. Unset, none of these flags is emitted.
+        args:
+          - query
+          - --http-address
+          - "0.0.0.0:{{ .infra.http_port }}"
+          - --grpc-address
+          - "0.0.0.0:{{ .infra.grpc_port }}"
+          - --endpoint
+          - "{{ $env.THANOS_STORE_HOST }}:{{ $env.THANOS_STORE_PORT }}"
+    {{- with .infra.external_base_url }}
+          - --alert.query-url
+          - "{{ . }}"
+    {{- $u := urlParse . }}
+    {{- if and $u.host $u.path (ne $u.path "/") }}
+          - "--web.external-prefix={{ $u.path }}"
+          - --web.route-prefix=/
+    {{- end }}
+    {{- end }}
+        ports:
+          http: {{ .infra.http_port }}
+          grpc: {{ .infra.grpc_port }}
+        # Thanos serves /-/ready and /-/healthy on its HTTP port. An http probe
+        # is sent to the container port whose name sorts first, which here is
+        # `grpc`, so both probes run the wget of the image's busybox against the
+        # HTTP port instead; it fails on an error answer and when nothing
+        # answers. No start-up time is documented; the liveness probe waits
+        # 10 s before its first check.
+        health:
+          ready:
+            exec:
+              - wget
+              - "-q"
+              - "--spider"
+              - "http://127.0.0.1:{{ .infra.http_port }}/-/ready"
+            periodSeconds: 10
+            timeoutSeconds: 5
+          live:
+            exec:
+              - wget
+              - "-q"
+              - "--spider"
+              - "http://127.0.0.1:{{ .infra.http_port }}/-/healthy"
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          http: {{ .infra.http_port }}

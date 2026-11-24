@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Release
+metadata:
+  name: k8s-helm-synth
+  environment: production
+  version: "1.0.0"
+spec:
+  aggregate: aggregate
+  manifest: manifest-helm-synth
+  boundaries:
+    app:
+      directory: app
+      components:
+        web:
+          infra:
+            port: 8080
+        proxy:
+          # Operational sizing owned by the operator. Set explicitly so the
+          # synthesized Deployment renders without relying on schema defaults.
+          infra:
+            port: 8080
+            engine_version: "1.27.5-alpine"
+            compute:
+              cpu: 100m
+              memory: 128Mi

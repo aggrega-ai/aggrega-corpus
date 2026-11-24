@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Manifest
+metadata:
+  name: monitoring-manifest
+  version: "1.0.0"
+  description: >
+    Ops mapping. The features.annotations binding expands the `monitoring`
+    annotation into a core/prometheus-exporter attachment per component, routing
+    the operator scrape knobs — interval, port, and path — into the feature's
+    infra pillar. The bound Feature's FeatureRecipe version is declared in
+    features.type alongside it.
+spec:
+  mappings:
+    components:
+      type:
+        example/compute/service:1.0.0: helm/service:1.0.0
+    features:
+      type:
+        core/prometheus-exporter: helm/prometheus-exporter:1.0.0
+      annotations:
+        feature.aggrega.ai/monitoring:
+          feature: core/prometheus-exporter
+          maps:
+            infra:
+              - interval
+              - port
+              - path

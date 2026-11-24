@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Manifest
+metadata:
+  name: manifest-helm-synth
+  version: "1.0.0"
+  description: >
+    Ops mapping for the Kubernetes target backed by synthesized manifests. The
+    object store, Store Gateway, and Query types are realized by their synth helm
+    Recipes — the object store as a SeaweedFS StatefulSet with a persistent
+    volume, the Store Gateway and Query as stateless Deployments. The module
+    attaches the core/referenced-secret credential Feature to the object store's
+    two key slots and to the key pair the Store Gateway's connection to the
+    object store carries, so the Feature is mapped here too: bound to
+    k8s-secret-from-parameter, it reads each of the module's two key parameters
+    as the value itself and emits a Secret carrying it, which suits an
+    evaluation stack running on the module's development defaults. Recipe
+    selection at build time is by component type against the loaded catalog.
+spec:
+  mappings:
+    components:
+      type:
+        core/storage/s3-object-store:1.0.0: helm/s3-object-store:1.0.0
+        core/observability/thanos-store:1.0.0: helm/thanos-store:1.0.0
+        core/observability/thanos-query:1.0.0: helm/thanos-query:1.0.0
+    features:
+      type:
+        core/referenced-secret:1.0.0: helm/k8s-secret-from-parameter:1.0.0

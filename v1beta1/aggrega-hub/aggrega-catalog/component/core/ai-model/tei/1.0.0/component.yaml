@@ -1,0 +1,216 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/ai-model/tei
+  version: 1.0.0
+  description: >
+    Text Embeddings Inference running in-cluster as a self-hosted embedding
+    server. A Recipe synthesizes the runtime directly: a weights-pull
+    initContainer resolves the model pointer into a model-cache volume the
+    serving container mounts, and a ClusterIP Service fronts the embeddings API.
+    The model value is a deterministic pointer resolved at pod start, never
+    fetched at compile time. Exports its host, port, endpoint, model, and
+    protocol to consumers via the uses topology, so a consumer reaches the
+    embedding endpoint without hardcoding it.
+
+    Each Recipe publishes where Prometheus finds the server's metrics: one
+    address as `metrics_endpoint`, or, while the Kubernetes realization runs
+    more than one replica, the Service a scraper discovers every replica
+    behind. At the default image tag the api_key slot's key guards them too, so
+    while that slot is filled a scrape presents the key on its connection's
+    `credential` slot. On a cluster running the Prometheus Operator,
+    `core/prometheus-exporter` attached with its port set to `http` emits a
+    ServiceMonitor for it instead.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: ai-model
+    model.aggrega.ai/capability: embedding
+    # Model API: TEI's OpenAI-compatible embeddings route answers at the
+    # endpoint published here, under the /v1 path it carries; the server's
+    # other routes, its own embed and rerank among them, sit outside that
+    # path.
+    model.aggrega.ai/api: openai
+    component.aggrega.ai/hosting: self-hosted
+    component.aggrega.ai/upstream-licensing: osi-approved
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # Self-inject allowlist: the component may inject its own provides keys into
+  # the env delivery mechanism.
+  inject: [env]
+  featuresSchema:
+    # Optional model-registry pull credential for gated model weights. When a
+    # credential is attached here, the Recipe delivers it to the
+    # weights-pull initContainer as an environment variable; when unattached,
+    # weights are pulled anonymously, byte-identically to a Recipe with no slot.
+    model_pull_token:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      description: "Optional model-registry pull credential for gated model weights. When attached, the weights-pull initContainer receives it as an environment variable; unattached, weights are pulled anonymously."
+    # The key the server requires of its callers. When a credential is attached
+    # here, every Recipe delivers it to the serving container as API_KEY, the
+    # variable Text Embeddings Inference reads its key from at startup, and the
+    # server then answers a request only when its Authorization header carries
+    # that key as a bearer token. At the release the default image tag runs the
+    # check covers the health route too, so the Kubernetes realization probes
+    # readiness by opening the serving port instead while the key is set. The
+    # server holds one key and compares it exactly, so it cannot tell one
+    # caller from another. Unattached, the server checks no key,
+    # byte-identically to a Recipe with no slot.
+    api_key:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      description: "Optional key the server requires of every caller. When attached, the Recipe delivers it as API_KEY, the variable Text Embeddings Inference reads at startup, and each request must then carry it as a bearer token in the Authorization header. The server checks this one key, so every caller must present the same key. Unattached, the server requires none."
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate. `model` is
+      # the deterministic weights pointer (a Hugging Face model id); the runtime
+      # resolves it at pod start.
+      $ref: "BaseComponents#/schemas/BaseModelParameter"
+      properties:
+        pooling: { type: string, enum: [cls, mean], default: cls }
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 8080
+        description: Server listen port for the embeddings API. Most operators should omit this and let the Recipe assign the default (8080).
+      engine_version:
+        type: string
+        default: "cpu-1.5"
+        description: Text Embeddings Inference runtime image tag. Selects the image tag on the synthesized serving container only. This runtime's serving image ships no download tool, so the weights-pull container runs a separate image that the Recipe pins and this knob does not move.
+      replicas:
+        type: integer
+        min: 1
+        default: 1
+        description: Number of serving replicas. Each replica holds its own model-cache volume and pulls the weights independently.
+      min_replicas:
+        type: integer
+        min: 1
+        description: Lower bound for the replica count when horizontal autoscaling is configured. Declared ahead of rendering — the synth recipes serve a fixed replica count and do not yet emit an autoscaler; set it to record the intended lower bound.
+      max_replicas:
+        type: integer
+        min: 1
+        description: Upper bound for the replica count when horizontal autoscaling is configured. Declared ahead of rendering — the synth recipes serve a fixed replica count and do not yet emit an autoscaler; set it to record the intended upper bound.
+      compute:
+        cpu:
+          type: string
+          default: "1"
+        memory:
+          type: string
+          default: 4Gi
+      model_cache:
+        type: object
+        description: Per-replica model-weights cache volume. Sized for the pulled model; each serving replica gets its own claim.
+        properties:
+          size:
+            type: string
+            default: 20Gi
+          class:
+            type: string
+      model_artifact:
+        type: string
+        description: Optional OCI reference to the model weights, an alternative weights source to the Hugging Face model id in values.model. A deterministic pointer the runtime resolves at pod start; the compiler never fetches it. Declared ahead of rendering — the synth recipes resolve weights from values.model and do not yet consume this pointer.
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+      gpu:
+        type: object
+        description: Optional GPU scheduling for the serving container. When set, the Recipe requests GPUs as the extended resource nvidia.com/gpu and, when a runtime class is named, schedules the pod under it. Requires a GPU-capable cluster and, for runtime_class, a matching RuntimeClass configured in the cluster. Omit the whole object to serve on CPU.
+        properties:
+          count:
+            type: integer
+            min: 1
+            description: Number of GPUs requested for the serving container, delivered as the extended resource nvidia.com/gpu. Set this to enable GPU serving; omit to serve on CPU.
+          runtime_class:
+            type: string
+            description: Name of the RuntimeClass selecting the GPU-enabled container runtime (for example nvidia). Omit to use the cluster default runtime.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      # endpoint and model are the family contract a consumer reads; host, port,
+      # and protocol expose the raw in-cluster serving location.
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name of the Service fronting the embedding server. A
+          consumer that composes its own address dials this name; one that
+          does not reads `endpoint` instead.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port that Service accepts embedding requests on. It follows the
+          port an operator set in the Release, so a consumer reads it rather
+          than assuming a default.
+      endpoint:
+        type: string
+        required: true
+        description: >
+          Full base URL of the embeddings API, with the host, the port and the
+          API path already composed. A consumer hands it to a client library
+          as its base URL.
+      model:
+        type: string
+        required: true
+        description: Name a request must ask this server for, which is the model whose weights it loaded rather than a provider catalogue name.
+      protocol:
+        type: string
+        description: URL scheme to reach `host` and `port` over, for a consumer composing its own address rather than reading `endpoint`.
+      # Where Prometheus finds the server's own metrics: /metrics on the port
+      # the embeddings API is served on. At the release the default image tag
+      # runs, the key attached to the api_key slot guards every route of that
+      # port, /metrics included, so while the slot is filled a scrape presents
+      # the key as a bearer token, on its connection's credential slot;
+      # unattached, a scrape presents nothing. That holds for every replica a
+      # scraper discovers as for the one address. A Recipe publishes exactly
+      # one of two shapes and leaves the other empty:
+      #   - metrics_endpoint, one address, where one address reaches all of the
+      #     server: the Kubernetes realization while infra.replicas is 1, and
+      #     compose, which runs one instance whatever the replica count says;
+      #   - metrics_service, metrics_service_port and metrics_path, where the
+      #     Kubernetes realization runs more than one replica: its Service
+      #     balances across them, so one address would reach a single replica
+      #     per scrape, and a scraper instead discovers every endpoint behind
+      #     that Service.
+      # None of the keys carries a namespace: a scraper reads where the target
+      # runs from its own connection.
+      metrics_endpoint:
+        type: string
+        description: >
+          The full address Prometheus scrapes this component's metrics at —
+          scheme, host, port and path, `http://<host>:<port>/metrics`, on the
+          port the embeddings API is served on. At the default image tag the
+          api_key slot's key guards it, so while that slot is filled a scrape
+          presents the key on its connection's `credential` slot. Empty while
+          the Kubernetes realization runs more than one replica, which then
+          publishes `metrics_service` instead.
+      metrics_service:
+        type: string
+        description: >
+          Name of the Service every replica's metrics sit behind, for a scraper
+          that discovers each endpoint of that Service rather than scraping
+          one address. Set by the Kubernetes realization while infra.replicas
+          is above one, beside `metrics_service_port` and `metrics_path`; empty
+          otherwise.
+      metrics_service_port:
+        type: string
+        description: >
+          Name of the port of `metrics_service` that carries the metrics,
+          `http`. Set and empty together with `metrics_service`.
+      metrics_path:
+        type: string
+        description: >
+          Path the metrics are served at, `/metrics`, published beside
+          `metrics_service`. Empty where the server publishes
+          `metrics_endpoint`, which carries its own path.

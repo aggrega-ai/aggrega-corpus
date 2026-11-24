@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Release
+metadata:
+  name: terraform-rds-module
+  environment: production
+  version: "1.0.0"
+spec:
+  aggregate: aggregate
+  manifest: manifest
+  boundaries:
+    infra:
+      directory: infra
+      components:
+        db:
+          # The Component declares root_password as a required slot: a build
+          # halts while nothing binds it. On a managed RDS instance the engine
+          # generates and rotates the master password itself, so the operator
+          # delegates the slot to the engine rather than filling it with a
+          # credential: nothing is written here and nothing is rendered for it.
+          # The directive that turns engine management on lives in the vendored
+          # module the Recipe copies, which is also why this attachment
+          # configures nothing.
+          #
+          # Backup is an attachment too. With none, RDS keeps the instance's
+          # automated backups for 7 days; this one keeps each for 14. The
+          # Recipe passes the retention to the module as one of its inputs, so
+          # the FeatureRecipe the Manifest binds for it renders nothing either.
+          features:
+            root_password:
+              type: core/generated-secret
+            backup:
+              type: core/backup
+              infra:
+                retention_days: 14
+          infra:
+            engine_version: "11.4"
+            storage:
+              size: 100Gi
+              type: gp3
+            ha:
+              enabled: true
+              read_replicas: 0
+            # The Recipe reads one provider-specific override: subnet_group,
+            # the name of the RDS DB subnet group this instance is placed in.
+            # The group is operated outside this deployment and its name differs
+            # per environment, so the operator states it here rather than the
+            # developer stating it in the Aggregate. It has no default, so
+            # omitting it halts the build rather than planning against the
+            # wrong network.
+            overrides:
+              subnet_group: production-private-db-subnets

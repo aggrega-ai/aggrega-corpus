@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: bedrock
+  version: 1.0.0
+  description: >
+    Amazon Bedrock's managed model API as a reference realization: no compute runs in-cluster. The compiler carries the operator-supplied regional endpoint to consumers through the injection contract; no service runs. No credential is delivered by this recipe: consumers authenticate with ambient AWS IAM (for example EKS IRSA) or inject their own credentials.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: compose
+  implements: core/ai-model/bedrock:1.0.0
+  # The endpoint is operator-supplied (infra.endpoint) and single-sourced
+  # into both provides and the workload below.
+  provides:
+    endpoint: "{{ .infra.endpoint }}"
+    model: "{{ .values.model }}"
+  assertions:
+    # The Bedrock runtime host carries the region, and the region is the
+    # operator's choice, so no address exists for the catalog to hold as a
+    # default: the Release names the endpoint of the region it uses.
+    endpoint_supplied: >-
+      {{- if not (optional .infra "endpoint" "") -}}
+      {{- fail "this realization reaches the Amazon Bedrock runtime of a region the operator chooses, and its host carries that region, so the Release supplies the address and the catalog holds no default: set infra.endpoint in the Release to the Bedrock runtime endpoint of that region (bedrock-runtime.<region>.amazonaws.com)" -}}
+      {{- end -}}
+  workload: |
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    form: reference
+    endpoint: "{{ .infra.endpoint }}"

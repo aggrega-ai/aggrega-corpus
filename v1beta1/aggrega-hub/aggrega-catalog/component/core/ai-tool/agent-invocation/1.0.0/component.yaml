@@ -1,0 +1,296 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/ai-tool/agent-invocation
+  version: 1.0.0
+  # metadata.license carries the SPDX identifier of the software a Component
+  # packages, and this Component packages none: it declares a delegation
+  # capability over an agent-to-agent protocol, reaching whichever agent is
+  # wired to it, and the image serving the delegation is named by
+  # the Release. There is no upstream product whose licence could be
+  # stated, which is the same fact component.aggrega.ai/upstream-licensing
+  # records as not-applicable.
+  #
+  # A client_secret is read beside the client_id and the optional audience
+  # the Release sets on its connection, and is sent to the token_url or the
+  # oidc_discovery_url the agent publishes; the client_secret slot and those
+  # two infra keys describe each.
+  description: >
+    A tool letting one agent delegate a step to another over an agent-to-agent
+    protocol, A2A by default: the caller waits synchronously for a result,
+    asynchronously for a handle it polls, or not at all, fire-and-forget. Its
+    required agent socket resolves the target by topology, not prompt. Marked
+    mutating: a delegated agent may act in the world. Realized on Kubernetes
+    as a Knative Service scaled to zero between calls yet admitting each, it
+    publishes a host, port, endpoint and protocol for a consumer to wire to.
+    The catalog pins no image, so nothing renders until the Release sets
+    `infra.image`. The agent's address reaches the tool's code under default
+    variable names; an `inject:` block on the connection delivers instead, as
+    variables or files, the names that code reads. The component's own
+    `inject:` block adds `env` and `file` entries beside them, and one reading
+    a tool value alone replaces that value's default name.
+
+    The connection may hold a credential, presented under the agent's
+    published credential_header, its Secret holding the whole value: an API
+    key in a header or cookie, or an HTTP scheme such as Bearer or Basic; a
+    client_secret, for the OAuth 2.0 client-credentials grant, directly or
+    through OpenID Connect; and, for mutual TLS, a client_certificate,
+    mounted as files. A server_ca, also mounted, names the agent's server
+    certificate authority. The build halts on a connection to an agent labelled
+    managed with none of credential, client_secret, client_certificate or
+    unauthenticated: true, and on a credential or client_secret to one
+    labelled external publishing protocol http; to an agent inside the
+    Release, http carries the credential or token unencrypted on the cluster
+    network.
+  labels:
+    component.aggrega.ai/type: function
+    component.aggrega.ai/category: ai-tool
+    tool.aggrega.ai/impact: mutating
+    component.aggrega.ai/upstream-licensing: not-applicable
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # The mechanisms the developer's own inject block on the component may name:
+  # env and file, the two its realization delivers, as it renders no command
+  # line. Each env entry reaches the container under the name the developer
+  # gives it and each file entry at the path it gives. An entry reading one of
+  # the tool's own values alone replaces that value's default name, the
+  # AGENT_TOOL_* variable the realization otherwise delivers it under; an entry
+  # reading it beside another value, or beside infra, metadata or the
+  # component's identity, replaces nothing.
+  inject: [env, file]
+
+  usesSchema:
+    # The agent the tool delegates to. A connection writing no inject block
+    # hands the tool's code the agent's address as AGENT_TOOL_TARGET_ENDPOINT,
+    # AGENT_TOOL_TARGET_HOST, AGENT_TOOL_TARGET_PORT, AGENT_TOOL_TARGET_PROTOCOL
+    # and AGENT_TOOL_TARGET_AGENT_CARD_URL, each where the agent publishes it,
+    # with AGENT_TOOL_TARGET_CREDENTIAL_HEADER beside a credential and
+    # AGENT_TOOL_TARGET_TOKEN_URL, AGENT_TOOL_TARGET_OIDC_DISCOVERY_URL and
+    # AGENT_TOOL_TARGET_SCOPES beside a client_secret; only one such connection
+    # is accepted, and the agent must publish an endpoint or a host. A connection
+    # writing an inject block receives instead what it dictates, as variables
+    # (env) or as files (file) at the paths it names, since the image is the
+    # tool's own code: any key the agent publishes, under the names that code
+    # reads. What the slots below deliver stays on every connection, and each
+    # slot is held on one target_agent connection at most. Between them the
+    # slots do not reach a key in the query string, an HTTP scheme answering a
+    # challenge, such as Digest, or an OAuth 2.0 grant other than client
+    # credentials.
+    target_agent:
+      selector: "component.aggrega.ai/category=ai-agent"
+      required: true
+      inject: [env, file]
+      # A statement about this connection's target, authored on the connection:
+      # the agent it reaches takes no credential. It changes nothing this
+      # component renders.
+      valueSchema:
+        unauthenticated:
+          type: boolean
+          default: false
+          description: Declares that the agent this connection reaches takes no credential, so a connection carrying none is intended rather than an omission. It changes nothing this component renders.
+      # The caller's registration at the agent's authorization server, which the
+      # operator sets per connection in the Release: OAuth 2.0 issues each
+      # caller a client id beside its client secret, and the client id is not a
+      # secret, so it is a plain setting rather than a slot. Both keys are read
+      # only beside client_secret: the Recipe halts on either one set on a
+      # connection holding none, and on a client_secret with no client_id.
+      infraSchema:
+        client_id:
+          type: string
+          description: The client id the agent's authorization server issued to this tool, sent with client_secret when the tool's container obtains a token. Delivered as AGENT_TOOL_TARGET_CLIENT_ID. A client_secret needs it beside it, and the build halts on one set on a connection holding no client_secret.
+        audience:
+          type: string
+          description: The audience or resource the token is requested for, where the agent's authorization server asks for one beside the scopes the agent publishes. Delivered as AGENT_TOOL_TARGET_AUDIENCE. The build halts on one set on a connection holding no client_secret.
+      # The credential the tool presents to the agent is held on the connection
+      # it is presented on, so each connection names its own fill. Optional (an
+      # agent may take no credential: an A2A agent's card need declare no
+      # security scheme); transparent (inject: [env]) because the Recipe
+      # delivers it into the tool's own container; secret-kind-pinned so a
+      # referenceable Secret fills it. The container presents the credential,
+      # token and certificate, which no build can check.
+      featuresSchema:
+        credential:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [env]
+          description: "Optional credential the tool presents to the agent this connection reaches, under the request header that agent publishes as credential_header. When attached, the Recipe delivers it to the tool's container as AGENT_TOOL_TARGET_CREDENTIAL, a Kubernetes secretKeyRef to the Secret the credential publishes, and, on a connection writing no inject block, the header as AGENT_TOOL_TARGET_CREDENTIAL_HEADER where the agent publishes one; a credential publishing no Secret name and data key halts the build, and so does one on a connection to an agent labelled component.aggrega.ai/hosting external that publishes protocol http, to which it would travel unencrypted. An agent inside the Release that publishes protocol http receives it unencrypted on the cluster network. The Secret's value is the whole header value, delivered unchanged for the container to present as it is, with no prefix added: the key, for an API key the agent's card places in a header; the cookie's name, \"=\" and the key, under a credential_header of Cookie, for one it places in a cookie; and the scheme's name, a space and the credential, as \"Bearer \" and a token, for an HTTP scheme whose value is fixed, such as Bearer or Basic. An API key the card places in the query string, an HTTP scheme whose value answers a challenge from the agent, such as Digest, and two header credentials required together are not covered; OAuth 2.0 and OpenID Connect take client_secret, and mutual TLS client_certificate. Fill it with core/referenced-secret mapped to helm/k8s-existing-secret, naming a Secret the namespace already holds: a realization that names its Secret after the tool, such as k8s-external-secret or k8s-secret-from-parameter, halts the build here, because the Recipe renders its Service from an artifacts template and gives the tool no rendered name. Unattached, the tool runs without an injected credential."
+        # The secret half of the caller's OAuth 2.0 registration. It is not
+        # presented to the agent, which is why it is not the credential slot:
+        # the tool's container sends it, with client_id, to the authorization
+        # server at the token_url the agent publishes, or at the token endpoint
+        # read from its oidc_discovery_url, runs the client-credentials grant,
+        # and presents the token it is given on each A2A request. OAuth 2.0
+        # tells a server not to issue a refresh token for this grant, so
+        # refreshing is running the grant again before the token expires. All
+        # of that is the container's, from the Release's image, and nothing in a
+        # build can observe it. An agent whose card requires two schemes
+        # together is reached with both slots filled, each delivered under its
+        # own variables.
+        client_secret:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [env]
+          description: "Optional client secret the tool's container sends, with client_id, to the agent's authorization server to obtain an access token by the OAuth 2.0 client-credentials grant, at the token_url the agent publishes or the token endpoint its oidc_discovery_url names. Delivered as AGENT_TOOL_TARGET_CLIENT_SECRET, a Kubernetes secretKeyRef to the Secret it publishes, beside AGENT_TOOL_TARGET_CLIENT_ID and AGENT_TOOL_TARGET_AUDIENCE and, on a connection writing no inject block, AGENT_TOOL_TARGET_TOKEN_URL, AGENT_TOOL_TARGET_OIDC_DISCOVERY_URL and AGENT_TOOL_TARGET_SCOPES, each where it has a value. Obtaining, caching and refreshing the token, and presenting it on each request, are the container's. The other OAuth 2.0 flows a card may declare, authorization code, device code, implicit and password, are not covered. The build halts on a client_secret with no client_id, on one wired to an agent publishing neither token_url nor oidc_discovery_url, on either address when it is not an https URL naming a host or carries a user name or password, and on one wired to an agent labelled component.aggrega.ai/hosting external that publishes protocol http, to which the token obtained with it would travel unencrypted. An agent inside the Release that publishes protocol http receives the token unencrypted on the cluster network. Fill it as credential is filled; it may sit beside credential on one connection."
+        # The certificate the tool's container presents in the TLS handshake to
+        # an agent whose card declares A2A's mtls scheme. That scheme names no
+        # certificate, issuer or authority: the caller's certificate is agreed
+        # with the agent's party out of band, so whoever deploys keeps it in a
+        # Secret the namespace already holds and the connection names that
+        # Secret.
+        # inject: [file], because the material reaches the tool's own container
+        # as files the Recipe mounts from the Secret, not as a variable's value;
+        # a realization delivering it through a Workload entry is held to
+        # as: file. The Service names only the Secret, so neither the
+        # certificate nor its key enters a rendered file. Presenting the
+        # certificate, and reading the files again when a renewal updates them,
+        # are the container's, from the Release's image, and no build observes
+        # either. It counts as the connection's credential for a managed agent,
+        # since the certificate is what that agent is presented.
+        client_certificate:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [file]
+          description: "Optional client certificate the tool's container presents in the TLS handshake to an agent whose card requires mutual TLS. Its Secret holds tls.crt, the certificate, and tls.key, its private key, as a kubernetes.io/tls Secret does. The Recipe mounts the whole Secret read-only into the tool's container and delivers AGENT_TOOL_TARGET_CLIENT_CERT_FILE and AGENT_TOOL_TARGET_CLIENT_KEY_FILE naming the two files; presenting the certificate, and reading the files again when a renewal updates them, are the container's. The build halts on a client_certificate publishing no Secret name, on one wired to an agent publishing protocol http, and on one wired to an agent publishing no protocol and an endpoint that is not an https URL. Fill it with core/referenced-secret mapped to helm/k8s-existing-secret, naming a Secret the namespace already holds; the data key it publishes is not read, since the whole Secret is mounted. It may sit beside credential or client_secret on one connection."
+        # The authority the tool's container checks the agent's server
+        # certificate against, for an agent whose certificate an authority the
+        # image does not already trust signs: the card names no authority, so
+        # it is obtained out of band, as the client certificate is.
+        # It is a slot of its own rather than a third file beside the client
+        # certificate, so the build delivers its path exactly when one is held,
+        # and so the ca.crt a certificate issuer writes beside a client
+        # certificate — the authority of the client's own certificate, not of
+        # the agent's server — is never read as this one. It serves a
+        # connection holding any credential, or none. It is
+        # secret-kind-pinned because a referenceable Secret is what the Recipe
+        # mounts, and so marked sensitive as every secret-kind slot is, though
+        # the authority's certificate it holds is not itself secret.
+        # inject: [file], for the reason client_certificate gives.
+        server_ca:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [file]
+          description: "Optional authority the tool's container checks the agent's server certificate against, where the image does not already trust the authority that signs it. Its Secret holds ca.crt: the agent's server authority, not the issuer of a client certificate, so a ca.crt written beside a client certificate is not this one. The Recipe mounts the whole Secret read-only into the tool's container and delivers AGENT_TOOL_TARGET_SERVER_CA_FILE naming the file; checking the agent's certificate against it is the container's. It serves a connection holding any credential, or none. The build halts on a server_ca publishing no Secret name, on one wired to an agent publishing protocol http, and on one wired to an agent publishing no protocol and an endpoint that is not an https URL. Fill it as client_certificate is filled."
+  schema:
+    # values — Developer Intent
+    # Filled by the Developer in the Aggregate.
+    values:
+      $ref: "BaseComponents#/schemas/BaseToolParameter"
+      properties:
+        protocol: { type: string, default: a2a }
+        execution_mode: { type: string, enum: [synchronous, asynchronous, fire_and_forget], default: synchronous }
+      required: [protocol, execution_mode]
+
+    # infra — Operational Sizing
+    # Filled by Ops in the Release. Developer never sees this.
+    infra:
+      # The image carries no default because this Component wraps no upstream
+      # product: the Release names an image it already holds the right to
+      # run, its tag included. That is also why no engine_version knob appears
+      # here — the reference is supplied whole rather than assembled from a
+      # catalog-held name and an operator-held version.
+      image:
+        type: string
+        description: Container image serving the delegation over HTTP.
+      port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 8080
+        description: >
+          Port the tool's own container listens on. A consumer does not
+          necessarily connect here: the realization publishes the address
+          callers use, and a control plane that fronts the tool routes from its
+          own port to this one.
+      compute:
+        cpu:
+          type: string
+          default: 100m
+        memory:
+          type: string
+          default: 128Mi
+      min_replicas:
+        type: integer
+        min: 0
+        default: 0
+        description: >
+          Replica floor. Zero is what lets the tool run no replicas between
+          calls, which the realization reaches through its control plane.
+      max_replicas:
+        type: integer
+        min: 1
+        default: 5
+        description: Replica ceiling the realization's autoscaler may reach.
+      control_plane_present:
+        type: boolean
+        default: false
+        description: >
+          Operator affirmation that Knative Serving, the control plane the
+          realization needs, is installed in the target cluster. The build
+          halts unless this is set true, so a custom resource is never emitted
+          as an orphan into a cluster that cannot reconcile it.
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Realization-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+
+    # provides — Public API Contract
+    # Keys exported to consumers via `uses` topology edges. The realization
+    # publishes all four, so a consumer reads the tool's address off these keys
+    # rather than off anything specific to how the tool runs.
+    provides:
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name an agent calls to delegate a step to the wired
+          agent. A consumer that composes its own address dials this name; one
+          that does not reads `endpoint` instead.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port the delegation is accepted on. The realization fronts the
+          tool on the control plane's own port rather than the tool
+          container's, so a consumer reads this rather than the port an
+          operator set.
+      endpoint:
+        type: string
+        required: true
+        description: >
+          Full base URL an agent posts a delegation to, with the host and the
+          port already composed. A consumer hands it to its tool client as the
+          address it calls.
+      protocol:
+        type: string
+        description: URL scheme to reach `host` and `port` over, for a consumer composing its own address rather than reading `endpoint`.
+
+  # A connection to a target its catalog labels a managed service
+  # (component.aggrega.ai/hosting: managed) carries a credential, or says on the
+  # connection that its target takes none. The rule reads the target's labels,
+  # the connection's unauthenticated value and its secret slots, all known
+  # before a Recipe binds, so it holds whichever Recipe renders this component;
+  # a self-hosted or external target draws nothing — an agent another party
+  # runs need not check a credential, since an A2A agent's card need declare no
+  # security scheme. A client_secret counts as the connection's credential, the
+  # token the container obtains with it being what the agent is presented, and
+  # so does a client_certificate, presented in the TLS handshake. A server_ca
+  # does not: it is what the tool checks the agent with, and identifies no
+  # caller. The list names every socket of this component that declares
+  # unauthenticated.
+  assertions:
+    managed_target_needs_a_credential: >-
+      {{- range $socket := list "target_agent" -}}
+      {{- range $alias, $connection := (optional $.uses $socket dict) -}}
+      {{- $managed := eq (optional $connection.labels "component.aggrega.ai/hosting" "") "managed" -}}
+      {{- $optedOut := optional $connection.values "unauthenticated" false -}}
+      {{- $held := or (hasKey $connection.features "credential") (hasKey $connection.features "client_secret") (hasKey $connection.features "client_certificate") -}}
+      {{- if and $managed (not $held) (not $optedOut) -}}
+      {{- fail (printf "the %s connection %s of %q reaches %q, whose component.aggrega.ai/hosting label is managed, with no credential: attach one under credential, client_secret or client_certificate on that connection, or set unauthenticated: true in its values" $socket $alias $.metadata.instance_id $connection.target) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- end -}}

@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: service
+  version: "1.0.0"
+  description: >
+    A generic HTTP service on Kubernetes via the helm provider's Workload
+    synthesis: a Deployment plus a ClusterIP Service exposing an `http` port and
+    a named `metrics` port — the port core/prometheus-exporter's ServiceMonitor
+    scrapes by default.
+spec:
+  capability: helm
+  implements: example/compute/service:1.0.0
+  workload: |
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    replicas: 1
+    containers:
+      main:
+        image: "{{ optional .infra `image` `nginx:alpine` }}"
+        ports:
+          http: 8080
+          metrics: 9090
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          http: 8080
+          metrics: 9090

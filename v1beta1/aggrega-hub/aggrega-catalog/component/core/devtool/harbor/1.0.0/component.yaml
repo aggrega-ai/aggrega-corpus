@@ -1,0 +1,314 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/devtool/harbor
+  version: 1.0.0
+  # metadata.license records the licence of the wrapped product, which is a
+  # different field from the licence of this catalog file itself (the SPDX header
+  # above) and from the upstream-licensing class label below.
+  license: Apache-2.0
+  description: >
+    A Harbor container registry, declared as one component and deployed as one
+    unit: an API and token-service control plane, an OCI blob store, a web
+    console, an asynchronous worker tier, a vulnerability scanner, a relational
+    backend and a key-value cache, so the registry stands up with nothing else
+    declared beside it.
+
+    An Aggregate declaring it gets a registry container clients log in to, push
+    to and pull from, and a console to administer it, both behind the one
+    in-cluster address `provides` publishes.
+
+    Six keys and shared secrets have no default and the build halts until each
+    slot is filled: token_key, the key the token service signs with and its
+    certificate; core_secret, jobservice_secret and registry_http_secret, the
+    secrets its services authenticate to each other and sign upload state
+    with; csrf_key, the key the control plane signs request-forgery tokens
+    with; and secret_key, the key it encrypts stored credentials with. Each is
+    read from a Kubernetes Secret by name, so none reaches the rendered
+    artifact.
+
+    The passwords — the administrator's, in its slot, and the backend's and the
+    blob store's account, in `infra` — take development values the Recipe
+    states when left unattached and unset, for evaluation and development.
+    Those values are published in this catalog: a Release serving real traffic
+    replaces them.
+
+    With `values.metrics_enabled` true the Recipe turns on the Prometheus
+    metrics of the control plane, worker tier, blob store and exporter and
+    publishes their four Services as `metrics_service`; false, those keys are
+    empty. The switch also opens the blob store's debug listener — profiling,
+    execution traces and runtime variables, no caller check — to every
+    in-cluster caller.
+  labels:
+    # Stateful: durable state lives in three places — image layers and manifests
+    # on the blob store's volume, the project and user model in the backend, and
+    # the scanner's vulnerability database on its own volume. The relational
+    # backend and the key-value cache are part of the unit rather than separate
+    # components, so the registry stands up with nothing else declared beside it.
+    component.aggrega.ai/type: stateful-server
+    component.aggrega.ai/category: devtool
+    # The Recipe runs the registry as containers in the Release's own cluster,
+    # so a single posture is this component's identity. Selector-only: never
+    # stamped onto rendered output.
+    component.aggrega.ai/hosting: self-hosted
+    component.aggrega.ai/upstream-licensing: osi-approved
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  featuresSchema:
+    # Seven credential slots. Each names a secret the registry reads, and the
+    # Recipe points the running software at the attached secret BY NAME rather
+    # than copying the material, so an attached credential never appears in the
+    # rendered artifact. The selector is secret-kind-pinned but family-agnostic,
+    # so any referenceable secret may fill any of them; a fill that publishes no
+    # Secret name halts the build in the Recipe, since there is nothing to point
+    # the software at.
+    #
+    # Six are required and have no default: the token service's signing key,
+    # the three secrets the registry's services authenticate to each other and
+    # sign upload state with, the request-forgery key, and the key stored
+    # credentials are encrypted with. A key every reader of this catalog holds
+    # would let anyone mint the tokens the registry trusts, forge its requests
+    # or its services' calls, or read the credentials it stores, so a build with
+    # any of them unfilled halts naming the slot rather than falling back on one.
+    #
+    # The token signing key and its certificate. The registry's chart reads them
+    # from one Kubernetes Secret, under the data keys tls.key and tls.crt — the
+    # two keys a kubernetes.io/tls Secret holds — and mounts the key into the
+    # control plane itself, so the data key the attachment publishes is not
+    # read. No catalog Feature generates a key pair in the cluster, so the
+    # Secret is created in the namespace the registry runs in, and
+    # core/referenced-secret bound to k8s-existing-secret names it.
+    token_key:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      required: true
+      description: "Required credential holding the RSA private key the registry's token service signs its tokens with, and the certificate over that key: a Kubernetes Secret carrying the PEM key under the data key tls.key and the PEM certificate under tls.crt, as a kubernetes.io/tls Secret does. The Recipe names that Secret, so the key never appears in the rendered artifact. There is no default: the build halts when nothing fills this slot, and when the credential filling it publishes no Secret name."
+    # The chart reads this from the named Secret under the fixed data key
+    # `secret`, so the data key the attachment publishes is not read. Attach
+    # core/random-password with length 16 and key secret to have the cluster
+    # generate it.
+    core_secret:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      required: true
+      description: "Required credential holding the shared secret the control plane, the worker tier and the blob store's controller authenticate to each other with: a Kubernetes Secret carrying it under the data key secret, exactly 16 characters. The Recipe names that Secret, so the secret never appears in the rendered artifact. There is no default: the build halts when nothing fills this slot, and when the credential filling it publishes no Secret name."
+    # Attach core/random-password to have the cluster generate it, at the
+    # Feature's default length of 32, which this key needs.
+    csrf_key:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      required: true
+      description: "Required credential holding the key the control plane signs its cross-site request forgery tokens with. It must be exactly 32 characters; a shorter or longer value is refused by the control plane at start-up. The Recipe names the Secret and the data key the credential publishes. There is no default: the build halts when nothing fills this slot, and when the credential filling it publishes no Secret name and data key."
+    # The chart mounts this into the control plane from the named Secret under
+    # the fixed data key `secretKey`, so the data key the attachment publishes
+    # is not read. Attach core/random-password with length 16 and key secretKey
+    # to have the cluster generate it.
+    secret_key:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      required: true
+      description: "Required credential holding the key the control plane encrypts stored credentials with — the credentials of the upstream registries it replicates from and to: a Kubernetes Secret carrying it under the data key secretKey, exactly 16 characters. Changing it on a registry that already holds replication credentials makes those credentials unreadable, so it is set once, when the registry is first stood up. The Recipe names that Secret, so the key never appears in the rendered artifact. There is no default: the build halts when nothing fills this slot, and when the credential filling it publishes no Secret name."
+    # Attach core/random-password with length 16, which Harbor's chart documents
+    # for it, to have the cluster generate it.
+    jobservice_secret:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      required: true
+      description: "Required credential holding the shared secret the worker tier and the control plane authenticate to each other with, 16 characters as the registry's Helm chart documents it. The Recipe names the Secret and the data key the credential publishes, so the secret never appears in the rendered artifact. There is no default: the build halts when nothing fills this slot, and when the credential filling it publishes no Secret name and data key."
+    # Attach core/random-password with length 16, which Harbor's chart documents
+    # for it, to have the cluster generate it.
+    registry_http_secret:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      required: true
+      description: "Required credential holding the secret the blob store signs its upload state with, which every replica of the blob store must share, 16 characters as the registry's Helm chart documents it. The Recipe names the Secret and the data key the credential publishes, so the secret never appears in the rendered artifact. There is no default: the build halts when nothing fills this slot, and when the credential filling it publishes no Secret name and data key."
+    # The one optional slot: `required` is omitted, and with nothing attached
+    # the Recipe supplies its own development password. To replace it, attach
+    # core/random-password: the cluster generates the credential when it
+    # deploys.
+    admin_password:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      description: "Optional credential for the registry's built-in administrator account, the account the web console and the API are first administered through. Unattached, helm/harbor-chart sets its password to the development literal `Harbor12345`, which this catalog publishes, so every Release that leaves the slot unattached shares that password."
+
+  schema:
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate. The
+      # registry's projects, users and repositories are created through its own
+      # API at run time, so the component declares the registry rather than its
+      # contents, and the developer surface is correspondingly small.
+      log_level:
+        type: string
+        description: Log verbosity the registry's services run at (debug, info, warning, error or fatal). Omit to use the product's default (info).
+      # The registry's own metrics, in the Prometheus format, at /metrics on port
+      # 8001 of four of its services: the control plane, the worker tier, the
+      # blob store and the exporter. The registry's chart turns all four on with
+      # one setting, and that setting also moves the blob store's debug
+      # listener, which serves its metrics, from the pod's loopback address onto
+      # every interface of the pod, and names its port on the blob store's
+      # Service. That listener checks no caller, and beside the metrics it
+      # serves /debug/pprof, which takes a CPU profile or an execution trace on
+      # request and returns heap and goroutine dumps and the command line;
+      # /debug/vars, which returns the command line, memory statistics and the
+      # blob store's cache, proxy and notification counters; and /debug/health.
+      # It has no route that changes the registry. The chart offers no setting
+      # that turns the metrics on without moving that listener, so the value
+      # newly opens it to every in-cluster caller that reaches the pod. The
+      # control plane, the worker tier and the exporter each serve their metrics
+      # on a listener of their own that carries nothing else, bar a static
+      # landing page on the exporter's. False leaves the metrics off, the
+      # exporter not run, the debug listener on the pod's loopback address and
+      # the metrics keys unpublished.
+      metrics_enabled:
+        type: boolean
+        default: false
+        description: Turns on the registry's own metrics, in the Prometheus format at /metrics on port 8001 of the control plane, the worker tier, the blob store and the exporter, puts that port on each one's Service, and publishes the four Services for a scraper to discover as `metrics_service`, beside `metrics_service_port` and `metrics_path`; while false those keys are empty. The same setting moves the blob store's debug listener from the pod's loopback address onto every interface and names its port on the blob store's Service, newly opening it to every in-cluster caller that reaches the pod. That listener checks no caller and, beside the metrics, serves /debug/pprof (CPU profiles and execution traces on request, heap and goroutine dumps, the command line) and /debug/vars (the command line, memory statistics and runtime counters); it has no route that changes the registry. The registry's chart offers no way to turn the metrics on without it.
+
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      port:
+        type: integer
+        min: 1
+        max: 65535
+        default: 80
+        description: >
+          Port the registry's single published address accepts traffic on. It
+          sets the Service port only — the reverse proxy behind it listens on a
+          port the product fixes — so any value in range is servable, including
+          the privileged ports a registry is conventionally reached on.
+      external_base_url:
+        type: string
+        description: >
+          Externally reachable address of the registry, as assembled at the
+          ingress tier — scheme, host and, where it is not the scheme's default,
+          port, with no path; for example https://registry.example.com. The
+          registry composes from this the token-service address it returns to a
+          container client that logs in, and the push and pull commands its
+          console shows, so a client outside the cluster is sent somewhere it can
+          reach. A container client addresses a registry at the root of a host,
+          so the Recipe halts the build on an address carrying a path. Omitted,
+          the Recipe gives the registry its in-cluster address, which is correct
+          for a registry nobody reaches from outside the cluster.
+      engine_version:
+        type: string
+        default: "v2.15.2"
+        description: >
+          Harbor container image tag. The product ships every one of its service
+          images on a single tag, so this one value selects them all. Moving it
+          away from the Recipe's default is not guaranteed to match the chart the
+          Recipe pulls; move source_version with it.
+      source_version:
+        type: string
+        description: Version of the Helm chart the Recipe pulls. Changing it away from the Recipe's default does not guarantee value-mapping compatibility with the new chart.
+      compute:
+        cpu:
+          type: string
+          default: 250m
+        memory:
+          type: string
+          default: 512Mi
+      storage:
+        type: object
+        properties:
+          size:
+            type: string
+            default: 10Gi
+            description: Persistent volume size for the image layers and manifests the blob store holds. The registry's other volumes — the backend's, the cache's, the scanner's and the worker tier's log volume — take the product's own sizes.
+          type:
+            type: string
+            description: >
+              Persistent volume storage class, applied to every volume the
+              registry claims. Leave it unset to take the cluster's default
+              storage class; set it to name another class the cluster offers.
+
+      # ── Credentials written into the configuration ──────────────
+      # The credential slots above cover what the Recipe points the running
+      # software at a secret for. Everything below the Recipe writes into the
+      # configuration the Release renders instead, so a Release replaces these by
+      # setting them here. Each has a development value stated in the Recipe, and
+      # those values are published in this catalog; a Release serving real
+      # traffic replaces every one of them.
+      database_password:
+        type: string
+        description: Password for the account the control plane connects to its relational backend as. Left unset, helm/harbor-chart uses the development literal `apppass`, which this catalog publishes, so every Release that leaves it unset shares that password.
+      # These three describe ONE account — the one the control plane and the
+      # worker tier present to the blob store — written three ways, so they are
+      # set together or not at all. A Release that sets some of them halts,
+      # because a partial change leaves the blob store checking one account while
+      # the registry's own services present another, and the build would
+      # otherwise succeed over a registry that rejects every push.
+      registry_username:
+        type: string
+        default: harbor_registry_user
+        description: Account name the control plane and the worker tier present to the blob store. Set it together with registry_password and registry_htpasswd, or set none of the three.
+      registry_password:
+        type: string
+        description: Password the control plane and the worker tier present to the blob store. Set it together with registry_username and registry_htpasswd, or set none of the three. Left unset, helm/harbor-chart uses the development literal `harbor_registry_password` and a development htpasswd line in place of registry_htpasswd, both published in this catalog, so every Release that leaves the three unset shares that account.
+      registry_htpasswd:
+        type: string
+        description: >
+          The other two keys as a single htpasswd line —
+          `<registry_username>:<bcrypt hash of registry_password>` — which is the
+          form the blob store checks a presented account against. Produce it with
+          `htpasswd -nbB <username> <password>`. Set it together with the other
+          two, or set none of the three.
+
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      # One address fronts the whole registry, so there is one host to publish:
+      # one reverse proxy routes the console path to the web console and the
+      # registry and API paths to the control plane, so a consumer wires to one
+      # host and one port rather than to each service in turn.
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name of the Service fronting the whole registry. A
+          container client logs in, pushes and pulls against this name, and a
+          browser reaches the console on it.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port that Service accepts traffic on. It follows the port an
+          operator set in the Release, so a consumer reads it rather than
+          assuming a default.
+      protocol:
+        type: string
+        description: How the published address is spoken to — `http`, so a consumer composes an address on that scheme.
+      # Where a Prometheus server discovers the registry's own metrics, while
+      # values.metrics_enabled is true: four services each serve their own, so
+      # the four Services are published for a scraper to discover every endpoint
+      # behind them, rather than one address. Every key is empty while the value
+      # is false.
+      metrics_service:
+        type: string
+        description: >
+          Names of the Services the registry's metrics sit behind,
+          comma-separated — the control plane's, the blob store's, the worker
+          tier's and the exporter's, `<host>-core,<host>-registry,<host>-jobservice,<host>-exporter`
+          where `<host>` is the published host — for a scraper that discovers
+          each endpoint of those Services rather than scraping one address.
+          Published beside `metrics_service_port` and `metrics_path` while
+          values.metrics_enabled is true; empty otherwise.
+      metrics_service_port:
+        type: string
+        description: >
+          Name of the port of each of those Services that carries the metrics,
+          `http-metrics`. Set and empty together with `metrics_service`.
+      metrics_path:
+        type: string
+        description: >
+          Path the metrics are served at on that port, `/metrics`. Set and
+          empty together with `metrics_service`.

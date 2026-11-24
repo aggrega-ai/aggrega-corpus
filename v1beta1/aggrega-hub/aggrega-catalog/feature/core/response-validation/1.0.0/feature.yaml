@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Feature
+metadata:
+  name: core/response-validation
+  version: 1.0.0
+  description: >
+    Checks a model's reply passing through an AI gateway against a JSON
+    Schema before the reply reaches the caller, so an application expecting
+    structured output is not left parsing whatever came back. schema carries
+    the schema itself, written as a mapping, and a reply that does not match
+    it is refused rather than passed on. invert turns the check around and
+    refuses a reply that does match.
+
+    The schema is the attachment's, the same for every request the gateway
+    serves. Checking a reply against a schema the caller sends with its own
+    request is a different control, and not this one.
+
+    The developer attaches it in the Aggregate, writing schema and invert in
+    values; it takes no infra. No gateway in the standard library realizes
+    it: an attachment halts the build, naming why on core/gateway/agentgateway,
+    core/gateway/higress and core/gateway/traefik-hub and naming the type on
+    any other gateway, and renders nothing.
+  annotations:
+    routing.aggrega.ai/tier: "gateway"
+    security.aggrega.ai/class: "data_plane_guardrail"
+  maintainers:
+    - name: "Massimiliano Ferrero"
+      email: "m.ferrero@cognitio.it"
+spec:
+  appliesTo: "gateway.aggrega.ai/intelligence=semantic"
+  interoperability:
+    conflictsWith: []
+  schema:
+    values:
+      $ref: "BaseComponents#/schemas/BaseFeatureParameter"
+      properties:
+        # The schema itself, inline, as the gateways that check a reply take
+        # it: one reads it as a JSON object and another as JSON text, so a
+        # realization writes this mapping in whichever form its gateway reads.
+        # Those gateways check the text of the reply's first choice, taking the
+        # JSON it holds. Each realization says what its gateway checks, and what
+        # it does with a reply holding no JSON at all.
+        #
+        # A refused reply never reaches the caller, who receives an error in
+        # its place; each realization names the status its gateway answers
+        # with. A realization whose gateway cannot check a streamed reply
+        # before passing it on refuses a request asking for one, rather than
+        # passing the reply on unchecked.
+        schema:
+          type: object
+          additionalProperties: true
+          description: "The JSON Schema a reply must match, written as a mapping. A reply that does not match it is refused before it reaches the caller."
+        invert:
+          type: boolean
+          default: false
+          description: "Whether the check is turned around. Off, the default, a reply that does not match schema is refused. On, a reply that matches schema is refused, and one that does not is passed on."
+      required: [schema]

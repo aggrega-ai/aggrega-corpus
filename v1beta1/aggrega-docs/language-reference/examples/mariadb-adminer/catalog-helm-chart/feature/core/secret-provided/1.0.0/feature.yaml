@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Feature
+metadata:
+  name: core/secret-provided
+  version: 1.0.0
+  description: >
+    A secret value the developer delivers explicitly. Unlike core/secret-value
+    (which the FeatureRecipe injects directly into the component pipe), this
+    credential exposes its value as a `provides` key, so the developer dictates
+    delivery with an inject: block on the attachment, allowed only on a
+    transparent featuresSchema slot. The
+    feature.aggrega.ai/kind: secret label names what it produces; it is attached
+    on the features: pillar like any other Feature.
+  labels:
+    feature.aggrega.ai/kind: secret
+  maintainers:
+    - name: "Massimiliano Ferrero"
+      email: "m.ferrero@cognitio.it"
+spec:
+  schema:
+    values:
+      origin:
+        type: string
+        required: true
+        sensitive: true
+        description: >
+          The secret value, exposed to the attachment as the `value` provides
+          key. Inline for local development; a production FeatureRecipe sources
+          it from a secret store instead.
+    provides:
+      # The output contract every FeatureRecipe implementing
+      # core/secret-provided publishes. It is the secret material itself, not a
+      # locator, so it carries the sensitivity declaration: an inject key whose
+      # `from:` names it is delivering secret material.
+      value:
+        type: string
+        sensitive: true
+        description: >
+          The secret material, exposed for the attachment's inject block to
+          route to a delivery target on the consuming component.

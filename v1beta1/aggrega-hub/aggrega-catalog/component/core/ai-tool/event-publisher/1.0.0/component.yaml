@@ -1,0 +1,185 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/ai-tool/event-publisher
+  version: 1.0.0
+  # metadata.license carries the SPDX identifier of the software a Component
+  # packages, and this Component packages none: it declares an event-publishing
+  # capability whose broker is a component wired onto its socket. There is
+  # no upstream product whose licence could be stated, which is the same fact
+  # component.aggrega.ai/upstream-licensing records as not-applicable.
+  description: >
+    A tool that lets an agent emit an event rather than call for a result, so a
+    deployment can hand work off to whatever consumes the stream instead of
+    waiting on a reply. The developer names the topic the event is published
+    to, and may reference a schema the payload is expected to satisfy. It
+    declares a required socket onto a message broker the deployment runs, so
+    the broker it publishes to is resolved in the topology. Marked mutating:
+    a published event is visible to its consumers and cannot be withdrawn.
+    Realized on Kubernetes as a Knative Service: the control plane admits a
+    call while the revision runs no replicas and sets the replica count from
+    the concurrency it observes, so the tool occupies no compute between the
+    calls that invoke it. It publishes the host, port, endpoint and protocol
+    an agent reaches it on. The catalog pins no image, so nothing renders
+    until the Release sets `infra.image`. The broker's address reaches the
+    tool's code under default variable names; an `inject:` block on the
+    connection delivers instead, as variables or files, the names that code
+    reads. A broker serving TLS publishes a protocol saying so, and the
+    connection's `server_ca` slot gives the tool the authority to check it
+    against, as a mounted file.
+    The component's own `inject:` block takes `env` and `file` entries too, and
+    one reading a value of the tool alone replaces that value's default variable
+    name.
+  labels:
+    component.aggrega.ai/type: function
+    component.aggrega.ai/category: ai-tool
+    tool.aggrega.ai/impact: mutating
+    component.aggrega.ai/upstream-licensing: not-applicable
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # The mechanisms the developer's own inject block on the component may name:
+  # env and file, the two its realization delivers, as it renders no command
+  # line. Each env entry reaches the container under the name the developer
+  # gives it and each file entry at the path it gives. An entry reading one of
+  # the tool's own values alone replaces that value's default name, the
+  # EVENT_TOOL_* variable the realization otherwise delivers it under; an entry
+  # reading it beside another value, or beside infra, metadata or the
+  # component's identity, replaces nothing.
+  inject: [env, file]
+
+  usesSchema:
+    # The tool delivers the broker's host, port and protocol into its own
+    # container, so the socket accepts a messaging component that runs as a
+    # server and publishes those coordinates. The type requirement is what
+    # keeps an external messaging service — one the deployment calls rather
+    # than runs, and which publishes a different contract — from satisfying
+    # the socket: such a target resolves no address the tool could publish
+    # to, so the build halts on the selector rather than emitting a container
+    # whose broker coordinates are blank. An operator reconciling brokers runs
+    # as a worker and publishes no broker address, so the selector refuses it
+    # too. A messaging server that publishes no host or port still matches it;
+    # the Recipe halts on a connection to it that writes no inject block,
+    # naming the connection, the target and the key the target does not
+    # publish.
+    # A connection writing no inject block hands the tool's code the broker's
+    # host and port as EVENT_TOOL_BROKER_HOST and EVENT_TOOL_BROKER_PORT, and
+    # its protocol as EVENT_TOOL_BROKER_PROTOCOL where the broker publishes one;
+    # only one such connection is accepted. A connection writing an inject block
+    # receives instead what it dictates, as variables (env) or as files (file)
+    # at the paths it names, since the image is the tool's own code: any key the
+    # broker publishes, under the names that code reads.
+    target_messaging:
+      selector: "component.aggrega.ai/category=messaging, component.aggrega.ai/type in (server, stateful-server)"
+      required: true
+      inject: [env, file]
+      featuresSchema:
+        # The authority the tool's container checks the broker's certificate
+        # against, for a broker serving TLS — publishing kafka-ssl or amqps —
+        # whose certificate an authority the image does not already trust
+        # signs: the Strimzi cluster authority, or one the operator's own
+        # certificate chains to. A broker whose certificate a public authority
+        # signs, such as Amazon MSK's, is checked against the image's default
+        # trust store and needs none. It is secret-kind-pinned because a
+        # referenceable Secret is what the Recipe mounts, and so marked
+        # sensitive as every secret-kind slot is, though the authority's
+        # certificate it holds is not itself secret. inject: [file], because it
+        # reaches the container as files the Recipe mounts from the Secret.
+        server_ca:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [file]
+          description: "Optional authority the tool's container checks the broker's certificate against while the broker serves TLS, where the image does not already trust the authority that signs it. Its Secret holds ca.crt. The Recipe mounts the whole Secret read-only into the tool's container and delivers EVENT_TOOL_BROKER_SERVER_CA_FILE naming the file, on a connection writing an inject block too; checking the certificate against it is the container's. The build halts on a server_ca publishing no Secret name, on one wired to a broker publishing a protocol served without TLS — kafka, amqp, nats, ws or sip — and on one held on more than one connection. Fill it with core/referenced-secret mapped to helm/k8s-existing-secret, naming a Secret the namespace already holds."
+  schema:
+    # values — Developer Intent
+    # Filled by the Developer in the Aggregate.
+    values:
+      $ref: "BaseComponents#/schemas/BaseToolParameter"
+      properties:
+        target_topic: { type: string }
+        payload_schema_ref: { type: string }
+      required: [target_topic]
+
+    # infra — Operational Sizing
+    # Filled by Ops in the Release. Developer never sees this.
+    infra:
+      # The image carries no default because this Component wraps no upstream
+      # product: the Release names an image it already holds the right to
+      # run, its tag included. That is also why no engine_version knob appears
+      # here — the reference is supplied whole rather than assembled from a
+      # catalog-held name and an operator-held version.
+      image:
+        type: string
+        description: Container image serving the tool over HTTP.
+      port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 8080
+        description: Port the tool listens on, and the port it publishes to consumers.
+      compute:
+        cpu:
+          type: string
+          default: 100m
+        memory:
+          type: string
+          default: 128Mi
+      min_replicas:
+        type: integer
+        min: 0
+        default: 0
+        description: >
+          Replica floor. Zero is what lets the tool run no replicas between the
+          calls that invoke it.
+      max_replicas:
+        type: integer
+        min: 1
+        default: 5
+        description: Replica ceiling the realization's autoscaler may reach.
+      control_plane_present:
+        type: boolean
+        default: false
+        description: >
+          Operator affirmation that the Knative Serving control plane the
+          realization needs is installed in the target cluster. The build halts
+          unless this is set true, so a custom resource is never emitted as an
+          orphan into a cluster that cannot reconcile it.
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Realization-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+
+    # provides — Public API Contract
+    # Keys exported to consumers via `uses` topology edges. They are the
+    # coordinates a caller needs in order to reach the tool, and the
+    # realization publishes all four.
+    provides:
+      host:
+        type: string
+        required: true
+        description: >
+          In-cluster DNS name an agent calls to emit an event. A consumer that
+          composes its own address dials this name; one that does not reads
+          `endpoint` instead.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port the publish request is accepted on. The realization fronts
+          the tool on the control plane's own port rather than the tool
+          container's, so a consumer reads this rather than the port an
+          operator set.
+      endpoint:
+        type: string
+        required: true
+        description: >
+          Full base URL an agent posts an event to, with the host and the port
+          already composed. A consumer hands it to its tool client as the
+          address it calls.
+      protocol:
+        type: string
+        description: URL scheme to reach `host` and `port` over, for a consumer composing its own address rather than reading `endpoint`.

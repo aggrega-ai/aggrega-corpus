@@ -1,0 +1,114 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: memcached
+  version: 1.0.0
+  description: >
+    Memcached for local development via Docker Compose. Synthesized-mode
+    Workload — the compose provider translates the Workload kind into a service
+    entry (image, port, exposed service). In-memory cache with no persistence,
+    so no data volume is declared. The cache runs without authentication, and a
+    password attached to the password slot halts the build naming the slot: the
+    memcached image enforces no password, and its two authentication modes, SASL
+    over the binary protocol and an ASCII authentication file, are not spoken
+    by the catalog's Memcached clients, so the cache would accept every client
+    whatever the attachment.
+    provides.host is the bare service name, resolved on the compose network.
+    Encrypted client connections are not served here: infra.client_tls set to
+    true, or a certificate attached to server_certificate, halts the build by
+    name, because the server reads its certificate from files and no credential
+    Feature realized on Compose names a secret a service can mount. The helm
+    realization memcached serves TLS from that slot.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: compose
+  implements: core/datastore/memcached:1.0.0
+  # This Recipe reads no infra.overrides keys.
+
+  provides:
+    host: "{{ .context.instance_id }}"
+    port: "{{ .infra.port }}"
+    protocol: "memcached"
+
+  # Encrypted client connections are refused by name here. The image serves TLS,
+  # but the server reads its certificate and key from files, and a Compose
+  # service mounts a file attachment only from a credential that names a secret
+  # resource — which no Compose realization of the catalog's credential Features
+  # does — so this realization has no way to hand the server its certificate.
+  # Both directions halt: client_tls true, and a certificate attached while it is
+  # false, since nothing here would present it.
+  #
+  # An attached password is refused rather than rendered: the image enforces
+  # none, its SASL and ASCII authentication modes need client support the
+  # catalog's Memcached consumers lack, and a password that protects nothing
+  # would let the Aggregate believe the cache is closed.
+  workload: |
+    {{- if hasKey (default dict .features) "password" }}
+    {{- fail (printf "a password is attached to the password slot of %q, but the memcached image this Recipe runs cannot enforce a password: it authenticates only through SASL over the binary protocol or an ASCII authentication file, which the catalog's Memcached clients do not use, so the cache would accept every client anyway; remove the attachment, and restrict who can reach the cache through its network" .context.instance_id) }}
+    {{- end }}
+    {{- if .infra.client_tls }}
+    {{- fail (printf "infra.client_tls is true on %q, but this Compose realization of core/datastore/memcached cannot serve TLS: the server reads its certificate and key from files, and no credential Feature the catalog realizes on Compose names a secret a service can mount as files; set infra.client_tls to false, or map the component to helm/memcached in the Manifest, which serves TLS from the server_certificate slot" .context.instance_id) }}
+    {{- end }}
+    {{- if hasKey (default dict .features) "server_certificate" }}
+    {{- fail (printf "a certificate is attached to the server_certificate slot of %q, but infra.client_tls is false and this Compose realization of core/datastore/memcached serves plaintext alone, since no credential Feature the catalog realizes on Compose delivers a certificate as files, so nothing would present it; remove the attachment, or map the component to helm/memcached in the Manifest and set infra.client_tls to true there" .context.instance_id) }}
+    {{- end }}
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    containers:
+      main:
+        image: "memcached:{{ .infra.engine_version }}"
+        # Tuning knobs pass as memcached server flags; the official image's
+        # entrypoint prepends `memcached` to a flag-leading argument list. The
+        # block is emitted only when a knob is set, so a bare cache renders no
+        # args.
+        #
+        # The server is told its port (-p) only when infra.port differs from
+        # 11211, the port the Memcached server listens on when it is given none
+        # — a fact about the server, not a copy of the Component's default. So a
+        # cache at the default port renders no flag, and one an operator moved
+        # listens where its healthcheck and the published port point.
+    {{- $portFlag := ne (toString .infra.port) "11211" }}
+    {{- if or .values.memory_limit .values.max_connections .values.threads .values.max_item_size $portFlag }}
+        args:
+    {{- with .values.memory_limit }}
+          - "-m"
+          - "{{ . }}"
+    {{- end }}
+    {{- with .values.max_connections }}
+          - "-c"
+          - "{{ . }}"
+    {{- end }}
+    {{- with .values.threads }}
+          - "-t"
+          - "{{ . }}"
+    {{- end }}
+    {{- with .values.max_item_size }}
+          - "-I"
+          - "{{ . }}"
+    {{- end }}
+    {{- if $portFlag }}
+          - "-p"
+          - "{{ .infra.port }}"
+    {{- end }}
+    {{- end }}
+        ports:
+          memcached: {{ .infra.port }}
+        # Memcached documents no health endpoint, so the service's healthcheck
+        # opens a TCP connection to the service's port, with the nc the image's
+        # busybox provides. A service keeps one healthcheck, so one probe is
+        # declared.
+        health:
+          ready:
+            tcp: {{ .infra.port }}
+            periodSeconds: 10
+            timeoutSeconds: 5
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          memcached: {{ .infra.port }}

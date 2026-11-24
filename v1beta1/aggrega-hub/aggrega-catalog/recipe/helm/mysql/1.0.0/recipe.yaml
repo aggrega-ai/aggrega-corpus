@@ -1,0 +1,199 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: mysql
+  version: 1.0.0
+  license: GPL-2.0-only
+  description: >
+    MySQL on Kubernetes via the helm provider's Workload synthesis
+    (StatefulSet + ClusterIP Service + Headless Service) on the official
+    mysql image — no external chart. provides.host is the bare, self-contained
+    in-cluster service name of the synthesized ClusterIP Service — it carries
+    no namespace, so the recipe is independent of where it is deployed. A
+    consumer in another namespace qualifies the host with the target namespace
+    on its own side (caller-side routing).
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/datastore/mysql:1.0.0
+  # This Recipe reads no infra.overrides keys.
+  #
+  # provides.host is the bare Service name "<rendered_name>-default" — the helm
+  # provider names the synthesized ClusterIP Service "<rendered_name>-<service-key>"
+  # (here "<rendered_name>-default"), with no namespace segment. A same-namespace
+  # consumer reaches it under this name directly; a cross-namespace consumer
+  # qualifies it with the target namespace caller-side.
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ .infra.port }}"
+    user: "{{ .values.user }}"
+    database: "{{ .values.database }}"
+    protocol: "mysql"
+  # Two ConfigMaps carry the developer's bootstrap scripts and custom server
+  # configuration for the synthesized container. Each mounts whole into a
+  # dedicated path and is presence-guarded independently: an entry renders empty
+  # — and is therefore skipped, emitting no file — when its source value is unset.
+  # An Aggregate that sets neither value emits no ConfigMap at all, byte-identical
+  # to one with no ConfigMap. init_scripts keys become files under
+  # /docker-entrypoint-initdb.d, which the official image executes on first
+  # initialization in alphabetical key order. custom_config becomes a custom.cnf
+  # the server reads via --defaults-extra-file; it mounts into a dedicated
+  # directory the image does not populate, so it never masks the image's own
+  # configuration files.
+  artifacts:
+    initdb-configmap.yaml: |
+      {{- if .values.init_scripts -}}
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: {{ .context.rendered_name }}-initdb
+      data:
+      {{- range $name, $content := .values.init_scripts }}
+        {{ $name }}: |
+      {{ $content | indent 4 }}
+      {{- end }}
+      {{- end }}
+    config-configmap.yaml: |
+      {{- if .values.custom_config -}}
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: {{ .context.rendered_name }}-config
+      data:
+        custom.cnf: |
+      {{ .values.custom_config | indent 4 }}
+      {{- end }}
+  workload: |
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # form: stateful selects a StatefulSet on the helm provider; the
+    # persistentTemplate volume below is a companion of this form, and the
+    # Headless service supplies the StatefulSet's stable network identity.
+    form: stateful
+    replicas: 1
+    containers:
+      main:
+        image: "mysql:{{ .infra.engine_version }}"
+        # The official mysql image has no character-set/collation environment
+        # variables; it takes them as mysqld server command-line arguments. The
+        # image entrypoint execs mysqld with these args (it prepends mysqld when
+        # the first argument begins with a dash), so charset and collation are
+        # honored as container args while the image's own initialization runs
+        # unchanged.
+        args:
+    {{- if .values.custom_config }}
+          # --defaults-extra-file must be the server's first argument; it makes
+          # mysqld read custom_config's custom.cnf in addition to the image
+          # defaults. It mounts in a dedicated dir so it never masks the image's
+          # own configuration files.
+          - "--defaults-extra-file=/etc/aggrega/config/custom.cnf"
+    {{- end }}
+          - "--character-set-server={{ .values.charset }}"
+          - "--collation-server={{ .values.collation }}"
+        # MYSQL_DATABASE / MYSQL_USER are developer values. The two credential
+        # slots are delivered differently by design: root_password is a
+        # Black-Box slot (featuresSchema inject: []), so its value arrives on the
+        # inject pipe from the attached credential, under MYSQL_ROOT_PASSWORD,
+        # and is read here — never a workload secret reference. It is read
+        # through index whenever the slot is attached, so a credential
+        # delivering under another name, or nothing on the pipe, halts the build
+        # naming MYSQL_ROOT_PASSWORD rather than starting the server without a
+        # root password. user_password is transparent: when a referenceable
+        # credential fills it, MYSQL_PASSWORD renders as an env secretKeyRef via
+        # containers.attachments; with none attached the Recipe falls back to an
+        # inline development default.
+        variables:
+          MYSQL_DATABASE: "{{ .values.database }}"
+    {{- if .values.user }}
+          MYSQL_USER: "{{ .values.user }}"
+    {{- end }}
+    {{- $env := default dict (optional (default dict .context.inject) "env" dict) }}
+    {{- if or (hasKey (default dict .features) "root_password") (optional $env "MYSQL_ROOT_PASSWORD" "") }}
+          MYSQL_ROOT_PASSWORD: "{{ index $env "MYSQL_ROOT_PASSWORD" | replace "\\" "\\\\" | replace "\"" "\\\"" }}"
+    {{- end }}
+    {{- if not (hasKey (default dict .features) "user_password") }}
+          MYSQL_PASSWORD: apppass
+    {{- end }}
+    {{- if hasKey (default dict .features) "user_password" }}
+        attachments:
+          MYSQL_PASSWORD:
+            from: user_password
+            as: env
+    {{- end }}
+        ports:
+          tcp: {{ .infra.port }}
+        # Both probes run the image's own mysqladmin ping, which succeeds while
+        # the server is running — also when the connection is refused for lack of
+        # credentials — and fails when no server answers. Readiness asks over TCP
+        # on the port the Service targets; liveness asks over the server's local
+        # socket. While a new database is initialized the image runs a temporary
+        # server that takes no network connections, so the pod is reported ready
+        # only once the real server is up, and a first start is not restarted
+        # while initialization is still running. No start-up time is documented:
+        # the liveness probe waits 30 s and allows six misses 10 s apart, to cover
+        # initialization and the bootstrap scripts.
+        health:
+          ready:
+            exec:
+              - mysqladmin
+              - ping
+              - "--host=127.0.0.1"
+              - "--port={{ .infra.port }}"
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          live:
+            exec:
+              - mysqladmin
+              - ping
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+        volumeMounts:
+          - name: data
+            path: /var/lib/mysql
+    {{- if .values.init_scripts }}
+          - name: initdb
+            path: /docker-entrypoint-initdb.d
+    {{- end }}
+    {{- if .values.custom_config }}
+          - name: dbconf
+            path: /etc/aggrega/config
+    {{- end }}
+    volumes:
+      data:
+        persistentTemplate:
+          size: "{{ .infra.storage.size }}"
+          class: "{{ .infra.storage.type }}"
+    {{- if .values.init_scripts }}
+      initdb:
+        configmap:
+          source: "{{ .context.rendered_name }}-initdb"
+    {{- end }}
+    {{- if .values.custom_config }}
+      dbconf:
+        configmap:
+          source: "{{ .context.rendered_name }}-config"
+    {{- end }}
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          tcp: {{ .infra.port }}
+      headless:
+        type: Headless
+        ports:
+          tcp: {{ .infra.port }}

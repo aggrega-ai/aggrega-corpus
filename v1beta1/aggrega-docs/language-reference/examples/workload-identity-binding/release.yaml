@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Release
+metadata:
+  name: workload-identity-binding
+  environment: development
+  version: "1.0.0"
+spec:
+  aggregate: workload-identity-binding
+  manifest: workload-identity-binding-manifest
+  boundaries:
+    main:
+      directory: helm
+      components:
+        app:
+          # infra — the Operator-sizing pillar, fulfilled per environment. The
+          # Developer's Aggregate never carries these fields.
+          infra:
+            image_tag: "1.2"
+          features:
+            # The identity slot the app's Component declares. Which identity
+            # the app runs under is the Operator's choice for this target: the
+            # Operator fills the slot with the identity Feature, names the
+            # ServiceAccount to emit and the Google service account it
+            # impersonates. A Release that leaves the slot unfilled halts.
+            identity:
+              type: core/gcp-workload-identity
+              infra:
+                service_account_name: app-workload-identity
+                gcp_service_account: app-dev@example-project.iam.gserviceaccount.com

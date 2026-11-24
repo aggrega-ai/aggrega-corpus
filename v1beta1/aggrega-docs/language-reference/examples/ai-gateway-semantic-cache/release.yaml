@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Release
+metadata:
+  name: ai-gateway-semantic-cache-dev
+  environment: development
+  version: "1.0.0"
+spec:
+  aggregate: ai-gateway-semantic-cache
+  manifest: ai-gateway-semantic-cache-manifest
+
+  # The parameters the Aggregate declared, fulfilled for this environment. The
+  # Manifest writes each credential straight into a rendered Secret, so these
+  # are the password and the key themselves.
+  parameters:
+    cache_password: dev-cache-password-change-me
+    openai_key: upstream-provider-key-change-me
+
+  # Single scope: components are authored directly with no boundaries block, so
+  # they fold into one synthesized boundary and the artifacts land flat under
+  # dist/helm/.
+  components:
+    router:
+      infra:
+        # Operator sizing. Everything omitted takes the schema default.
+        port: 4000
+    # Declared with nothing to configure, so each takes its schema defaults:
+    # the models their endpoint, OpenAI's own API, and the store the port the
+    # gateway is handed. A component still has to appear here: one left out is
+    # placed in no scope and the build halts.
+    chat: {}
+    embeddings: {}
+    cache: {}

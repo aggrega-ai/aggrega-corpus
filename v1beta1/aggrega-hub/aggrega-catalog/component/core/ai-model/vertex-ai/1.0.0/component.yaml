@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/ai-model/vertex-ai
+  version: 1.0.0
+  description: >
+    Google Vertex AI managed generative model endpoint, realized as an external reference (no in-cluster compute). The regional endpoint is operator-supplied. Authentication is the consumer's concern: workloads use ambient GCP workload identity or inject their own credentials, rather than a static key delivered by the realization.
+  labels:
+    component.aggrega.ai/type: resource
+    component.aggrega.ai/category: ai-model
+    model.aggrega.ai/capability: generative
+    # Model API: Vertex AI's own API answers at the regional endpoint published
+    # here. It is not the OpenAI API, so a consumer reaches it through a Google
+    # Cloud client.
+    model.aggrega.ai/api: native
+    component.aggrega.ai/hosting: managed
+    component.aggrega.ai/upstream-licensing: proprietary
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  schema:
+    values:
+      $ref: "BaseComponents#/schemas/BaseModelParameter"
+    infra:
+      # The Vertex AI host is regional (<region>-aiplatform.googleapis.com), so
+      # the endpoint is operator-supplied rather than a fixed host.
+      endpoint: { type: string }
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      # endpoint and model are the family contract an ai-agent consumer reads.
+      endpoint:
+        type: string
+        required: true
+        description: Regional Vertex AI URL a consumer sends generation requests to. The region is the operator's choice, so the Release supplies it.
+      model:
+        type: string
+        required: true
+        description: Name of the Vertex AI model a request asks for, carried through from the model the Aggregate declared.

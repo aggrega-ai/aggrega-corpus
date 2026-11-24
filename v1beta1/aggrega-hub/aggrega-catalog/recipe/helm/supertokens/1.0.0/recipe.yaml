@@ -1,0 +1,178 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: supertokens
+  version: 1.0.0
+  license: Apache-2.0
+  # The identifier names the terms of the software this Recipe realizes: the core
+  # the image below pins is published under Apache-2.0. That image also carries a
+  # subtree the project publishes under its own separate terms, whose features the
+  # core serves only once a licence key is added to a running instance. No single
+  # identifier states both, so the coarse class covering that situation is carried
+  # on the component's component.aggrega.ai/upstream-licensing label rather than
+  # asserted here.
+  description: >
+    An authentication core on Kubernetes via the helm provider's Workload
+    synthesis: a stateless Deployment plus a ClusterIP Service on the HTTP port
+    an application's backend calls. The core keeps no durable state of its own —
+    the relational backend is the system of record — so it renders stateless,
+    with no persistent volume and no headless Service. The backend identity
+    resolved from the `backend` uses-edge (host, port, user, database) arrives on
+    .context.inject.env and composes the core's database connection; the core
+    creates and migrates its own tables on startup, so no separate migration step
+    is needed. The connection is rendered password-free where possible: with no
+    credential on the backend connection the Recipe uses an inline development
+    default, and with one attached the password is supplied via the credential
+    subsystem. An API key is emitted only when one is attached, matching the
+    core's own behaviour of issuing none by default. provides.host is the bare,
+    self-contained in-cluster service name of the synthesized Service — it
+    carries no namespace, so the recipe is independent of where it is deployed.
+    A consumer in another namespace qualifies the host with the target
+    namespace on its own side (caller-side routing), and assembles its own URL
+    rather than reusing provides.endpoint.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/security/supertokens:1.0.0
+  # This Recipe reads no infra.overrides keys.
+  #
+  # Target-expected names: the core reads its own configuration from environment
+  # variables named after its configuration keys — SUPERTOKENS_PORT, LOG_LEVEL,
+  # ACCESS_TOKEN_VALIDITY, REFRESH_TOKEN_VALIDITY, PASSWORD_HASHING_ALG,
+  # DISABLE_TELEMETRY, API_KEYS — and its PostgreSQL storage reads POSTGRESQL_HOST,
+  # POSTGRESQL_PORT, POSTGRESQL_USER, POSTGRESQL_PASSWORD and
+  # POSTGRESQL_DATABASE_NAME. Mapping the component's own value names onto those
+  # spellings is this Recipe's job. ACCESS_TOKEN_VALIDITY is in seconds and
+  # REFRESH_TOKEN_VALIDITY in minutes, which is why the two component values carry
+  # their unit in their names: the units differ and the core will not tell you.
+  # DISABLE_TELEMETRY is the negation of the component's telemetry_enabled value,
+  # so the template inverts it here rather than exposing a negative knob to the
+  # developer.
+  #
+  # The backend identity arrives under the POSTGRESQL_* names, which is what the
+  # `in:` keys on the backend uses-edge must be set to; the component's socket
+  # comment states the same contract on the authoring side.
+  #
+  # provides is evaluated before the workload and cannot read it, so the port has
+  # one authored home in .infra.port that every reader dereferences — provides.port
+  # and provides.endpoint here, and below the core's own listen port, the container
+  # port and the Service; the literal is never repeated.
+  #
+  # host and endpoint spell the Service name out twice on purpose. A provides entry
+  # cannot read another provides entry, and the name has to match the Service the
+  # helm provider derives from the service key below, so there is no home either
+  # could dereference instead — the repetition is forced, not a choice, and the two
+  # must be edited together.
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ .infra.port }}"
+    endpoint: "http://{{ .context.rendered_name }}-default:{{ .infra.port }}"
+    protocol: "http"
+  workload: |
+    {{- /* The alias of the `backend` connection carrying a credential, or empty. */ -}}
+    {{- $backendCredential := "" -}}
+    {{- range $alias, $edge := .context.uses -}}
+    {{- if and (eq $edge.socket "backend") (hasKey (default dict $edge.features) "credential") -}}
+    {{- $backendCredential = $alias -}}
+    {{- end -}}
+    {{- end -}}
+    {{- /*
+      The connection variables this Recipe reads off the inject pipe, under the
+      socket whose edge delivers them, each beside the provides key the edge's
+      inject block names it from. The pipe is read as a map, and every read of
+      these variables below goes through it, so a variable nothing delivered is
+      told apart from one delivered empty: an edge on one of these sockets
+      leaving any of its variables missing halts the build, naming the edge, the
+      variables and the inject block to write, rather than rendering a
+      connection setting with an empty value. A socket in $required is read
+      whether or not anything is wired to it, so leaving it empty halts too.
+    */ -}}
+    {{- $env := optional (default dict .context.inject) "env" dict -}}
+    {{- $reads := dict "backend" (dict "POSTGRESQL_HOST" "host" "POSTGRESQL_PORT" "port" "POSTGRESQL_USER" "user" "POSTGRESQL_DATABASE_NAME" "database") -}}
+    {{- $required := list "backend" -}}
+    {{- $gaps := list }}{{ $wired := list -}}
+    {{- range $alias, $edge := .context.uses }}{{ with get $reads $edge.socket -}}
+    {{- $wired = append $wired $edge.socket }}{{ $missing := list }}{{ $shape := list -}}
+    {{- range $var, $from := . }}{{ if not (hasKey $env $var) }}{{ $missing = append $missing $var }}{{ end }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- if $missing }}{{ $gaps = append $gaps (printf "the edge %q on its %s socket delivers no %s, so give that edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $alias $edge.socket (join " or " $missing) (join ", " $shape)) }}{{ end -}}
+    {{- end }}{{ end -}}
+    {{- range $socket := $required }}{{ if not (has $socket $wired) -}}
+    {{- $vars := list }}{{ $shape := list }}{{ range $var, $from := get $reads $socket }}{{ $vars = append $vars $var }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- $gaps = append $gaps (printf "nothing is wired to its %s socket to deliver %s, so wire one and give its edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $socket (join " and " $vars) (join ", " $shape)) -}}
+    {{- end }}{{ end -}}
+    {{- if $gaps }}{{ fail (printf "core/security/supertokens %q composes its connection settings from variables its edges deliver on its inject pipe, but %s" .context.instance_id (join "; and " $gaps)) }}{{ end -}}
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # The core holds no durable state — the relational backend is the system of
+    # record — so the default stateless form (a Deployment on the helm provider)
+    # is correct: no form: stateful, no persistentTemplate volume, no PVC.
+    replicas: 1
+    containers:
+      main:
+        image: "supertokens/supertokens-postgresql:{{ .infra.engine_version }}"
+        variables:
+          SUPERTOKENS_HOST: "0.0.0.0"
+          SUPERTOKENS_PORT: "{{ .infra.port }}"
+          LOG_LEVEL: "{{ .infra.log_level }}"
+          ACCESS_TOKEN_VALIDITY: "{{ .values.access_token_validity_seconds }}"
+          REFRESH_TOKEN_VALIDITY: "{{ .values.refresh_token_validity_minutes }}"
+          PASSWORD_HASHING_ALG: "{{ .values.password_hashing_algorithm }}"
+          DISABLE_TELEMETRY: "{{ if .values.telemetry_enabled }}false{{ else }}true{{ end }}"
+          POSTGRESQL_HOST: "{{ $env.POSTGRESQL_HOST }}"
+          POSTGRESQL_PORT: "{{ $env.POSTGRESQL_PORT }}"
+          POSTGRESQL_USER: "{{ $env.POSTGRESQL_USER }}"
+          POSTGRESQL_DATABASE_NAME: "{{ $env.POSTGRESQL_DATABASE_NAME }}"
+    {{- if not $backendCredential }}
+          POSTGRESQL_PASSWORD: apppass
+    {{- end }}
+    {{- if or $backendCredential (hasKey (default dict .features) "api_key") }}
+        attachments:
+    {{- end }}
+    {{- with $backendCredential }}
+          POSTGRESQL_PASSWORD:
+            connection: "{{ . }}"
+            from: credential
+            as: env
+    {{- end }}
+    {{- if hasKey (default dict .features) "api_key" }}
+          API_KEYS:
+            from: api_key
+            as: env
+    {{- end }}
+        ports:
+          tcp: {{ .infra.port }}
+        # The core answers /hello once it can read its storage, and its own
+        # documentation offers that route as a readiness signal while warning
+        # that liveness is tuned separately to avoid restart loops. So readiness
+        # asks /hello and liveness only opens a TCP connection to the port,
+        # which does not depend on the backend. No start-up time is documented;
+        # the liveness probe waits 30 s and allows six misses 10 s apart, since
+        # the core creates and migrates its tables before it serves.
+        health:
+          ready:
+            http: /hello
+            periodSeconds: 10
+            timeoutSeconds: 5
+          live:
+            tcp: {{ .infra.port }}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          tcp: {{ .infra.port }}

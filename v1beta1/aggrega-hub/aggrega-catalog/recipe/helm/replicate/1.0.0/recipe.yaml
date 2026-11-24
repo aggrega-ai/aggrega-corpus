@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: replicate
+  version: 1.0.0
+  description: >
+    Replicate's managed prediction API as a reference realization: no compute runs in-cluster. helm emits an ExternalName Service mapping an in-cluster name onto the managed endpoint. No credential is delivered by this recipe: a consumer that needs one declares it as `credential` on the socket that reaches this endpoint and delivers it from its own container, because the environment-variable name belongs to the consumer.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/ai-model/replicate:1.0.0
+  # provides is self-contained (only .context.instance_id/.values/.infra/
+  # static text), so the fixed managed host is a static constant here; it is
+  # repeated in the workload endpoint below and the two must stay in sync.
+  provides:
+    endpoint: "https://api.replicate.com"
+    model: "{{ .values.model }}"
+  workload: |
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    form: reference
+    endpoint: "https://api.replicate.com"
+    port: 443

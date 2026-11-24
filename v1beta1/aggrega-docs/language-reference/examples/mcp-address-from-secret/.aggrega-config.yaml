@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+workspace:
+  catalog_dirs:
+    # The workspace's own catalog: it declares the agent this workspace
+    # deploys and its two Recipes.
+    - ./catalog
+# The hub registry supplies the standard-library catalog: the tool, the two
+# credential Features and their realizations.
+default_registry: hub.aggrega.ai

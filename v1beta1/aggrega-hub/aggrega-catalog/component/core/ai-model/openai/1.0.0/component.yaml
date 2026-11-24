@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/ai-model/openai
+  version: 1.0.0
+  description: >
+    OpenAI's managed chat-completions API, reached as an external reference:
+    no compute runs in-cluster and the compiler never calls the provider. It
+    is realized as a direct reference — on Kubernetes an ExternalName Service
+    mapping an in-cluster name onto the managed host, on Compose the endpoint
+    carried to consumers with no service run — which delivers no credential:
+    a consumer that needs the key presents it from the connection it reaches
+    the model on. The endpoint defaults to the managed API's base URL,
+    version path included, so a bare declaration is enough, and it sits on
+    `infra` rather than inside a Recipe so an operator may repoint it at a
+    gateway or proxy without editing the Aggregate.
+    Consumers read the endpoint and the model name over a `uses` edge — the
+    contract every model here publishes — so an agent reaches it with no
+    endpoint in its own code. A gateway reaches it the same way, wired to the
+    gateway's models socket with the key on that connection, so the gateway
+    holds the key and an application behind the gateway never sees it.
+  labels:
+    component.aggrega.ai/type: resource
+    component.aggrega.ai/category: ai-model
+    model.aggrega.ai/capability: generative
+    # Model API: OpenAI's own API answers at the endpoint published here, the
+    # API an OpenAI client speaks as it is.
+    model.aggrega.ai/api: openai
+    component.aggrega.ai/hosting: managed
+    component.aggrega.ai/upstream-licensing: proprietary
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  schema:
+    values:
+      $ref: "BaseComponents#/schemas/BaseModelParameter"
+      properties:
+        strict_response_format: { type: boolean, default: false }
+      required: [strict_response_format]
+    infra:
+      # OpenAI's managed API has a fixed address, so the endpoint defaults to it
+      # and an operator need not supply one. The default is the base URL OpenAI
+      # documents for its API, version path included, which is what an OpenAI
+      # client takes as its base URL: the client appends only the route, such
+      # as /chat/completions, so an address without the version path would be
+      # posted to at the wrong path. It is sourced from infra (not hardcoded in
+      # the Recipe) so an operator may repoint it at a gateway or proxy.
+      endpoint: { type: string, default: "https://api.openai.com/v1" }
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      # endpoint and model are the family contract an ai-agent consumer reads.
+      endpoint:
+        type: string
+        required: true
+        description: >
+          Base URL a consumer sends chat-completion requests to, version path
+          included, so a client appends only the route. It is the endpoint set
+          in the Release — the managed API's base URL by default, or the
+          gateway or proxy an operator repoints it at — with no change to the
+          application.
+      model:
+        type: string
+        required: true
+        description: >
+          Name of the model a request asks for, carried through from the model
+          the Aggregate declared. A consumer sends it as the model field of
+          each request.
+
+  # The key a consumer presents to OpenAI is the credential of the connection
+  # it reaches the model on, and this Component declares no slot of its own
+  # for it. An attachment named api_key here would be a free attachment no
+  # Recipe reads — a key delivered to nothing while the build stayed green —
+  # so it halts, naming where the key goes.
+  assertions:
+    key_is_on_the_connection: >-
+      {{- if hasKey (optional . "features" dict) "api_key" -}}
+      {{- fail (printf "%q carries an attachment named api_key, but core/ai-model/openai declares no such slot and none of its Recipes reads one: the key a consumer presents to the model is the credential of the connection it reaches the model on. Attach it under credential on that connection, an agent's model socket or a gateway's models socket, and remove the api_key attachment" .metadata.instance_id) -}}
+      {{- end -}}

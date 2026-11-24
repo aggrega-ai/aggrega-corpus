@@ -1,0 +1,656 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: agentgateway-chart
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    agentgateway on Kubernetes via the project's own standalone Helm chart,
+    fetched from the project's container registry: a Deployment, a ClusterIP
+    Service for the data plane, a service account and the ConfigMap holding
+    the configuration file the gateway reads, which this Recipe writes through
+    the chart's `config` value.
+
+    Each model wired to the models socket is one entry of that file, named by
+    the connection's alias and sent to the endpoint and model name the model
+    publishes. A connection's credential, and each key of the callers
+    infra.callers declares, arrives as an environment variable by
+    secretKeyRef, and the file names the variable, so no key is in the
+    rendered output; each caller is an API key checked in strict mode.
+
+    Written into the file: core/data-masking and core/prompt-deny-patterns
+    as agentgateway's regular-expression guards, core/period-budget as a
+    token budget, core/audit-logging as a record of each model request past
+    its key, budget and authorization checks, and core/retry-policy as a
+    retry policy on the listener model requests arrive on. The per-caller
+    budget and the records are kept in a SQLite file on a volume this Recipe
+    renders while either needs it, with one replica.
+
+    Reach for it on Kubernetes, where the build can reach the chart's
+    registry; reach for `agentgateway` under Docker Compose. The image is
+    pinned by digest, and infra.source_version accepts only the chart
+    versions this configuration is proven at.
+
+    The gateway's metrics are always on, on port 15020, which checks no
+    caller. With `values.metrics_enabled` true a ClusterIP Service of its own,
+    `<rendered_name>-metrics`, carries that port and
+    provides.metrics_endpoint publishes its address; false, that key is
+    empty.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/gateway/agentgateway:1.0.0
+
+  # The chart is published by the project's own maintainers with every
+  # release, under the release's version, in the same container registry as
+  # the image, and it runs the same binary and reads the same configuration
+  # file as a container started by hand, so this Recipe maps the Component's
+  # surface into it rather than assembling the Deployment by hand.
+  source:
+    kind: helm-oci-chart
+    url: oci://cr.agentgateway.dev/charts/agentgateway-standalone
+    # Default chart version. Override via infra.source_version, which the
+    # assertion chart_version_is_proven holds to the proven versions.
+    version: "{{ optional .infra `source_version` \"v1.6.0\" }}"
+
+  # provides.host is the data-plane Service: the chart names every resource it
+  # renders after its full name, which the valuesMapping below binds to the
+  # rendered name — the release name the helm provider gives the chart, which
+  # spells the Component's name in the alphabet a Kubernetes name allows — and
+  # the Service carries that name with no suffix, read from a render of the
+  # chart. The name carries no namespace, so the recipe is independent of where
+  # it is deployed; a consumer in another namespace qualifies the host with the
+  # target namespace on its own side.
+  #
+  # endpoint is the base URL every wired model is served under, /v1 on the
+  # Service name and port; model is the alias values.model names, the model
+  # name a consumer sends. The Service name is spelled out again on purpose: a
+  # provides entry cannot read another provides entry, so the repetition is
+  # forced, and the entries are edited together. With nothing wired to the
+  # models socket values.model is omitted — the component's assertion halts on
+  # any other combination — and both are empty.
+  #
+  # metrics_endpoint is the address the gateway serves its own metrics at while
+  # values.metrics_enabled is true: /metrics on port 15020 of the Service the
+  # value mapping below renders for it, which the chart names after the
+  # rendered name followed by -metrics. It is empty while the value is false,
+  # when the gateway still serves its metrics on that port of the pod and no
+  # Service carries them.
+  provides:
+    host: "{{ .context.rendered_name }}"
+    port: "{{ .infra.http_port }}"
+    protocol: "http"
+    endpoint: '{{ with optional .values "model" "" }}http://{{ $.context.rendered_name }}:{{ $.infra.http_port }}/v1{{ end }}'
+    model: '{{ optional .values "model" "" }}'
+    metrics_endpoint: "{{ if .values.metrics_enabled }}http://{{ .context.rendered_name }}-metrics:15020/metrics{{ end }}"
+
+  # The pins and the fixed strings the templates below share, each written
+  # once here.
+  #
+  # proven_chart_versions holds the chart versions the configuration this
+  # Recipe writes is proven at, comma-separated; the assertion below halts on
+  # any other infra.source_version, naming them. A version joins the list only
+  # once that proof has run at it.
+  #
+  # image is the gateway's image, pinned by tag and by the digest of its
+  # index, so every platform the project publishes resolves to the build read
+  # here. The chart takes a complete image reference as its image value. It is
+  # the same pin the compose realization writes: DELIBERATE NEAR-DUPLICATE of
+  # that Recipe's locals.image, since a pin sits inside the Recipe that renders
+  # it and no catalog kind holds one for two Recipes to share, so the two are
+  # moved together. No setting moves it: the configuration below is written for
+  # this release, whose provider and path rules differ from the release before
+  # it.
+  #
+  # A models connection's credential reaches the gateway under one variable
+  # named after the connection's alias in capitals, with every character other
+  # than a letter or a digit as an underscore, between the fixed parts here:
+  # the connection fast carrying a credential gives AI_PROXY_FAST_API_KEY. A
+  # locals entry cannot read a connection, so each template applies the alias
+  # rule itself, the rule the Component's assertion
+  # credential_variables_are_distinct checks.
+  #
+  # A caller infra.callers declares presents its key under a variable named the
+  # same way after the caller's name: the caller alice gives CALLER_ALICE_KEY,
+  # read from the Secret the caller_keys slot names under the data key alice,
+  # which the caller's API key in the configuration names. The Component's
+  # assertion callers_are_declared_with_their_keys checks that rule.
+  #
+  # callers is the list infra.callers declares, joined by commas — empty with
+  # none — so the realizations of the period budget and of audit logging,
+  # whose assertions read this Recipe's locals and not the gateway's infra, can
+  # tell whether the gateway verifies its callers. It is written with the
+  # template language's own range rather than a helper function, as
+  # apisix-chart writes the same local.
+  #
+  # The store is one SQLite file in the directory store_mount_path, on the
+  # volume claim named after the rendered name followed by store_claim_suffix,
+  # which the artifact below emits and the value mapping mounts. The image runs
+  # as user store_group_id, and the volume is given to the group of that number,
+  # which every process of the pod then belongs to, so the gateway can write
+  # there.
+  #
+  # The two rules the configuration's authorization may carry, each a CEL
+  # expression agentgateway requires to hold for a model request, refusing it
+  # with HTTP 403 when it does not or cannot be evaluated: empty_key_refusal
+  # refuses a verified key that is empty, written while callers are declared,
+  # and stream_refusal refuses a request asking for a streamed reply, written
+  # while replies are masked, since agentgateway does not mask a streamed reply.
+  # stream_refusal reads the request's body, of which agentgateway reads at most
+  # 2 MiB into a rule — its default buffer, which this file leaves as it is — so
+  # a POST whose body is not JSON, or is larger than 2 MiB, streamed or not,
+  # cannot be evaluated and is refused. The rule asks has() whether the body
+  # names a stream field rather than reading the field with a default, because
+  # a default also stands in for a body the rule cannot read, which would admit
+  # a streamed request larger than 2 MiB and return its reply unmasked.
+  locals:
+    proven_chart_versions: "v1.6.0"
+    image: "cr.agentgateway.dev/agentgateway:v1.6.0@sha256:9d3e6044ddcdc0878b1787f77bd401252b95e22684203fb5e874c4c42d2ed90c"
+    connection_variable_prefix: AI_PROXY_
+    credential_variable_suffix: _API_KEY
+    caller_variable_prefix: CALLER_
+    caller_key_variable_suffix: _KEY
+    callers: '{{ with optional .infra "callers" "" }}{{ range $i, $caller := . }}{{ if $i }}, {{ end }}{{ $caller }}{{ end }}{{ end }}'
+    store_mount_path: /data
+    store_claim_suffix: "-store"
+    store_group_id: "65532"
+    empty_key_refusal: 'apiKey.key.unredacted() != ""'
+    stream_refusal: 'request.method != "POST" || !has(json(request.body).stream) || json(request.body).stream == false'
+
+  # The chart version decides the Deployment, the Service and the part of the
+  # configuration file the chart writes itself, so a version the configuration
+  # was not proven at halts the build rather than rendering a gateway whose
+  # file may mean something else.
+  assertions:
+    chart_version_is_proven: >-
+      {{- with optional .infra "source_version" "" -}}
+      {{- $proven := splitList "," $.locals.proven_chart_versions -}}
+      {{- if not (has . $proven) -}}
+      {{- fail (printf "infra.source_version of %q is %q, but the configuration this Recipe writes into the agentgateway standalone chart is proven at chart version %s alone; set infra.source_version to one of them, or remove it" $.metadata.instance_id . (join ", " $proven)) -}}
+      {{- end -}}
+      {{- end -}}
+
+  # The volume the store lives on: a claim on the cluster's default storage
+  # class, of infra.storage.size, emitted beside the chart's own resources and
+  # mounted by the value mapping below. The chart renders no volume of its own,
+  # and its container's root file system is read-only. The store is needed
+  # while core/audit-logging is attached, whose records it holds, or
+  # core/period-budget with scope caller, whose counts it holds across a
+  # restart; with neither the template writes nothing and no file is emitted.
+  #
+  # DELIBERATE NEAR-DUPLICATE: the value mapping below decides the same thing
+  # from the same attachments, since a template cannot hand a value to another
+  # and a locals entry cannot read an attachment; the two are edited together.
+  artifacts:
+    agentgateway-store.yaml: |
+      {{- $store := false }}
+      {{- range $name, $attachment := (default dict .features) }}
+      {{- $type := first (splitList ":" (toString $attachment.type)) }}
+      {{- if eq $type "core/audit-logging" }}{{ $store = true }}{{ end }}
+      {{- if and (eq $type "core/period-budget") (eq (toString (optional (default dict $attachment.values) "scope" "")) "caller") }}{{ $store = true }}{{ end }}
+      {{- end }}
+      {{- if $store -}}
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: {{ .context.rendered_name }}{{ .locals.store_claim_suffix }}
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: "{{ .infra.storage.size }}"
+      {{- end }}
+
+  # This Recipe reads from infra.overrides:
+  #   service_type - string (data-plane Service type; how the gateway is exposed, default ClusterIP)
+  #   requests     - { cpu: string, memory: string } (gateway resource requests)
+  #   nodeSelector - map[string]string (pod scheduling)
+  #   tolerations  - []object (pod scheduling)
+  #
+  # The chart renders a Deployment, a Service, a service account and the
+  # ConfigMap holding the configuration file, which it mounts read-only at
+  # /config and starts the gateway on. It writes the file from its `config`
+  # value, adding one setting of its own, config.storage, which keeps the
+  # file the gateway's whole configuration. The pod keeps the chart's own
+  # probes, its read-only root file system and its writable /tmp.
+  #
+  # The gateway's own metrics are on its stats listener: agentgateway serves
+  # /metrics and /stats/prometheus there and nothing else, on every interface,
+  # port 15020, whether or not anything publishes them, checking no caller.
+  # While values.metrics_enabled is true, one of the chart's extra Services,
+  # named after the rendered name followed by -metrics, carries that port to
+  # the gateway's pods. It is a ClusterIP whatever type the data-plane Service
+  # takes, so an operator exposing the gateway outside the cluster does not
+  # expose its metrics with it. Its target port is the number, since the chart
+  # declares the container's metrics port only beside a PodMonitor this Recipe
+  # does not render.
+  valuesMapping: |
+    ## ── The models the gateway serves ──────────────────────────
+    ## The models connections, in alias order, and those of them carrying a
+    ## credential, whose variable each entry names.
+    {{- $wired := list }}
+    {{- $credentialed := list }}
+    {{- range $alias, $edge := .context.uses }}
+      {{- if eq $edge.socket "models" }}
+        {{- $wired = append $wired $alias }}
+        {{- if hasKey (default dict $edge.features) "credential" }}
+          {{- $credentialed = append $credentialed $alias }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+
+    ## ── What the attachments ask for ───────────────────────────
+    ## One attachment of each Feature this Recipe writes: the realizations of
+    ## data masking, prompt deny patterns, the period budget and the retry
+    ## policy halt on a second, and a second audit-logging attachment asks for
+    ## the same records.
+    ## Its type is compared with any version it was authored with set aside. A period budget with scope caller, and audit logging,
+    ## need the store; a budget with any other scope is a token rate limit.
+    ## DELIBERATE NEAR-DUPLICATE of the store decision in the artifact above.
+    {{- $masking := dict }}
+    {{- $guard := dict }}
+    {{- $budget := dict }}
+    {{- $budgetName := "" }}
+    {{- $audit := dict }}
+    {{- $retry := dict }}
+    {{- $retryName := "" }}
+    {{- range $name, $attachment := (default dict .features) }}
+      {{- $type := first (splitList ":" (toString $attachment.type)) }}
+      {{- if eq $type "core/data-masking" }}{{ $masking = $attachment }}{{ end }}
+      {{- if eq $type "core/prompt-deny-patterns" }}{{ $guard = $attachment }}{{ end }}
+      {{- if eq $type "core/period-budget" }}{{ $budget = $attachment }}{{ $budgetName = $name }}{{ end }}
+      {{- if eq $type "core/audit-logging" }}{{ $audit = $attachment }}{{ end }}
+      {{- if eq $type "core/retry-policy" }}{{ $retry = $attachment }}{{ $retryName = $name }}{{ end }}
+    {{- end }}
+    ## The sends the retry policy allows, the first included; one send is what
+    ## the gateway makes with no retry policy at all.
+    {{- $retrySends := 1 }}
+    {{- with $retry }}{{ $retrySends = int64 .values.max_attempts }}{{ end }}
+    {{- $budgetScope := "" }}
+    {{- with $budget }}{{ $budgetScope = toString (optional (default dict .values) "scope" "") }}{{ end }}
+    {{- $store := or $audit (eq $budgetScope "caller") }}
+    {{- $rateLimit := and $budget (ne $budgetScope "caller") }}
+    {{- $maskRequest := false }}
+    {{- $maskResponse := false }}
+    {{- $maskAction := "mask" }}
+    {{- with $masking }}
+      {{- $scope := toString (optional (default dict .values) "scope" "request") }}
+      {{- $maskRequest = ne $scope "response" }}
+      {{- $maskResponse = ne $scope "request" }}
+      {{- if eq (toString (optional (default dict .values) "action" "redact")) "refuse" }}{{ $maskAction = "reject" }}{{ end }}
+    {{- end }}
+
+    ## ── The callers ────────────────────────────────────────────
+    ## The callers infra.callers declares read their keys from the Secret the
+    ## caller_keys credential publishes, each under the caller's own name as
+    ## the data key; a credential publishing no Secret name would leave the
+    ## gateway nowhere to read them from, so the build halts on it. The
+    ## Component's assertion holds that the slot is attached exactly when a
+    ## caller is declared.
+    {{- $callers := optional .infra "callers" list }}
+    {{- $callerKeySecret := "" }}
+    {{- with $callers }}
+    {{- $callerKeySecret = optional (optional (optional (default dict $.features) "caller_keys" dict) "provides" dict) "name" "" }}
+    {{- if not $callerKeySecret }}
+    {{- fail (printf "the credential attached to the caller_keys slot of %q publishes no Secret name, so the gateway cannot read its callers' keys from a Secret; attach core/referenced-secret-set, which publishes one" $.context.instance_id) }}
+    {{- end }}
+    {{- end }}
+
+    ## ── The configuration's authorization rules ────────────────
+    {{- $rules := list }}
+    {{- if $callers }}{{ $rules = append $rules .locals.empty_key_refusal }}{{ end }}
+    {{- if $maskResponse }}{{ $rules = append $rules .locals.stream_refusal }}{{ end }}
+
+    ## ── Pin the chart's resource names to the rendered name ────
+    ## The chart names its Deployment, Service, service account and the
+    ## Service's selector after this value, and its ConfigMap after it
+    ## followed by -config.
+    fullnameOverride: "{{ .context.rendered_name }}"
+
+    ## ── Gateway image pin ──────────────────────────────────────
+    ## Pinned explicitly, by tag and index digest, rather than left to the
+    ## chart's own default, which names the image by the chart's app version
+    ## alone.
+    image: "{{ .locals.image }}"
+
+    ## ── The store ──────────────────────────────────────────────
+    ## While an attachment needs the store, the volume claim the artifact above
+    ## emits is mounted at store_mount_path, given to the group of the image's
+    ## user so the gateway can write there, and the chart runs one replica,
+    ## replaced by stopping it before its successor starts: agentgateway keeps
+    ## one SQLite file per instance and is not to have two instances on one
+    ## file, and a successor started first could wait on a volume its
+    ## predecessor still holds. One replica and no autoscaler are the chart's
+    ## own defaults, written out so that a chart version moving them cannot
+    ## split the store.
+    {{- if $store }}
+    replicaCount: 1
+    autoscaling:
+      enabled: false
+    strategy:
+      type: Recreate
+    podSecurityContext:
+      fsGroup: {{ .locals.store_group_id }}
+    extraVolumes:
+      - name: store
+        persistentVolumeClaim:
+          claimName: "{{ .context.rendered_name }}{{ .locals.store_claim_suffix }}"
+    extraVolumeMounts:
+      - name: store
+        mountPath: "{{ .locals.store_mount_path }}"
+    {{- end }}
+
+    ## ── Data plane ─────────────────────────────────────────────
+    ## The client entry point, and the Service provides.host addresses. The
+    ## chart default exposes the gateway through a load balancer on port 80;
+    ## the Component describes an in-cluster address, so it is a ClusterIP
+    ## unless an operator says otherwise, and infra.http_port is both the
+    ## Service port and the port the configuration's gateway listens on, so the
+    ## published address and the listener move together.
+    gateway:
+      service:
+        {{- if and .infra.overrides .infra.overrides.service_type }}
+        type: "{{ .infra.overrides.service_type }}"
+        {{- else }}
+        type: ClusterIP
+        {{- end }}
+        ports:
+          - name: http
+            port: {{ .infra.http_port }}
+            targetPort: {{ .infra.http_port }}
+            protocol: TCP
+      {{- if .values.metrics_enabled }}
+      extraServices:
+        - name: metrics
+          type: ClusterIP
+          ports:
+            - name: metrics
+              port: 15020
+              targetPort: 15020
+              protocol: TCP
+      {{- end }}
+
+    ## ── The configuration file ─────────────────────────────────
+    ## DELIBERATE NEAR-DUPLICATE of the configuration the compose realization,
+    ## recipe/compose/agentgateway, writes into its compose config. The chart
+    ## takes the file only as its `config` value, which this mapping writes,
+    ## and that Recipe delivers it as a compose config, which its artifacts
+    ## write; a value mapping imports only a mapping library and an artifact
+    ## only an artifact library, so no one template reaches both. The gateway
+    ## and the model entries are edited together, and a build of both from one
+    ## Release, with the two files compared, shows them alike; the store, the
+    ## callers and what the attachments ask for are written here alone, the
+    ## compose realization realizing none of them.
+    ##
+    ## One gateway, `default`, listening on infra.http_port; the model-serving
+    ## routes attach to it. No `ui` section is written, so agentgateway serves
+    ## its UI on its admin interface alone, never on the data-plane port.
+    ##
+    ## Each connection, in alias order, is one model entry named by its alias,
+    ## an OpenAI-compatible provider accepting chat completions, whose base
+    ## URL is the endpoint the model publishes, written verbatim: agentgateway
+    ## appends /chat/completions to it and takes its path as the whole base
+    ## path. The entry asks for the model name the model publishes. agentgateway
+    ## refuses a base URL that is not absolute, that names user information, a
+    ## query or a fragment, or whose scheme is neither http nor https without a
+    ## port, so the build halts on such an endpoint, naming the connection, and
+    ## on an empty model name, which would send the alias upstream as one.
+    ##
+    ## agentgateway reads $NAME and ${NAME} anywhere in the file as the value of
+    ## the environment variable NAME before it parses the file, and refuses the
+    ## file when NAME is unset. A connection carrying a credential has its
+    ## entry's apiKey name $AI_PROXY_<ALIAS>_API_KEY, which the gateway replaces
+    ## from the variable delivered below, so the file names the variable and
+    ## never the value; each caller's API key names $CALLER_<NAME>_KEY the same
+    ## way. Because the value is put into the file's text before the file is
+    ## read as YAML, a key, a credential's or a caller's, must be a plain token
+    ## — letters, digits and - . _ ~ + / = — and other characters can load as a
+    ## different key or stop the gateway. Each string a model publishes is
+    ## written with every $ doubled, agentgateway's spelling of a literal $, so
+    ## a published string reaches the gateway as it was published; so is each
+    ## regular expression an attachment lists.
+    ##
+    ## While the store is needed its database is the SQLite file in
+    ## store_mount_path, and the request records it holds keep no prompt or
+    ## reply text: the access log's database mode is `metadata`. The chart
+    ## restarts the gateway when this part of the file changes.
+    ##
+    ## The policies of the model routes, written only for what asks for them:
+    ## - With callers declared, an API key for each, in the order the Release
+    ##   lists them, checked in strict mode: a model request presenting no key,
+    ##   or one no caller holds, is refused with HTTP 401, and the key is removed
+    ##   from the request forwarded. Each key is named after its caller, and its
+    ##   value is $CALLER_<NAME>_KEY. Under a period budget with scope caller,
+    ##   each key carries that budget, counted in the tokens each reply reports
+    ##   over a window of period aligned to the Unix epoch, and refusing with
+    ##   HTTP 429 once what the key has spent reaches the limit.
+    ## - The authorization rules above, each required to hold.
+    ## - Guards: core/prompt-deny-patterns as a request guard refusing a match,
+    ##   then core/data-masking as a request guard and, where replies are
+    ##   masked, a reply guard, masking each match, or refusing it under
+    ##   action refuse. Request guards read the system and developer prompts,
+    ##   every other message, the arguments of tool calls and the results of
+    ##   tool calls; masking an argument can leave its JSON invalid. A guard's
+    ##   refusal is HTTP 403. The deny guard comes first, so it reads the text
+    ##   as the caller sent it.
+    ## - A period budget with scope gateway or model as a token rate limit: a
+    ##   bucket of limit tokens, filled again to limit every period from when
+    ##   the gateway read the file, from which each reply's tokens are taken,
+    ##   refusing a model request with HTTP 429 while it is empty — one bucket
+    ##   for the gateway, or one for each model name requested.
+    ##
+    ## The retry policy is not among those policies, which hold none, but a
+    ## policy of the file's own: an entry of its policies list, attached to
+    ## the listener every model request arrives on, the gateway `default`
+    ## below, which a standalone agentgateway knows as listener `default` of
+    ## gateway `default` in namespace `default`, and applied there to every
+    ## route, the model routes being the only ones. It is written while
+    ## core/retry-policy is attached with max_attempts of two or more:
+    ## agentgateway 1.6.0 sends a request once more than the policy's
+    ## attempts, so attempts is max_attempts less one, and with max_attempts
+    ## one no policy is written and each request is sent once. A request is
+    ## sent again, at once and to the same model, after a reply of 429, 500,
+    ## 502, 503 or 504, and after a failed connection, one taking longer than
+    ## 11 seconds to open or a failed name lookup; one whose body is larger
+    ## than 64 KiB is sent once.
+    {{- range $alias, $edge := .context.uses }}
+      {{- if eq $edge.socket "models" }}
+        {{- $u := urlParse (toString $edge.provides.endpoint) }}
+        {{- if not (and (has $u.scheme (list "http" "https")) $u.host (not $u.userinfo) (not $u.query) (not $u.fragment)) }}
+        {{- fail (printf "the models connection %s of %q reaches %q, whose published endpoint %q is not an absolute http or https URL free of user information, a query and a fragment, so agentgateway would refuse it as the base URL of the model entry" $alias $.context.instance_id $edge.target (toString $edge.provides.endpoint)) }}
+        {{- end }}
+        {{- if not (toString $edge.provides.model) }}
+        {{- fail (printf "the models connection %s of %q reaches %q, which publishes no model name, so the model entry would send the alias %s upstream as the model a request asks for" $alias $.context.instance_id $edge.target $alias) }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    config:
+      {{- if $store }}
+      config:
+        database:
+          url: {{ printf "sqlite://%s/data.db" .locals.store_mount_path | toJson }}
+      frontendPolicies:
+        accessLog:
+          database:
+            llm: metadata
+      {{- end }}
+      gateways:
+        default:
+          port: {{ .infra.http_port }}
+      {{- if gt $retrySends 1 }}
+      policies:
+        - name:
+            name: {{ $retryName | toJson }}
+            namespace: default
+          target:
+            gateway:
+              gatewayName: default
+              gatewayNamespace: default
+              listenerName: default
+          phase: route
+          policy:
+            retry:
+              attempts: {{ sub $retrySends 1 }}
+              codes: [429, 500, 502, 503, 504]
+      {{- end }}
+      llm:
+        {{- if or $callers $guard $masking $rateLimit }}
+        policies:
+          {{- with $callers }}
+          apiKey:
+            mode: strict
+            keys:
+              {{- range $caller := . }}
+              - key: {{ printf "$%s%s%s" $.locals.caller_variable_prefix (regexReplaceAll "[^A-Z0-9]" (upper $caller) "_") $.locals.caller_key_variable_suffix | toJson }}
+                metadata:
+                  name: {{ $caller | toJson }}
+                {{- if eq $budgetScope "caller" }}
+                budgets:
+                  - name: {{ $budgetName | toJson }}
+                    limit:
+                      unit: Tokens
+                      amount: {{ int64 $budget.infra.limit }}
+                    window:
+                      rolling: {{ toString $budget.infra.period | toJson }}
+                    onBudgetExceeded: Block
+                {{- end }}
+              {{- end }}
+          {{- end }}
+          {{- with $rules }}
+          authorization:
+            rules:
+              {{- range $rule := . }}
+              - require: {{ $rule | toJson }}
+              {{- end }}
+          {{- end }}
+          {{- if or $guard $masking }}
+          guardrails:
+            {{- if or $guard $maskRequest }}
+            request:
+              {{- with $guard }}
+              - regex:
+                  action: reject
+                  rules:
+                    {{- range $pattern := .values.deny_patterns }}
+                    - pattern: {{ toString $pattern | toJson | replace "$" "$$" }}
+                    {{- end }}
+                scope: [systemPrompt, messages, toolInput, toolOutput]
+              {{- end }}
+              {{- if $maskRequest }}
+              - regex:
+                  action: {{ $maskAction }}
+                  rules:
+                    {{- range $pattern := (optional $masking.values "patterns" list) }}
+                    - pattern: {{ toString $pattern.regex | toJson | replace "$" "$$" }}
+                    {{- end }}
+                scope: [systemPrompt, messages, toolInput, toolOutput]
+              {{- end }}
+            {{- end }}
+            {{- if $maskResponse }}
+            response:
+              - regex:
+                  action: {{ $maskAction }}
+                  rules:
+                    {{- range $pattern := (optional $masking.values "patterns" list) }}
+                    - pattern: {{ toString $pattern.regex | toJson | replace "$" "$$" }}
+                    {{- end }}
+            {{- end }}
+          {{- end }}
+          {{- if $rateLimit }}
+          localRateLimit:
+            - type: tokens
+              maxTokens: {{ int64 $budget.infra.limit }}
+              tokensPerFill: {{ int64 $budget.infra.limit }}
+              fillInterval: {{ toString $budget.infra.period | toJson }}
+              {{- if eq $budgetScope "model" }}
+              key: llm.requestModel
+              {{- end }}
+          {{- end }}
+        {{- end }}
+        {{- if not $wired }}
+        models: []
+        {{- else }}
+        models:
+          {{- range $alias, $edge := .context.uses }}
+          {{- if eq $edge.socket "models" }}
+          - name: {{ $alias | toJson }}
+            provider:
+              custom:
+                formats:
+                  - type: completions
+            params:
+              model: {{ toString $edge.provides.model | toJson | replace "$" "$$" }}
+              baseUrl: {{ toString $edge.provides.endpoint | toJson | replace "$" "$$" }}
+              {{- if hasKey (default dict $edge.features) "credential" }}
+              apiKey: {{ printf "$%s%s%s" $.locals.connection_variable_prefix (regexReplaceAll "[^A-Z0-9]" (upper $alias) "_") $.locals.credential_variable_suffix | toJson }}
+              {{- end }}
+          {{- end }}
+          {{- end }}
+        {{- end }}
+
+    ## ── Model credentials and callers' keys ─────────────────────
+    ## Each models connection carrying a credential delivers it as
+    ## AI_PROXY_<ALIAS>_API_KEY, bound by NAME to the Secret its attachment
+    ## publishes, which the connection's entry names. A credential publishing
+    ## no Secret name and data key would leave the gateway nothing to read, so
+    ## the build halts on it. Each caller delivers its key as
+    ## CALLER_<NAME>_KEY, from the caller_keys Secret under the caller's name,
+    ## which the caller's API key names. Kubernetes starts no container whose
+    ## secretKeyRef names a missing Secret or key, which is caught at start,
+    ## not by the build; no variable carries a value in the rendered artifact.
+    ## A caller added or removed changes this list, so Kubernetes replaces the
+    ## pod; the running gateway also reads the changed file when it is
+    ## updated, so a removed caller's key is refused from then on. A key
+    ## changed inside the Secret moves neither, and is read when the pod next
+    ## starts.
+    {{- if or $credentialed $callers }}
+    extraEnv:
+      {{- range $alias := $credentialed }}
+      {{- $credential := (get $.context.uses $alias).features.credential }}
+      {{- $locator := optional $credential "provides" dict }}
+      {{- if not (and (optional $locator "name" "") (optional $locator "key" "")) }}
+      {{- fail (printf "the credential on the models connection %s of %q publishes no Secret name and data key, so the gateway cannot read it from a Secret; attach a credential publishing both, such as core/referenced-secret" $alias $.context.instance_id) }}
+      {{- end }}
+      - name: {{ $.locals.connection_variable_prefix }}{{ regexReplaceAll "[^A-Z0-9]" (upper $alias) "_" }}{{ $.locals.credential_variable_suffix }}
+        valueFrom:
+          secretKeyRef:
+            name: "{{ $locator.name }}"
+            key: "{{ $locator.key }}"
+      {{- end }}
+      {{- range $caller := $callers }}
+      - name: {{ $.locals.caller_variable_prefix }}{{ regexReplaceAll "[^A-Z0-9]" (upper $caller) "_" }}{{ $.locals.caller_key_variable_suffix }}
+        valueFrom:
+          secretKeyRef:
+            name: "{{ $callerKeySecret }}"
+            key: "{{ $caller }}"
+      {{- end }}
+    {{- end }}
+
+    ## ── Gateway resources ──────────────────────────────────────
+    ## The operator's sizing as the container's limits, beside the chart's own
+    ## requests unless infra.overrides.requests replaces them.
+    resources:
+      limits:
+        cpu: "{{ .infra.compute.cpu }}"
+        memory: "{{ .infra.compute.memory }}"
+      {{- if and .infra.overrides .infra.overrides.requests }}
+      requests:
+        cpu: "{{ .infra.overrides.requests.cpu }}"
+        memory: "{{ .infra.overrides.requests.memory }}"
+      {{- end }}
+
+    ## ── Scheduling overrides ───────────────────────────────────
+    {{- if .infra.overrides }}
+    {{- if .infra.overrides.nodeSelector }}
+    nodeSelector: {{ toJson .infra.overrides.nodeSelector }}
+    {{- end }}
+    {{- if .infra.overrides.tolerations }}
+    tolerations: {{ toJson .infra.overrides.tolerations }}
+    {{- end }}
+    {{- end }}

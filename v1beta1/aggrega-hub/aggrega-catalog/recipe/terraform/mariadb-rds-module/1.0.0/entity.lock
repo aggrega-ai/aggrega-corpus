@@ -1,0 +1,35 @@
+# Content pins for this entity's external inputs, written by `aggrega pin`.
+# Commit it beside the entity. Run `aggrega pin` on the entity again to bring it up to date.
+version: 1
+localSourceDigests:
+  - path: module/main.tf
+    digest: sha256:844f75a261f99b45d108fee1c27f4be05d229faadcab21e2a8bb7ff2bb5850bd
+  - path: module/variables.tf
+    digest: sha256:bcbe168078cfafa879c3308b92589394c369ee8b75acdd6734fc40994e7362df
+ignore:
+  plugin:
+    name: provider/terraform
+    patterns:
+      - .git/
+      - .hg/
+      - .svn/
+      - .bzr/
+      - .terraform/
+    files:
+      - .terraformignore
+  rules:
+    - pattern: .git/
+      within: module
+      from: plugin
+    - pattern: .hg/
+      within: module
+      from: plugin
+    - pattern: .svn/
+      within: module
+      from: plugin
+    - pattern: .bzr/
+      within: module
+      from: plugin
+    - pattern: .terraform/
+      within: module
+      from: plugin

@@ -1,0 +1,185 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: qdrant
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    Qdrant on Kubernetes via the helm provider's Workload synthesis, running the
+    official upstream qdrant/qdrant image (no external Helm chart). Vector data
+    is the point of this store rather than a cache of something else, so the
+    workload renders as a StatefulSet with a persistent volume mounted at the
+    server's storage path, alongside the governing headless Service the stateful
+    form requires and a ClusterIP Service publishing both the HTTP and the gRPC
+    port. Authentication is off by default; when the optional api_key credential
+    slot is attached the value is delivered as an env secretKeyRef and the server
+    reads it as its service API key, so the plaintext key never appears in the
+    rendered manifest, and the optional read_only_api_key slot reaches the
+    server the same way as its read-only key. provides.host is the bare
+    in-cluster Service name; a consumer in another namespace qualifies it on its
+    own side. Reach for this realization where the build must complete with
+    nothing fetched, or where no chart repository is reachable from it; reach
+    for `qdrant-chart`, which renders the product's own Helm chart, where the
+    server should carry the maintainers' own start-up script, volume ownership
+    step and pre-stop pause. That realization additionally renders the chart's
+    interaction check, a Pod annotated as a test hook whose script deletes and
+    recreates a collection on the running server; this realization renders no
+    such Pod. provides.metrics_endpoint names the server's metrics on the REST
+    port; while api_key is attached a scrape presents the read-only key where
+    read_only_api_key is attached, and the api_key otherwise.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/datastore/qdrant:1.0.0
+  # This Recipe reads no infra.overrides keys.
+  #
+  # provides.host is the bare Service name "<rendered_name>-default" — the helm
+  # provider names the synthesized ClusterIP Service "<rendered_name>-<service-key>"
+  # (here "<rendered_name>-default"), with no namespace segment, so the Recipe
+  # is independent of where it is deployed. A same-namespace consumer reaches it
+  # under this name directly; a cross-namespace consumer qualifies it with the
+  # target namespace caller-side. protocol is "http" — the
+  # port published as provides.port serves Qdrant's REST API over HTTP, and a
+  # consumer composing a URL needs the scheme rather than the product name.
+  #
+  # metrics_endpoint is where the server serves its Prometheus metrics: /metrics
+  # on the REST port of the same Service, spelling the Service name out again
+  # because a provides entry cannot read another provides entry. The workload
+  # runs one replica, so the one address reaches all of it. With the api_key
+  # slot attached, the key guards that route too, so a scrape presents a key:
+  # the read-only key where read_only_api_key is attached, which the route
+  # answers, and the api_key otherwise.
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ .infra.port }}"
+    grpc_port: "{{ .infra.grpc_port }}"
+    protocol: "http"
+    metrics_endpoint: "http://{{ .context.rendered_name }}-default:{{ .infra.port }}/metrics"
+  # A Release may write a key of an infra group as an empty string —
+  # `compute.cpu: ""`, or `storage.size: ""` — and a key written that way
+  # replaces the Component's default rather than falling back to it. Rendered,
+  # that would emit a workload with no CPU or memory limit, or a volume that
+  # requests no size: a Release materially different from the one the
+  # Component's declared defaults describe, with nothing in the output saying so.
+  # The build halts here instead, naming the key and the group it belongs to, so
+  # the fix is one line in the Release. A key the Release leaves out takes the
+  # Component's default. The storage class is not checked: left unset, the
+  # volume is provisioned from the cluster's default storage class.
+  assertions:
+    compute_group_complete: >-
+      {{- if not (optional (default dict .infra.compute) "cpu" "") -}}
+      {{- fail "this Release sets part of infra.compute on the vector store but leaves compute.cpu empty, so the rendered workload would carry no CPU request or limit: set both compute.cpu and compute.memory together, or remove the compute block entirely to take the component's defaults" -}}
+      {{- end -}}
+      {{- if not (optional (default dict .infra.compute) "memory" "") -}}
+      {{- fail "this Release sets part of infra.compute on the vector store but leaves compute.memory empty, so the rendered workload would carry no memory request or limit: set both compute.cpu and compute.memory together, or remove the compute block entirely to take the component's defaults" -}}
+      {{- end -}}
+    storage_group_complete: >-
+      {{- if not (optional (default dict .infra.storage) "size" "") -}}
+      {{- fail "this Release leaves storage.size empty on the vector store, so the rendered volume would request no size: set storage.size to the size the volume needs, or leave it out of the Release to take the component's default" -}}
+      {{- end -}}
+  workload: |
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # form: stateful selects a StatefulSet on the helm provider; the
+    # persistentTemplate volume and the headless Service below are companions of
+    # this form.
+    form: stateful
+    replicas: 1
+    containers:
+      main:
+        image: "qdrant/qdrant:{{ .infra.engine_version }}"
+        # The server reads its whole configuration from a file it ships, and every
+        # setting in that file can be overridden by an environment variable whose
+        # name is the setting's path, uppercased, prefixed QDRANT__ and joined by
+        # a double underscore. Each knob below is emitted only when the Aggregate
+        # set it, so a bare deployment renders no configuration variables at all
+        # and the server keeps its own built-in defaults. Authentication rides the
+        # optional api_key slot: the key is delivered as an env secretKeyRef
+        # (QDRANT__SERVICE__API_KEY), so the plaintext never lands in the
+        # manifest, and the server enforces it on every request. The optional
+        # read_only_api_key slot is delivered the same way, as
+        # QDRANT__SERVICE__READ_ONLY_API_KEY, the server's read-only key, which
+        # it answers with read access and never a write; the Component halts the
+        # build when that slot is filled without api_key. Both listen ports
+        # are set from infra so the container ports and the published Service
+        # ports cannot drift apart.
+        variables:
+          QDRANT__SERVICE__HTTP_PORT: "{{ .infra.port }}"
+          QDRANT__SERVICE__GRPC_PORT: "{{ .infra.grpc_port }}"
+    {{- with .values.log_level }}
+          QDRANT__LOG_LEVEL: "{{ . }}"
+    {{- end }}
+    {{- with .values.max_request_size_mb }}
+          QDRANT__SERVICE__MAX_REQUEST_SIZE_MB: "{{ . }}"
+    {{- end }}
+    {{- if .values.telemetry_disabled }}
+          QDRANT__TELEMETRY_DISABLED: "true"
+    {{- end }}
+    {{- $features := default dict .features }}
+    {{- if or (hasKey $features "api_key") (hasKey $features "read_only_api_key") }}
+        attachments:
+    {{- if hasKey $features "api_key" }}
+          QDRANT__SERVICE__API_KEY:
+            from: api_key
+            as: env
+    {{- end }}
+    {{- if hasKey $features "read_only_api_key" }}
+          QDRANT__SERVICE__READ_ONLY_API_KEY:
+            from: read_only_api_key
+            as: env
+    {{- end }}
+    {{- end }}
+        ports:
+          http: {{ .infra.port }}
+          grpc: {{ .infra.grpc_port }}
+        # Qdrant serves /readyz on its REST port, answering 200 once the server
+        # is started and ready to be used. An http probe is sent to the container
+        # port whose name sorts first, which here is `grpc`, and the Services
+        # name both ports, so neither is renamed; the image carries no HTTP client
+        # an exec probe could run. The readiness probe therefore opens a TCP
+        # connection to the REST port, with the timing the product's own chart
+        # gives its readiness probe. That chart ships its liveness probe switched
+        # off, and this realization follows it: no liveness probe is declared.
+        health:
+          ready:
+            tcp: {{ .infra.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 6
+        # The resource quantities are quoted so the rendered value stays a string
+        # whatever the Release supplies. Rendered bare, a whole-core quantity
+        # such as 1 or 2 re-parses as a YAML integer and fails workload validation,
+        # which wants a string here; a milli quantity such as 250m happens not to.
+        # Quoting removes the difference, so every legal quantity a Release may
+        # write renders and validates alike.
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+        volumeMounts:
+          - name: data
+            path: /qdrant/storage
+    volumes:
+      data:
+        persistentTemplate:
+          size: "{{ .infra.storage.size }}"
+          class: "{{ .infra.storage.type }}"
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          http: {{ .infra.port }}
+          grpc: {{ .infra.grpc_port }}
+      headless:
+        type: Headless
+        ports:
+          http: {{ .infra.port }}
+          grpc: {{ .infra.grpc_port }}

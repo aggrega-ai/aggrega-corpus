@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Aggregate
+metadata:
+  name: aggregate
+  version: "1.0.0"
+  description: >
+    A single MariaDB database targeted at AWS RDS through a vendored Terraform
+    module. The developer states intent once; the Recipe layer decides whether
+    that intent renders as an inline HCL body or, as here, as a copied module
+    whose input variables the compiler supplies.
+spec:
+  components:
+    # ── Database ────────────────────────────────────────────────────────
+    # The Component's root_password slot is not bound here: who owns the
+    # credential follows from the target the Manifest picks, so the Release
+    # binds it.
+    db:
+      type: core/datastore/mariadb
+      values:
+        database: appdb
+        charset: utf8mb4
+        collation: utf8mb4_general_ci

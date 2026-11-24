@@ -1,0 +1,450 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Component
+metadata:
+  name: core/gateway/agentgateway
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    agentgateway, an open-source gateway for model, tool and agent traffic,
+    serving the OpenAI chat-completions API in front of the models wired to
+    it. It terminates client HTTP traffic on its data-plane port, publishes
+    that port's host, port and protocol, and runs from one configuration file.
+
+    Each model wired to its models socket is served under the connection's
+    alias: a request names the alias as its model at the gateway's one /v1
+    base URL, and is sent to the endpoint and model name the model publishes,
+    presenting that connection's credential. It publishes that base URL as
+    its endpoint and values.model as its model, so an agent's model socket
+    takes it in place of a model; with nothing wired it serves no model and
+    both are empty. A Release may name its callers in infra.callers, their
+    keys through the caller_keys slot; every model request must then present
+    a declared key as `Authorization: Bearer <key>`.
+
+    Two realizations run the same image, pinned by digest. On Kubernetes,
+    `agentgateway-chart` renders the project's standalone Helm chart, fetched
+    from the project's registry, and realizes data masking, prompt deny
+    patterns, the period budget, audit logging and the retry policy; the
+    fallback chain, target selection, the semantic cache, response
+    validation and the prompt-injection shield halt the build there, each
+    naming why. Under Docker Compose, `agentgateway` runs it as one service
+    and realizes none of them, nor callers, so an attachment halts the build
+    naming its type.
+
+    With `values.metrics_enabled` true each Recipe publishes the address of
+    the gateway's metrics, always on, on a port that checks no caller, as
+    `metrics_endpoint`; false, that key is empty.
+  labels:
+    component.aggrega.ai/type: server
+    component.aggrega.ai/category: gateway
+    component.aggrega.ai/hosting: self-hosted
+    component.aggrega.ai/upstream-licensing: osi-approved
+    # Model API: the endpoint this gateway publishes answers the OpenAI API —
+    # the chat-completions route agentgateway serves under /v1 for the models
+    # wired to its models socket, each chosen by the alias a request names as
+    # its model — so a consumer drives it with an OpenAI client whichever model
+    # answers behind it. It is what lets a model socket selecting this key
+    # admit the gateway beside the models themselves; the gateway publishes the
+    # endpoint and the model name such a socket's consumers read. The value
+    # names what the product serves, not a configured state: with nothing wired
+    # to the models socket the gateway serves no model, and both of those are
+    # empty. Read off agentgateway's own reference at v1.6.0, the release both
+    # Recipes run.
+    model.aggrega.ai/api: openai
+    # The gateway capability dimension: agentgateway reads the body of each
+    # request on its model-serving paths to find the model it names, which is
+    # how it chooses the entry a request is sent to, and it reads the tokens
+    # each reply reports. A runtime control that has to parse a model payload
+    # can therefore attach here. The value names what the product does on
+    # those paths, not a configured state: with nothing wired to the models
+    # socket no request is routed by its model.
+    gateway.aggrega.ai/intelligence: semantic
+    # Data-path capability label: what this gateway is able to do, never what
+    # a given Release has switched on.
+    #
+    # Content masking: agentgateway's regular-expression guard replaces each
+    # match of a pattern written in its configuration with a placeholder, in
+    # a model request before it is forwarded and in a reply that arrives whole
+    # before it is returned, and recognizes no entity types — the fidelity
+    # this value names, read off agentgateway's own reference at v1.6.0. A
+    # streamed reply is not masked, so while replies are masked
+    # `agentgateway-chart` refuses a request asking for one. It masks nothing
+    # until patterns are supplied, which is what attaching core/data-masking
+    # does; `agentgateway-chart` writes them into the configuration, and
+    # `agentgateway`, the compose realization, has no realization of it.
+    dataplane.aggrega.ai/content-masking: pattern-list
+    # Prompt guard: the same guard refuses a model request whose text one of
+    # the patterns in its configuration matches — the fidelity this value
+    # names. It refuses nothing until a list is supplied, which is what
+    # attaching core/prompt-deny-patterns does; `agentgateway-chart` writes
+    # the list into the configuration, and the compose realization has no
+    # realization of it.
+    dataplane.aggrega.ai/prompt-guard: pattern-list
+    # Period budget: agentgateway can refuse model requests once what a key
+    # has spent over a window reaches a limit set in its configuration,
+    # counted in US dollars priced from the model cost catalog it keeps, or in
+    # tokens; cost names the wider of the two. It refuses nothing until
+    # core/period-budget is attached; `agentgateway-chart` writes the budget
+    # into the configuration and counts tokens, since no model wired here is
+    # priced by that catalog, and the compose realization has no realization
+    # of it.
+    dataplane.aggrega.ai/period-budget: cost
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  # How each AI gateway control the labels admit is or is not realized, on the
+  # chart Recipe; the compose Recipe realizes none of them:
+  # - core/data-masking and core/prompt-deny-patterns: agentgateway's
+  #   regular-expression guards, written into the configuration;
+  #   data-masking-agentgateway and prompt-deny-patterns-agentgateway refuse
+  #   what those guards cannot keep.
+  # - core/period-budget: a token budget on each declared caller's API key, or
+  #   a token bucket for the gateway or for each model name;
+  #   period-budget-agentgateway refuses US dollars, since no wired model is
+  #   priced, prompt or completion tokens alone and a calendar month.
+  # - core/audit-logging: a row in the gateway's SQLite store per model
+  #   request past its key, budget and authorization checks;
+  #   audit-logging-agentgateway refuses a cost, a retention, and a verified
+  #   caller while none is declared.
+  # - core/retry-policy: a retry policy of the configuration's own, attached
+  #   to the listener the model requests arrive on;
+  #   retry-policy-agentgateway refuses more than 256 sends.
+  # - core/fallback-chain: not realized. agentgateway fails over by evicting
+  #   a failed model for the requests after it and answers the request that
+  #   failed with its failure, so no request is walked along a chain.
+  # - core/target-selection: not realized. agentgateway chooses among the
+  #   targets of a model name by a random draw of two weighed on health and
+  #   latency, which is not the target observed to answer quickest, and never
+  #   by cost.
+  # - core/semantic-caching: not realized; agentgateway keeps no cache of
+  #   replies.
+  # - core/response-validation: not realized; agentgateway checks no reply
+  #   against a schema.
+  # - core/prompt-injection-shield: not realized; agentgateway judges a
+  #   request for an attempt to override a model's instructions only through
+  #   a service it calls, and its realization wires none.
+  # The realization of each of those five halts every attachment, naming why.
+  #
+  # Self-inject allowlist: the component may inject resolved uses-edge values
+  # into the env delivery mechanism.
+  inject: [env]
+
+  usesSchema:
+    # The models the gateway serves, each wired as a connection: any ai-model
+    # Component, managed or self-hosted, one or several. Each connection is
+    # one model entry in the gateway's configuration, named by the
+    # connection's alias: a request naming that alias as its model, on the
+    # gateway's chat-completions route at /v1/chat/completions, is sent to the
+    # endpoint the model publishes with /chat/completions appended, asking for
+    # the model name the model publishes whatever name the request carried —
+    # pointers the compiler pipes into the configuration and never resolves.
+    # Every alias shares the one /v1 base URL, so the model name a request
+    # sends chooses the model. The gateway writes a wired model's entry for
+    # the OpenAI API alone, as an OpenAI-compatible provider accepting chat
+    # completions, so a connection whose target's model.aggrega.ai/api is not
+    # openai halts the build, naming it. A published endpoint that is not an
+    # absolute http or https URL, or that carries user information, a query
+    # or a fragment, halts the build where the configuration is written,
+    # because agentgateway refuses such a base URL when it reads the file.
+    #
+    # The credential the gateway presents to a wired model is the one its
+    # connection carries in the credential slot, sent as a bearer token. The
+    # configuration names the variable holding it, never the value, and
+    # agentgateway replaces the variable with its value from its environment
+    # when it reads the file; a variable missing from that environment stops
+    # the gateway at start-up rather than sending its name. A connection
+    # carrying none adds no credential. A connection to a target labelled
+    # component.aggrega.ai/hosting: managed with no credential halts the build
+    # unless its values set unauthenticated: true. A self-hosted server that
+    # checks a key holds it in a slot of its own, and its connection carries a
+    # credential holding the same key.
+    #
+    # Optional: with nothing wired, the gateway serves no model and its
+    # configuration lists none.
+    models:
+      selector: "component.aggrega.ai/category=ai-model"
+      valueSchema:
+        unauthenticated:
+          type: boolean
+          default: false
+          description: Declares that the model this connection reaches takes no credential, so a connection carrying none is intended rather than an omission. It changes nothing this component renders.
+      featuresSchema:
+        credential:
+          selector: "feature.aggrega.ai/kind=secret"
+          sensitive: true
+          inject: [env]
+          description: "Optional credential the gateway presents to the model this connection reaches, as a bearer token. When attached, the Recipe delivers it as AI_PROXY_<ALIAS>_API_KEY, the connection's alias in capitals with every character other than a letter or a digit as an underscore — a Kubernetes secretKeyRef to the Secret the credential publishes on the chart realization, which halts the build when it publishes none, and the value the credential publishes under that name on the inject pipe on compose — and the connection's model entry names $AI_PROXY_<ALIAS>_API_KEY, which agentgateway replaces from its environment, never the value. The key must be a plain token — letters, digits and - . _ ~ + / = — because agentgateway reads the file as YAML after putting the key into it, and other characters can load as a different key or stop the gateway. Unattached, the entry adds no credential."
+
+  featuresSchema:
+    # The keys the callers infra.callers declares present to the gateway. They
+    # are credentials, so they reach the gateway only by reference to the one
+    # Secret this slot names: `agentgateway-chart` delivers each caller's key
+    # from that Secret as an environment variable, under the caller's own name
+    # as the data key, and the configuration names the variable, which
+    # agentgateway replaces from its environment when it reads the file, so no
+    # rendered resource of the gateway's carries a key. Attached exactly when
+    # infra.callers declares a caller, which the assertion
+    # callers_are_declared_with_their_keys below holds. The selector is
+    # secret-kind-pinned but family-agnostic; the Recipe reads the Secret's
+    # name the fill publishes, so core/referenced-secret-set fills it.
+    caller_keys:
+      selector: "feature.aggrega.ai/kind=secret"
+      sensitive: true
+      inject: [env]
+      description: "The Secret holding the key each caller infra.callers declares presents to the gateway, one data key per caller, the data key being the caller's name. The attached credential must publish the Secret's name, as core/referenced-secret-set does, and a credential publishing none halts the build. The chart Recipe delivers each key as CALLER_<NAME>_KEY, the caller's name in capitals with every character other than a letter or a digit as an underscore, by a Kubernetes secretKeyRef, and the configuration names $CALLER_<NAME>_KEY, never the key. Each key must be a plain token — letters, digits and - . _ ~ + / = — because agentgateway reads the file as YAML after putting the key into it, and other characters can load as a different key or stop the gateway. Required while infra.callers declares a caller, and refused while it declares none. A caller with no data key of its name in the Secret leaves the gateway unable to start, since Kubernetes starts no container whose secretKeyRef names a missing key; that is caught at start, not by the build. A request presenting an empty key is refused. A key changed inside the Secret takes effect when the gateway's pod next starts, so the key it replaces is accepted until then."
+
+  schema:
+    # The models the gateway serves arrive on the models socket, so the
+    # developer values are the alias it publishes as its model and whether it
+    # publishes where it serves its metrics.
+    values:
+      # Developer Intent — filled by the Developer in the Aggregate.
+      #
+      # The alias this gateway publishes as its model. A component wired to the
+      # gateway's address over a model socket — an agent, a tool, a memory store
+      # — reads one endpoint and one model name off the edge, the same keys a
+      # model publishes; the endpoint is the gateway's /v1 base URL and the
+      # model name is the alias. A Recipe writes the gateway's published values
+      # from what the gateway itself was given, which holds none of its
+      # connections, so the published alias is named here rather than taken
+      # from the socket: with a connection on the models socket this value is
+      # required, and with none it is omitted.
+      model:
+        type: string
+        description: The alias of a connection on the models socket that this gateway publishes as its model, the model name a consumer wired to it sends. It must be an alias a models connection carries, and the build halts naming this value otherwise; it is required while the models socket holds a connection, and omitted while it holds none.
+      # The gateway's own metrics, in the Prometheus format: agentgateway always
+      # serves them on a stats listener of its own, port 15020 on every
+      # interface, which answers /metrics and /stats/prometheus and nothing else
+      # and checks no caller. Each Recipe leaves them on whatever this value
+      # says, so false only keeps their address unpublished. True gives the
+      # chart realization a ClusterIP Service carrying that port; under Docker
+      # Compose any peer on the network reaches it already.
+      metrics_enabled:
+        type: boolean
+        default: false
+        description: Publishes the address of the gateway's own metrics, in the Prometheus format, as `metrics_endpoint`, putting their port on a Service where a realization needs one; while false that key is empty. The metrics port checks no caller, so anything that reaches it can read them.
+    infra:
+      # Operational Sizing — filled by the Operator in the Release. Developer
+      # never sees this.
+      #
+      # The data-plane port: the port the configuration's gateway listens on
+      # and the port of the Service or compose service in front of it, so the
+      # published address and the listener move together. The default is the
+      # port agentgateway serves model traffic on when a configuration names
+      # none. The image runs as an unprivileged user with no capability to bind
+      # a port below 1024.
+      http_port:
+        type: integer
+        min: 1024
+        max: 65535
+        default: 4000
+        description: Data-plane port consumers connect to.
+      # The callers the gateway authenticates, by name. Each becomes an API
+      # key of the configuration, checked in strict mode and named after the
+      # caller, whose key the caller_keys Secret holds under that name, so
+      # every model request then has to present a declared key, a period budget
+      # can count each caller apart and a request record names the caller.
+      # With none declared the model routes are open, as they are without this
+      # key.
+      callers:
+        type: array
+        min: 1
+        items:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{1,253}$"
+        description: The callers the gateway serves models to, by name, each presenting its own key in the Authorization header as `Bearer <key>`, which is how an OpenAI client presents one. Every model request then has to present a declared key — one presenting none, or an unknown one, is refused with HTTP 401 — and the key is removed from the request the gateway forwards. A name takes letters, digits, hyphens and underscores, and is also the data key holding that caller's key in the Secret the caller_keys slot names. Read by `agentgateway-chart`; the compose realization halts the build on it. Omit it for open routes.
+      # The volume the chart realization keeps its store on: one SQLite file,
+      # holding the count of each caller's period budget and a record of each
+      # model request. It is rendered only while an attachment needs the store.
+      storage:
+        size:
+          type: string
+          default: "1Gi"
+          description: Size of the persistent volume holding the SQLite file in which the gateway keeps its callers' period budgets and its request records. The chart realization renders that volume only while core/audit-logging, or core/period-budget with scope caller, is attached; the compose realization keeps no store and ignores it.
+      source_version:
+        type: string
+        description: Version of the standalone Helm chart the chart-backed realization pulls. The realization holds the chart versions its configuration is proven at, and the build halts naming them on any other. The compose realization pulls no chart and ignores it.
+      # The gateway's own resources. The chart realization sets them as the
+      # container's limits beside the chart's own requests; the compose
+      # realization sets them as both.
+      compute:
+        cpu:
+          type: string
+          default: 250m
+        memory:
+          type: string
+          default: 512Mi
+      overrides:
+        type: object
+        additionalProperties: true
+        description: Provider-specific overrides. Accepts any nested structure. Each Recipe documents which keys it reads.
+    provides:
+      # Public API Contract — keys exported to consumers via uses topology edges.
+      host:
+        type: string
+        required: true
+        description: >
+          DNS name of the Service, or the compose service, fronting the
+          gateway's data plane, the name alone without a namespace. A consumer
+          sends its client traffic here rather than to the model behind the
+          gateway.
+      port:
+        type: integer
+        required: true
+        description: >
+          TCP port that address accepts model traffic on, infra.http_port.
+      protocol:
+        type: string
+        description: How the published address is spoken to — `http`, so a consumer composes an address on that scheme.
+      # endpoint and model together are the contract every model component
+      # publishes, which is what lets a model socket take this gateway in place
+      # of a model with its consumer's Recipe unchanged. Neither is required:
+      # with nothing wired to the models socket the gateway serves no model and
+      # publishes both empty.
+      endpoint:
+        type: string
+        description: >
+          Full base URL of the OpenAI-compatible API the gateway serves, with
+          the host, the port and /v1 composed. A caller hands it to a client
+          library as its base URL and names values.model as its model; every
+          other wired model is served at the same base URL under its own
+          alias. Empty while nothing is wired to the models socket.
+      model:
+        type: string
+        description: >
+          The alias a consumer wired to the gateway sends as its model name:
+          values.model. The gateway sends the request on asking for the model
+          name the wired model publishes. Empty while nothing is wired to the
+          models socket.
+      # The address a Prometheus server scrapes the gateway's own metrics at,
+      # while values.metrics_enabled is true: /metrics on port 15020, of a
+      # Service of its own on the chart realization and of the compose
+      # service under Docker Compose. Every Recipe publishes it spelled out in
+      # full, because a provides entry cannot read another.
+      metrics_endpoint:
+        type: string
+        description: >
+          The full address Prometheus scrapes this component's metrics at —
+          scheme, host, port and path, `http://<host>:15020/metrics`. Empty
+          while values.metrics_enabled is false.
+
+  # The rules of the callers and of the models socket, with the credential
+  # rule every socket declaring unauthenticated carries. Each reads what the
+  # Aggregate and the Release wrote — the values, the callers, the attachments
+  # and each connection's target labels, values and attachments — all known
+  # before a Recipe binds, so each holds whichever Recipe renders this
+  # component and halts before anything renders.
+  #
+  # The refusals of the Features the gateway's labels admit live in their
+  # realizations rather than here: an assertion here reads an attachment's
+  # values and not its infra, where most of what those realizations refuse is
+  # set.
+  #
+  # DELIBERATE NEAR-DUPLICATES: published_model_is_a_wired_alias,
+  # wired_model_speaks_the_openai_api, credential_variables_are_distinct and
+  # managed_target_needs_a_credential repeat the rules core/gateway/apisix
+  # declares for its models socket, and callers_are_declared_with_their_keys
+  # the rule it declares for its callers. Each assertion sits inside the
+  # entity it guards, and no catalog kind holds an assertion for several
+  # components to share; here an alias is a model name a request sends to one
+  # base URL, where on APISIX it is a path segment, and callers need no model
+  # wired, since this gateway reads its whole configuration from one file
+  # whatever it serves.
+  assertions:
+    # Each caller's key reaches the gateway from the Secret its caller_keys
+    # slot names, under a variable named after the caller in capitals with
+    # every character other than a letter or a digit as an underscore — so two
+    # callers that rule maps to one name, alice-a and alice_a, or one name
+    # written twice, would share one key — and the slot is attached exactly
+    # when a caller is declared, since a key Secret no caller reads, or callers
+    # with no Secret to read from, says otherwise.
+    callers_are_declared_with_their_keys: >-
+      {{- $callers := optional .infra "callers" list -}}
+      {{- $hasKeys := hasKey (optional . "features" dict) "caller_keys" -}}
+      {{- if $callers -}}
+      {{- $seen := dict -}}
+      {{- range $caller := $callers -}}
+      {{- $variable := regexReplaceAll "[^A-Z0-9]" (upper $caller) "_" -}}
+      {{- with get $seen $variable -}}
+      {{- if eq . $caller -}}
+      {{- fail (printf "infra.callers of %q names %s more than once; name each caller once" $.metadata.instance_id $caller) -}}
+      {{- end -}}
+      {{- fail (printf "infra.callers of %q names %s and %s, which would each present their key under one variable, because the gateway names a caller's variable after the caller in capitals with every character other than a letter or a digit as an underscore; give each caller a name of its own" $.metadata.instance_id . $caller) -}}
+      {{- end -}}
+      {{- $_ := set $seen $variable $caller -}}
+      {{- end -}}
+      {{- if not $hasKeys -}}
+      {{- fail (printf "infra.callers of %q declares %s, but nothing is attached to its caller_keys slot, so the gateway has no Secret to read its callers' keys from; attach core/referenced-secret-set to caller_keys, with one data key per caller, named for the caller" .metadata.instance_id (join ", " $callers)) -}}
+      {{- end -}}
+      {{- else if $hasKeys -}}
+      {{- fail (printf "an attachment fills the caller_keys slot of %q, but infra.callers declares no caller, so the gateway would read no key from it; declare the callers in infra.callers, or remove the attachment" .metadata.instance_id) -}}
+      {{- end -}}
+    # The model the gateway publishes must be one it serves. values.model names
+    # the alias of a connection on the models socket, and is required while the
+    # socket holds one, because the published values are written from what the
+    # gateway was given and a connection is not among it. With nothing wired, a
+    # value naming an alias names a model the gateway does not serve.
+    published_model_is_a_wired_alias: >-
+      {{- $wired := sortAlpha (keys (optional .uses "models" dict)) -}}
+      {{- with optional .values "model" "" -}}
+      {{- if not (has . $wired) -}}
+      {{- if $wired -}}
+      {{- fail (printf "values.model is %q, but no connection on the models socket carries that alias, so a component wired to this gateway would ask for a model it does not serve; set values.model to one of the aliases the models socket carries: %s" . (join ", " $wired)) -}}
+      {{- else -}}
+      {{- fail (printf "values.model is %q, but nothing is wired to the models socket, so the gateway serves no model to publish under that alias; wire a model to the models socket under that alias, or remove values.model" .) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- else -}}
+      {{- if $wired -}}
+      {{- fail (printf "values.model is not set, but the models socket carries %s, so the gateway cannot tell which of them a component wired to it asks for, and the alias a connection is served under is not among what its published values are written from; set values.model to one of them" (join ", " $wired)) -}}
+      {{- end -}}
+      {{- end -}}
+    # A wired model's entry is written from the endpoint and the model name the
+    # model publishes, for agentgateway to reach over the OpenAI API, which is
+    # what model.aggrega.ai/api: openai asserts answers at that endpoint. A
+    # model whose API is another needs that provider's own settings, which
+    # nothing the model publishes names, so it halts rather than being written
+    # as a guess.
+    wired_model_speaks_the_openai_api: >-
+      {{- range $alias, $connection := (optional .uses "models" dict) -}}
+      {{- $api := optional $connection.labels "model.aggrega.ai/api" "" -}}
+      {{- if ne $api "openai" -}}
+      {{- fail (printf "the models connection %s of %q reaches %q, whose model.aggrega.ai/api is %q, but the gateway writes a wired model's entry from the endpoint and model name it publishes for the OpenAI API alone, so it cannot write an entry for it; wire a model whose model.aggrega.ai/api is openai instead" $alias $.metadata.instance_id $connection.target $api) -}}
+      {{- end -}}
+      {{- end -}}
+    # The Recipes name the variable a models connection's credential is
+    # delivered under after the connection's alias in capitals, with every
+    # character other than a letter or a digit as an underscore, so two aliases
+    # that rule maps to one name — fast-a and fast_a — would deliver two
+    # credentials under one variable. It halts, naming both connections.
+    credential_variables_are_distinct: >-
+      {{- $seen := dict -}}
+      {{- range $alias, $connection := (optional .uses "models" dict) -}}
+      {{- if hasKey $connection.features "credential" -}}
+      {{- $variable := regexReplaceAll "[^A-Z0-9]" (upper $alias) "_" -}}
+      {{- with get $seen $variable -}}
+      {{- fail (printf "the models connections %s and %s of %q would each deliver their credential under one variable, because the gateway names a connection's variable after its alias in capitals with every character other than a letter or a digit as an underscore; rename one of the two connections" . $alias $.metadata.instance_id) -}}
+      {{- end -}}
+      {{- $_ := set $seen $variable $alias -}}
+      {{- end -}}
+      {{- end -}}
+    # A connection to a target its catalog labels a managed service
+    # (component.aggrega.ai/hosting: managed) carries a credential, or says on
+    # the connection that its target takes none. The rule reads the target's
+    # labels, the connection's unauthenticated value and its credential slot,
+    # all known before a Recipe binds, so it holds whichever Recipe renders this
+    # component; a self-hosted target draws nothing. The list names every
+    # socket of this component that declares unauthenticated.
+    managed_target_needs_a_credential: >-
+      {{- range $socket := list "models" -}}
+      {{- range $alias, $connection := (optional $.uses $socket dict) -}}
+      {{- $managed := eq (optional $connection.labels "component.aggrega.ai/hosting" "") "managed" -}}
+      {{- $optedOut := optional (optional $connection "values" dict) "unauthenticated" false -}}
+      {{- if and $managed (not (hasKey $connection.features "credential")) (not $optedOut) -}}
+      {{- fail (printf "the %s connection %s of %q reaches %q, whose component.aggrega.ai/hosting label is managed, with no credential: attach one under credential on that connection, or set unauthenticated: true in its values" $socket $alias $.metadata.instance_id $connection.target) -}}
+      {{- end -}}
+      {{- end -}}
+      {{- end -}}

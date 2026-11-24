@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Release
+metadata:
+  name: k8s-helm-synth
+  environment: production
+  version: "1.0.0"
+spec:
+  aggregate: aggregate
+  manifest: manifest-helm-synth
+  boundaries:
+    app:
+      directory: app
+      components:
+        dashboards:
+          # Operational sizing owned by the operator. engine_version pins the
+          # official image tag; the synthesized Recipe renders no floating tag.
+          infra:
+            engine_version: "12.1.1"
+            compute:
+              cpu: 500m
+              memory: 512Mi
+            storage:
+              size: 10Gi

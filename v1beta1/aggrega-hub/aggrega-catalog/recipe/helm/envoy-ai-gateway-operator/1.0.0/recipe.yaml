@@ -1,0 +1,195 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: envoy-ai-gateway-operator
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    Installs the Envoy AI Gateway control plane through the project's own Helm
+    chart, referenced as an artifact in a container registry at the release
+    the controller image comes from. The chart's render carries the controller
+    Deployment and its arguments, the Service Envoy Gateway, the cluster's API
+    server and a metrics scraper reach it on, its service account, the cluster
+    role and binding granting what the project's chart grants, a cluster role
+    letting Envoy Gateway read inference pools, and the mutating webhook
+    configuration that adds the AI external processor to each Envoy Gateway
+    data-plane pod. That Service's /metrics address on 8080 is
+    provides.metrics_endpoint.
+
+    Beside the chart it emits the six AI Gateway custom-resource definitions,
+    carried beside this Recipe exactly as the project's definitions chart
+    publishes them at the same release. The webhook's serving certificate
+    comes from cert-manager by default: the chart's Certificate and
+    self-signed Issuer are rendered, so cert-manager must already run in the
+    cluster. With infra.webhook_tls_secret set it is the certificate in the
+    Secret that key names, which the operator creates beforehand: no
+    Certificate or Issuer is rendered, cert-manager is not needed, and the
+    Secret the chart would otherwise generate is left out. Every
+    namespaced resource lands in the namespace the Release declares for the
+    component, or in `default` where none is declared; the controller expects
+    the Envoy Gateway it extends in `envoy-gateway-system`, the chart's own
+    default. The controller's MCP session-encryption seed is read when it
+    starts from the Secret infra.mcp_session_seed_secret names, and is
+    otherwise the chart's published default.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/gateway/envoy-ai-gateway-operator:1.0.0
+
+  # The controller chart is distributed as an artifact in a container registry
+  # and referenced as one here. It is published by the project's own
+  # maintainers at the same version as the controller image the Component
+  # pins, and it carries the controller's access control, its Service, its
+  # webhook configuration and the arguments it runs with; the custom-resource
+  # definitions are a separate chart, emitted below. This Recipe maps the
+  # Component's surface into it rather than re-deriving any of that by hand,
+  # so the grant the controller runs under is the project's own at this
+  # release.
+  source:
+    kind: helm-oci-chart
+    url: oci://docker.io/envoyproxy/ai-gateway-helm
+    version: "v1.1.0"
+
+  # The address Envoy Gateway calls the controller's extension server on. The
+  # chart names the controller's Service after controller.fullnameOverride,
+  # which the mapping below binds to the rendered name, and serves the
+  # extension server on the Service's `grpc` port, 1063 — the chart's own
+  # port list, which this Recipe leaves as published. The same Service carries
+  # the webhook port the cluster's API server calls, the metrics port and the
+  # port the rate-limit service reads its configuration from.
+  #
+  # metrics_endpoint is the address the controller serves its own metrics at,
+  # in the Prometheus format: /metrics on 8080, the default listener of the
+  # Kubernetes controller library it is built on, which the controller leaves
+  # in place, always on and asking no credential. The chart's port list puts
+  # 8080 on this same Service as http-metrics, so the address is this Service's
+  # name with that port. It is spelled out in full on purpose: a provides entry
+  # cannot read another.
+  provides:
+    host: "{{ .context.rendered_name }}"
+    port: "1063"
+    metrics_endpoint: "http://{{ .context.rendered_name }}:8080/metrics"
+
+  # The chart is read for these values only; everything else stays the chart's
+  # own default at its release.
+  #
+  # The controller's resource names are bound to the rendered name, the release
+  # name the helm provider gives the chart: the chart derives its Deployment,
+  # Service and service-account names from controller.fullnameOverride rather
+  # than from a top-level key, and its own default for it is a fixed name.
+  #
+  # The controller image is the Component's infra.image. The chart writes it as
+  # "<repository>:<tag>", so the reference is cut at the last colon after its
+  # last slash, and the two halves join back into exactly the reference the
+  # Release names, a digest reference included; a reference with no tag
+  # leaves the chart's own tag, its release, in place. The external processor
+  # image the controller adds to each data-plane pod is the chart's own,
+  # tagged with the chart's release, so it does not float; it is not restated
+  # here.
+  #
+  # The webhook's serving certificate takes one of two modes, and
+  # infra.webhook_tls_secret chooses between them. Unset, it is the chart's
+  # cert-manager mode: the chart renders a cert-manager Certificate for the
+  # controller's Service name and the self-signed Issuer that signs it, and
+  # annotates the webhook configuration so cert-manager writes its CA bundle.
+  # Set, the chart mounts the Secret that key names into the controller's pod
+  # at /certs instead: it renders no Certificate and no Issuer and leaves the
+  # webhook configuration's CA bundle empty, and the controller, when it
+  # starts, writes the Secret's `ca.crt` into the webhook configuration as its
+  # CA bundle. In that mode the chart also renders a Secret of its own under
+  # the same name, which the omits entry below leaves out.
+  #
+  # The controller is told which namespace Envoy Gateway runs in, because it
+  # rolls the data-plane pods there, and the chart binds Envoy Gateway's service
+  # account in that namespace to the inference-pool reader role; the chart's
+  # own default for it, `envoy-gateway-system`, is left in place, so the Envoy
+  # Gateway this controller extends is expected there.
+  #
+  # The MCP session-encryption seed. The chart passes it to the controller as a
+  # command-line argument, written as given, and adds the container
+  # environment variables controller.extraEnvVars lists, so with
+  # infra.mcp_session_seed_secret set the argument is the reference
+  # $(MCP_SESSION_ENCRYPTION_SEED) and that variable is read from the Secret's
+  # `seed` entry: the cluster replaces a $(NAME) reference in a container's
+  # arguments with the variable's value when it starts the container, so the
+  # controller receives the seed and no rendered file carries it. A reference
+  # to a missing Secret or entry keeps the pod from starting rather than
+  # passing the reference through as the seed. Unset, both stay the chart's
+  # own, and the controller runs with the chart's published default seed.
+  valuesMapping: |
+    {{- $repository := .infra.image }}
+    {{- $tag := "" }}
+    {{- $name := last (splitList "/" .infra.image) }}
+    {{- if contains ":" $name }}
+      {{- $tag = last (splitList ":" $name) }}
+      {{- $repository = trimSuffix (printf ":%s" $tag) .infra.image }}
+    {{- end }}
+    controller:
+      fullnameOverride: "{{ .context.rendered_name }}"
+      image:
+        repository: "{{ $repository }}"
+        tag: "{{ $tag }}"
+      mutatingWebhook:
+        {{- with optional .infra "webhook_tls_secret" "" }}
+        tlsCertSecretName: {{ . | toJson }}
+        certManager:
+          enable: false
+        {{- else }}
+        certManager:
+          enable: true
+        {{- end }}
+      {{- with optional .infra "mcp_session_seed_secret" "" }}
+      mcp:
+        sessionEncryption:
+          seed: "$(MCP_SESSION_ENCRYPTION_SEED)"
+      extraEnvVars:
+        - name: MCP_SESSION_ENCRYPTION_SEED
+          valueFrom:
+            secretKeyRef:
+              name: {{ . | toJson }}
+              key: seed
+      {{- end }}
+
+  # Outside its cert-manager mode the chart renders a Secret of its own under
+  # the name the controller's pod mounts its certificate from, holding a key
+  # and certificate it generates afresh on every render: two builds would
+  # differ, and applying one would overwrite the operator's Secret. So with
+  # infra.webhook_tls_secret set, that generated Secret is left out, and the
+  # Secret the Release names, which the operator creates beforehand, is the
+  # one the controller's pod mounts. Unset, the chart renders no such Secret
+  # and the entry does not apply. The condition compares the key with the
+  # empty string, so the entry applies exactly when the mapping above selects
+  # this mode, whatever the Secret is named.
+  omits:
+    - kind: Secret
+      name: "{{ .infra.webhook_tls_secret }}"
+      when: '{{ ne (optional .infra "webhook_tls_secret" "") "" }}'
+
+  # The six AI Gateway custom-resource definitions, taken from the project's
+  # own definitions chart at the release the controller runs. The controller
+  # watches every one of them when it starts, so all six are installed rather
+  # than only the kinds a model route uses. Each file is the definitions
+  # chart's template unchanged, upstream licence header included, and none
+  # carries a template action, so it renders as written.
+  #
+  # Two of the definitions are larger than the copy of the applied object a
+  # client-side apply records in an annotation can hold, so they are applied
+  # server-side: a client-side apply refuses them.
+  artifacts:
+    aigateway.envoyproxy.io_aigatewayroutes.yaml:
+      $import: ./artifacts/aigateway.envoyproxy.io_aigatewayroutes.yaml
+    aigateway.envoyproxy.io_aiservicebackends.yaml:
+      $import: ./artifacts/aigateway.envoyproxy.io_aiservicebackends.yaml
+    aigateway.envoyproxy.io_backendsecuritypolicies.yaml:
+      $import: ./artifacts/aigateway.envoyproxy.io_backendsecuritypolicies.yaml
+    aigateway.envoyproxy.io_gatewayconfigs.yaml:
+      $import: ./artifacts/aigateway.envoyproxy.io_gatewayconfigs.yaml
+    aigateway.envoyproxy.io_mcproutes.yaml:
+      $import: ./artifacts/aigateway.envoyproxy.io_mcproutes.yaml
+    aigateway.envoyproxy.io_quotapolicies.yaml:
+      $import: ./artifacts/aigateway.envoyproxy.io_quotapolicies.yaml

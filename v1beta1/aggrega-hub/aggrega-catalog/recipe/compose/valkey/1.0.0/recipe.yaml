@@ -1,0 +1,148 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: valkey
+  version: 1.0.0
+  license: BSD-3-Clause
+  description: >
+    Valkey for local development via Docker Compose. Synthesized-mode
+    Workload — the compose provider translates the Workload kind into a service
+    entry (image, port, exposed service). Used as an in-memory cache with no
+    persistence, so no data volume is declared. Authentication is off by
+    default. An attached password is enforced: the server is started with
+    --requirepass through the image's VALKEY_EXTRA_FLAGS variable, which keeps
+    the value off the container's command line. The value is read under the
+    variable the attachment's values.key names, or else VALKEY_PASSWORD, and an
+    attachment delivering it under neither halts the build naming the slot. The
+    image expands that variable unquoted, so a password holding a space stops
+    the server at start, and one holding *, ? or [ is matched against file
+    names in the data directory, so write the password without either.
+    provides.host is the bare service name, resolved on the compose network.
+    Encrypted client connections are not served here: infra.client_tls set to
+    true, or a certificate attached to server_certificate, halts the build by
+    name, because the server reads its certificate from files and no credential
+    Feature realized on Compose names a secret a service can mount. The helm
+    realizations valkey and valkey-chart serve TLS from that slot.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: compose
+  implements: core/datastore/valkey:1.0.0
+  # This Recipe reads no infra.overrides keys.
+
+  provides:
+    host: "{{ .context.instance_id }}"
+    port: "{{ .infra.port }}"
+    protocol: "valkey"
+
+  # Encrypted client connections are refused by name here. The image serves TLS,
+  # but the server reads its certificate and key from files, and a Compose
+  # service mounts a file attachment only from a credential that names a secret
+  # resource — which no Compose realization of the catalog's credential Features
+  # does — so this realization has no way to hand the server its certificate.
+  # Both directions halt: client_tls true, and a certificate attached while it is
+  # false, since nothing here would present it.
+  #
+  # An attached password is enforced, or the build halts: the image reads no
+  # password variable of its own, so a value this Recipe could not find would
+  # leave the cache open while the Aggregate asks for it to be protected. The
+  # value is read under the variable the attachment names in values.key, as
+  # core/secret-value delivers it, and otherwise under VALKEY_PASSWORD.
+  workload: |
+    {{- if .infra.client_tls }}
+    {{- fail (printf "infra.client_tls is true on %q, but this Compose realization of core/datastore/valkey cannot serve TLS: the server reads its certificate and key from files, and no credential Feature the catalog realizes on Compose names a secret a service can mount as files; set infra.client_tls to false, or map the component to helm/valkey or helm/valkey-chart in the Manifest, which serve TLS from the server_certificate slot" .context.instance_id) }}
+    {{- end }}
+    {{- if hasKey (default dict .features) "server_certificate" }}
+    {{- fail (printf "a certificate is attached to the server_certificate slot of %q, but infra.client_tls is false and this Compose realization of core/datastore/valkey serves plaintext alone, since no credential Feature the catalog realizes on Compose delivers a certificate as files, so nothing would present it; remove the attachment, or map the component to helm/valkey or helm/valkey-chart in the Manifest and set infra.client_tls to true there" .context.instance_id) }}
+    {{- end }}
+    {{- $password := "" }}
+    {{- if hasKey (default dict .features) "password" }}
+    {{- $passwordKey := default "VALKEY_PASSWORD" (optional (optional (index .features "password") "values" dict) "key" "") }}
+    {{- $delivered := optional (default dict .context.inject) "env" dict }}
+    {{- if not (optional $delivered $passwordKey "") }}
+    {{- fail (printf "the password slot of %q is attached, but no value reaches this Recipe under %s, the variable it reads the password from, so the server cannot be started with it; attach core/secret-value and name the variable in its values.key, or deliver the value under VALKEY_PASSWORD" .context.instance_id $passwordKey) }}
+    {{- end }}
+    {{- $password = index $delivered $passwordKey }}
+    {{- end }}
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    containers:
+      main:
+        image: "valkey/valkey:{{ .infra.engine_version }}"
+        # Config knobs are passed as valkey flags; the official image's entrypoint
+        # prepends `valkey-server` to a flag-leading argument list. The block is
+        # emitted only when a knob is set, so a bare cache renders no args.
+        # Persistence (a durable StatefulSet + PVC) is a synthesized-Helm
+        # realization; this local-dev Compose flavor is ephemeral and declares no
+        # data volume, mirroring how the Compose postgres flavor leaves storage
+        # to the helm target.
+        #
+        # The server is told its port (--port) only when infra.port differs from
+        # 6379, the port the Valkey server listens on when it is given none — a
+        # fact about the server, not a copy of the Component's default. So a
+        # cache at the default port renders no flag, and one an operator moved
+        # listens where its healthcheck and the published port point.
+    {{- $portFlag := ne (toString .infra.port) "6379" }}
+    {{- if or .values.maxmemory .values.maxmemory_policy .values.databases .values.appendonly $portFlag }}
+        args:
+    {{- with .values.databases }}
+          - "--databases"
+          - "{{ . }}"
+    {{- end }}
+    {{- with .values.maxmemory }}
+          - "--maxmemory"
+          - "{{ . }}"
+    {{- end }}
+    {{- with .values.maxmemory_policy }}
+          - "--maxmemory-policy"
+          - "{{ . }}"
+    {{- end }}
+    {{- if .values.appendonly }}
+          - "--appendonly"
+          - "yes"
+    {{- end }}
+    {{- if $portFlag }}
+          - "--port"
+          - "{{ .infra.port }}"
+    {{- end }}
+    {{- end }}
+        # An attached password reaches the server as --requirepass through
+        # VALKEY_EXTRA_FLAGS, which the image's entrypoint appends to the server's
+        # arguments. Passed as an argument instead, the value would show in the
+        # container's command and in its first process's command line; as this
+        # variable it shows in neither. The entrypoint expands the variable
+        # unquoted, so a password holding whitespace stops the server at start,
+        # and one holding *, ? or [ is matched against file names in the data
+        # directory. With no password attached, nothing is emitted and the cache
+        # runs without authentication.
+    {{- if $password }}
+        variables:
+          VALKEY_EXTRA_FLAGS: {{ printf "--requirepass %s" $password | toJson }}
+    {{- end }}
+        ports:
+          valkey: {{ .infra.port }}
+        # The service's healthcheck sends PING with the image's own valkey-cli to
+        # the service's port. Valkey documents PING as the check that a connection
+        # is alive and that the server can serve data. Without its -e option the
+        # client does not turn an error reply into a failing exit status, so the
+        # check passes once the server answers on that port and fails while
+        # nothing answers there. A service keeps one healthcheck, so one probe is
+        # declared.
+        health:
+          ready:
+            exec:
+              - valkey-cli
+              - "-p"
+              - "{{ .infra.port }}"
+              - ping
+            periodSeconds: 10
+            timeoutSeconds: 5
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          valkey: {{ .infra.port }}

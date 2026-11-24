@@ -1,0 +1,286 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: apisix
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    Apache APISIX on Kubernetes via the helm provider's Workload synthesis (a
+    stateless Deployment plus a ClusterIP Service on the proxy port), running
+    the official upstream image with no Helm chart. APISIX holds no local
+    state — the etcd store is the system of record — so it renders stateless.
+
+    The Admin API is reachable only from inside the cluster — no Service
+    publishes its port — and is authenticated by the key the `admin_key`
+    credential slot names, which the Deployment delivers from the Secret the
+    attached credential publishes, so no rendered file carries the key. Its
+    client allowlist, `allow_admin`, admits every address, so narrow it
+    wherever the admin port is routable from outside the cluster.
+
+    It renders no route: routes live in etcd, written through the Admin API at
+    run time, so it serves no model, publishes an empty endpoint and model, and
+    halts on a connection to the models socket — `apisix-chart` serves those.
+    At its default image, APISIX 3.17.0, the gateway has no semantic cache
+    plugin (`ai-cache`), and its token rate limiting counts per node; it halts
+    on a core/period-budget, core/semantic-caching or core/prompt-deny-patterns
+    attachment, and on infra.callers, which only a routes file declares.
+
+    With `values.metrics_enabled` true, the gateway's metrics server moves off
+    the loopback address and its port, 9091, which checks no caller, joins the
+    Service, its address published as provides.metrics_endpoint; false, that
+    key is empty.
+
+    Reach for this realization where the build must complete with nothing
+    fetched; reach for `apisix-chart`, which renders the project's own chart
+    from named settings, where the configuration is expected to follow the
+    product or a model is served.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/gateway/apisix:1.0.0
+  # This Recipe reads no infra.overrides keys.
+  #
+  # provides.host is the bare Service name "<rendered_name>-default" — the helm
+  # provider names the synthesized ClusterIP Service "<rendered_name>-<service-key>"
+  # (here "<rendered_name>-default"), with no namespace segment. A same-namespace
+  # consumer reaches it under this name directly; a cross-namespace consumer
+  # qualifies it with the target namespace caller-side. Carrying no namespace,
+  # the name keeps the recipe independent of where it is deployed.
+  #
+  # endpoint and model are published empty: this realization renders no route,
+  # so it serves no model, and the assertion below halts on a models
+  # connection. A consumer wired to it over a model socket reads both empty,
+  # as from a gateway with nothing wired to that socket.
+  #
+  # metrics_endpoint is the address the gateway serves its own metrics at while
+  # values.metrics_enabled is true: the prometheus plugin's export server, on
+  # port 9091 of the same Service, at /apisix/prometheus/metrics. It is empty
+  # while the value is false, when that server listens on the loopback address
+  # only. It is spelled out in full on purpose: a provides entry cannot read
+  # another.
+  provides:
+    host: "{{ .context.rendered_name }}-default"
+    port: "{{ .infra.http_port }}"
+    protocol: "http"
+    endpoint: ""
+    model: ""
+    metrics_endpoint: "{{ if .values.metrics_enabled }}http://{{ .context.rendered_name }}-default:9091/apisix/prometheus/metrics{{ end }}"
+  # The gateway keeps its routes in etcd, written through the Admin API at run
+  # time, and nothing this realization renders writes one, so a model wired to
+  # the models socket would never be served. It halts instead, naming the
+  # connections and the realization that serves them. The Component's own
+  # assertion requires the etcd connection and the admin_key attachment while
+  # the models socket is empty, so whenever this realization renders it has
+  # both.
+  assertions:
+    # The callers infra.callers declares are consumers of a routes file, which
+    # this realization does not render: its gateway would authenticate nobody
+    # by them. It halts first, naming the value, ahead of any halt on the
+    # models socket.
+    callers_are_declared_by_the_chart_realization: >-
+      {{- with optional .infra "callers" list -}}
+      {{- fail (printf "infra.callers of %q declares %s, but the apisix realization renders no routes file, the only place the gateway's callers are declared, so it would authenticate none of them; map core/gateway/apisix to helm/apisix-chart, which declares them while a model is wired, or remove infra.callers" $.metadata.instance_id (join ", " .)) -}}
+      {{- end -}}
+    models_are_served_by_the_chart_realization: >-
+      {{- with sortAlpha (keys (optional .uses "models" dict)) -}}
+      {{- fail (printf "%q carries %s on its models socket, but the apisix realization renders no route: it runs APISIX with its routes in etcd, written through the Admin API at run time, so no wired model would be served; map core/gateway/apisix to helm/apisix-chart, which serves the models wired to that socket, or remove the connection" $.metadata.instance_id (join ", " .)) -}}
+      {{- end -}}
+    # A period budget and a semantic cache act on the routes the gateway serves
+    # models on, and this realization renders none, so either attachment would
+    # be written nowhere. Each halts, naming what the gateway at its default
+    # image, APISIX 3.17.0, would offer even with routes written at run time:
+    # a token rate limit counted by each gateway process on its own, and no
+    # semantic cache plugin at all.
+    budget_and_cache_are_written_by_the_chart_realization: >-
+      {{- range $name, $attachment := (optional . "features" dict) -}}
+      {{- $type := first (splitList ":" (toString $attachment.type)) -}}
+      {{- if eq $type "core/period-budget" -}}
+      {{- fail (printf "core/period-budget attachment %q on %q is bound to the apisix realization, which renders no route: it runs APISIX with its routes in etcd, written through the Admin API at run time, so there is no model route to write the budget onto, and at its image, APISIX 3.17.0, the token rate limit counts each gateway process on its own; map core/gateway/apisix to helm/apisix-chart, which writes the budget onto the routes of the models wired to its models socket" $name $.metadata.instance_id) -}}
+      {{- else if eq $type "core/semantic-caching" -}}
+      {{- fail (printf "core/semantic-caching attachment %q on %q is bound to the apisix realization, which renders no route: it runs APISIX with its routes in etcd, written through the Admin API at run time, so there is no model route to cache, and its image, APISIX 3.17.0, carries no semantic cache plugin; remove the attachment" $name $.metadata.instance_id) -}}
+      {{- end -}}
+      {{- end -}}
+    # A prompt guard acts on the routes the gateway serves models on, and this
+    # realization renders none, so the attachment would be written nowhere.
+    prompt_guard_is_written_by_the_chart_realization: >-
+      {{- range $name, $attachment := (optional . "features" dict) -}}
+      {{- if eq (first (splitList ":" (toString $attachment.type))) "core/prompt-deny-patterns" -}}
+      {{- fail (printf "core/prompt-deny-patterns attachment %q on %q is bound to the apisix realization, which renders no route: it runs APISIX with its routes in etcd, written through the Admin API at run time, so there is no model route to guard; map core/gateway/apisix to helm/apisix-chart, which writes the guard onto the routes of the models wired to its models socket" $name $.metadata.instance_id) -}}
+      {{- end -}}
+      {{- end -}}
+  # The single authored home for the environment variable the Admin API key
+  # travels in. config.yaml names it and the Workload delivers it, and they are
+  # separate templates, so a second spelling is how the file comes to name a
+  # variable nothing sets — which APISIX refuses at start-up.
+  locals:
+    admin_key_variable: APISIX_ADMIN_KEY
+  # config.yaml carries APISIX's runtime configuration: the proxy listen port,
+  # the Admin API's listen port and the variable its key is read from, and the
+  # etcd configuration-store host composed from the `etcd` uses-edge
+  # (.context.inject.env). It is emitted as a ConfigMap and mounted as a single
+  # file into the container's conf directory via subPath, so it does not mask
+  # the files APISIX writes alongside it at startup.
+  #
+  # With values.metrics_enabled true it also moves the prometheus plugin's
+  # export server, which APISIX runs on 127.0.0.1:9091 by default, to every
+  # interface on the same port, so a scraper outside the pod reaches it. APISIX
+  # merges this file's keys into its defaults one by one, so the server keeps
+  # its default path, /apisix/prometheus/metrics, and every other setting. On
+  # that port it serves the metrics, and its status page answers the loopback
+  # address only. False writes nothing, and the server stays on the loopback
+  # address.
+  artifacts:
+    config-configmap.yaml: |
+      {{- /*
+        The connection variables this Recipe reads off the inject pipe, under the
+        socket whose edge delivers them, each beside the provides key the edge's
+        inject block names it from. The pipe is read as a map, and every read of
+        these variables below goes through it, so a variable nothing delivered is
+        told apart from one delivered empty: an edge on one of these sockets
+        leaving any of its variables missing halts the build, naming the edge, the
+        variables and the inject block to write, rather than rendering a
+        connection setting with an empty value. A socket in $required is read
+        whether or not anything is wired to it, so leaving it empty halts too.
+      */ -}}
+      {{- $env := optional (default dict .context.inject) "env" dict -}}
+      {{- $reads := dict "etcd" (dict "APISIX_ETCD_HOST" "host" "APISIX_ETCD_PORT" "port") -}}
+      {{- $required := list "etcd" -}}
+      {{- $gaps := list }}{{ $wired := list -}}
+      {{- range $alias, $edge := .context.uses }}{{ with get $reads $edge.socket -}}
+      {{- $wired = append $wired $edge.socket }}{{ $missing := list }}{{ $shape := list -}}
+      {{- range $var, $from := . }}{{ if not (hasKey $env $var) }}{{ $missing = append $missing $var }}{{ end }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+      {{- if $missing }}{{ $gaps = append $gaps (printf "the edge %q on its %s socket delivers no %s, so give that edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $alias $edge.socket (join " or " $missing) (join ", " $shape)) }}{{ end -}}
+      {{- end }}{{ end -}}
+      {{- range $socket := $required }}{{ if not (has $socket $wired) -}}
+      {{- $vars := list }}{{ $shape := list }}{{ range $var, $from := get $reads $socket }}{{ $vars = append $vars $var }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+      {{- $gaps = append $gaps (printf "nothing is wired to its %s socket to deliver %s, so wire one and give its edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $socket (join " and " $vars) (join ", " $shape)) -}}
+      {{- end }}{{ end -}}
+      {{- if $gaps }}{{ fail (printf "core/gateway/apisix %q composes its connection settings from variables its edges deliver on its inject pipe, but %s" .context.instance_id (join "; and " $gaps)) }}{{ end -}}
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: {{ .context.rendered_name }}-config
+      data:
+        config.yaml: |
+          apisix:
+            node_listen: {{ .infra.http_port }}
+          deployment:
+            role: traditional
+            role_traditional:
+              config_provider: etcd
+            admin:
+              {{- /* The Admin API's client allowlist, and 0.0.0.0/0 admits
+                     every address. What stands in front of the API is the
+                     key below and the cluster boundary: no Service
+                     publishes the admin port, so a caller reaches the API only
+                     from inside the cluster. That assumption is the one to
+                     check — wherever the admin port is routable from outside
+                     the cluster, replace this entry with the ranges that should
+                     hold it. It is open here so the Recipe renders a gateway an
+                     operator can administer without first finding this setting,
+                     and the chart-backed realization admits the same range. */}}
+              allow_admin:
+                - 0.0.0.0/0
+              admin_key:
+                - name: admin
+                  {{- /* No key is written here. APISIX reads a placeholder
+                         of the form dollar sign, two opening braces, a
+                         variable name and two closing braces as that
+                         environment variable's value when it loads this file,
+                         and the Workload delivers the variable from the Secret
+                         the admin_key credential publishes. The placeholder is
+                         printed from a string, because written bare its braces
+                         would be read as an action of this template. */}}
+                  key: {{ printf "${{%s}}" .locals.admin_key_variable }}
+                  role: admin
+              admin_listen:
+                ip: 0.0.0.0
+                port: {{ .infra.admin_port }}
+            etcd:
+              host:
+                - "http://{{ $env.APISIX_ETCD_HOST }}:{{ $env.APISIX_ETCD_PORT }}"
+              prefix: "/apisix"
+              timeout: 30
+          {{- if .values.metrics_enabled }}
+          plugin_attr:
+            prometheus:
+              export_addr:
+                ip: 0.0.0.0
+                port: 9091
+          {{- end }}
+  workload: |
+    apiVersion: aggrega.ai/v1beta1
+    kind: Workload
+    # APISIX holds no durable state — etcd is the system of record — so the
+    # default stateless form (a Deployment on the helm provider) is correct: no
+    # form: stateful, no persistentTemplate volume, no PVC.
+    replicas: 1
+    containers:
+      main:
+        image: "apache/apisix:{{ .infra.engine_version }}"
+        # The etcd identity resolved from the `etcd` uses-edge arrives on the
+        # inject pipe (.context.inject.env) and is written into config.yaml. The
+        # config is mounted as a single file via subPath so APISIX's startup
+        # writes into the same conf directory (for example nginx.conf) are not
+        # masked.
+        #
+        # The variable config.yaml takes the Admin API key from, delivered from
+        # the Secret the attached admin_key credential publishes as an env
+        # secretKeyRef, so the key's value never lands in the manifest. The
+        # Component's assertion requires the slot whenever this realization
+        # renders, so the delivery is unconditional.
+        attachments:
+          {{ .locals.admin_key_variable }}:
+            from: admin_key
+            as: env
+        # With values.metrics_enabled true the export server's port is declared
+        # too, so the Service below can carry it.
+        ports:
+          http: {{ .infra.http_port }}
+          admin: {{ .infra.admin_port }}
+    {{- if .values.metrics_enabled }}
+          metrics: 9091
+    {{- end }}
+        # APISIX reports readiness at /status/ready on a separate status server,
+        # which listens on loopback only unless configured otherwise. An http
+        # probe is sent to the container port whose name sorts first, which here
+        # is `admin`, and the image carries no HTTP client to run the check from
+        # inside the container. So the probe is the one the product's own chart
+        # gives a gateway reading its configuration from etcd: a TCP connection
+        # to the proxy port, with that chart's timing. The chart declares no
+        # liveness probe, and none is declared here.
+        health:
+          ready:
+            tcp: {{ .infra.http_port }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 6
+        resources:
+          requests:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+          limits:
+            cpu: "{{ .infra.compute.cpu }}"
+            memory: "{{ .infra.compute.memory }}"
+        volumeMounts:
+          - name: config
+            path: /usr/local/apisix/conf/config.yaml
+            subPath: config.yaml
+    volumes:
+      config:
+        configmap:
+          source: "{{ .context.rendered_name }}-config"
+    services:
+      default:
+        type: ClusterIP
+        ports:
+          http: {{ .infra.http_port }}
+    {{- if .values.metrics_enabled }}
+          metrics: 9091
+    {{- end }}

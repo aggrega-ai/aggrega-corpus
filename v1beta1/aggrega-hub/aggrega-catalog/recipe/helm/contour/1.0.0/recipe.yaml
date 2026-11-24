@@ -1,0 +1,178 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: contour
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    Contour ingress gateway via the official project-contour Helm chart, served
+    from the project's HTTPS chart repository. The chart deploys the Contour
+    control plane, which reconciles the cluster's Ingress and HTTPProxy
+    resources, alongside an Envoy data plane that serves client traffic. The
+    chart manages the Contour CRDs and creates the IngressClass named from the
+    Component's ingress_class_name value, so applications routing to that class
+    are programmed into Envoy. The Envoy service is exposed as a LoadBalancer by
+    default; set infra.overrides.service_type to change it. This Recipe pins the
+    Contour and Envoy container images to explicit release tags for reproducible
+    renders. Default chart version in source.version; override via
+    infra.source_version. provides also publishes the pod label, port name and
+    path a scraper discovers the Envoy pods' metrics by.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/gateway/contour:1.0.0
+
+  source:
+    kind: helm-https-chart
+    url: https://projectcontour.github.io/helm-charts/
+    chart: contour
+    # Default chart version. Override via infra.source_version.
+    version: "{{ optional .infra `source_version` \"0.6.0\" }}"
+
+  # provides.host is the Envoy data-plane Service name — the entry point client
+  # traffic is sent to, which is what the Component's provides contract promises.
+  # The valuesMapping below pins the chart's fullnameOverride to the rendered
+  # name, the release name the helm provider gives the chart, which spells the
+  # Component's name in the alphabet a Kubernetes name allows. The chart suffixes
+  # the Envoy Service with "-envoy", so that Service is named exactly
+  # "<rendered_name>-envoy" with no namespace segment. The control-plane
+  # Service, which takes the bare "<rendered_name>", serves the xDS
+  # configuration stream to Envoy and is not a client entry point, so it is not
+  # what this pillar publishes. A same-namespace consumer reaches the data plane
+  # under this name directly; a cross-namespace consumer qualifies it with the
+  # target namespace caller-side. protocol is "http" — the data plane serves
+  # client traffic over HTTP on the port the operator set.
+  #
+  # The metrics keys say where a scraper finds the Envoy data plane's metrics:
+  # /stats/prometheus on the container port every Envoy pod names metrics,
+  # 8002. Contour programs that port as a listener answering a GET of /ready,
+  # /stats and /stats/prometheus and nothing else; Envoy's administration
+  # interface listens on a socket inside the pod. The chart runs Envoy as a
+  # DaemonSet, one pod per node, and leaves that port off the data-plane
+  # Service, so a scraper discovers the pods: the chart labels each with
+  # app.kubernetes.io/instance set to the release name, which the helm
+  # provider derives as the rendered name, and with app.kubernetes.io/component
+  # set to envoy, which leaves out the control plane's pods, whose own metrics
+  # are not published. The labels, the port name and the listener are the
+  # chart's at 0.6.0 and Contour's at v1.33.5, read from their sources, and
+  # move with them like every other detail here.
+  provides:
+    host: "{{ .context.rendered_name }}-envoy"
+    port: "{{ .infra.port }}"
+    protocol: "http"
+    metrics_pod_selector: "app.kubernetes.io/instance={{ .context.rendered_name }},app.kubernetes.io/component=envoy"
+    metrics_pod_port: "metrics"
+    metrics_path: "/stats/prometheus"
+
+  # This Recipe reads from infra.overrides:
+  #   contour_image - map[string]string (contour.image.* fields; overrides the tag pin)
+  #   envoy_image   - map[string]string (envoy.image.* fields; overrides the tag pin)
+  #   service_type  - string (envoy.service.type; default LoadBalancer)
+  #   requests      - { cpu: string, memory: string } (Envoy resource requests)
+  #   manage_crds   - bool (contour.manageCRDs; disable when CRDs are pre-installed)
+  #   ingress_class_default - bool (contour.ingressClass.default)
+  #   nodeSelector  - map[string]string
+  #   tolerations   - []object
+  valuesMapping: |
+    ## ── Pin the chart's resource names to the rendered name ────
+    ## Names the control-plane Service "<rendered_name>" and the Envoy data-plane
+    ## Service "<rendered_name>-envoy", the latter matching provides.host.
+    fullnameOverride: "{{ .context.rendered_name }}"
+
+    ## ── Contour control-plane image pin ────────────────────────
+    ## Pin the control-plane image explicitly for a reproducible render.
+    ## Override the whole block via infra.overrides.contour_image.
+    contour:
+      {{- if and .infra.overrides .infra.overrides.contour_image }}
+      image:
+        {{- range $k, $v := .infra.overrides.contour_image }}
+        {{ $k }}: "{{ $v }}"
+        {{- end }}
+      {{- else }}
+      image:
+        registry: ghcr.io
+        repository: projectcontour/contour
+        tag: "v1.33.5"
+      {{- end }}
+
+      ## ── CRD management ───────────────────────────────────────
+      ## Contour installs and manages its own CRDs by default. Set
+      ## infra.overrides.manage_crds to false when the CRDs are pre-installed.
+      {{- if and .infra.overrides (hasKey .infra.overrides "manage_crds") }}
+      manageCRDs: {{ .infra.overrides.manage_crds }}
+      {{- else }}
+      manageCRDs: true
+      {{- end }}
+
+      ## ── IngressClass ─────────────────────────────────────────
+      ingressClass:
+        name: "{{ .values.ingress_class_name }}"
+        create: true
+        {{- if and .infra.overrides (hasKey .infra.overrides "ingress_class_default") }}
+        default: {{ .infra.overrides.ingress_class_default }}
+        {{- else }}
+        default: true
+        {{- end }}
+
+      ## ── Control-plane resources ──────────────────────────────
+      resources:
+        limits:
+          cpu: "{{ .infra.compute.cpu }}"
+          memory: "{{ .infra.compute.memory }}"
+        {{- if and .infra.overrides .infra.overrides.requests }}
+        requests:
+          cpu: "{{ .infra.overrides.requests.cpu }}"
+          memory: "{{ .infra.overrides.requests.memory }}"
+        {{- end }}
+
+    ## ── Envoy data-plane image pin ─────────────────────────────
+    envoy:
+      {{- if and .infra.overrides .infra.overrides.envoy_image }}
+      image:
+        {{- range $k, $v := .infra.overrides.envoy_image }}
+        {{ $k }}: "{{ $v }}"
+        {{- end }}
+      {{- else }}
+      image:
+        registry: docker.io
+        repository: envoyproxy/envoy
+        tag: "v1.35.10"
+      {{- end }}
+
+      ## ── Data-plane service (client entry point) ──────────────
+      ## The Envoy service is the gateway's data-plane entry. infra.port sets the
+      ## HTTP service port; default service type is LoadBalancer.
+      service:
+        {{- if and .infra.overrides .infra.overrides.service_type }}
+        type: "{{ .infra.overrides.service_type }}"
+        {{- else }}
+        type: LoadBalancer
+        {{- end }}
+        ports:
+          http: {{ .infra.port }}
+
+      ## ── Data-plane resources ─────────────────────────────────
+      resources:
+        limits:
+          cpu: "{{ .infra.compute.cpu }}"
+          memory: "{{ .infra.compute.memory }}"
+        {{- if and .infra.overrides .infra.overrides.requests }}
+        requests:
+          cpu: "{{ .infra.overrides.requests.cpu }}"
+          memory: "{{ .infra.overrides.requests.memory }}"
+        {{- end }}
+
+      ## ── Scheduling overrides ─────────────────────────────────
+      {{- if .infra.overrides }}
+      {{- if .infra.overrides.nodeSelector }}
+      nodeSelector: {{ toJson .infra.overrides.nodeSelector }}
+      {{- end }}
+      {{- if .infra.overrides.tolerations }}
+      tolerations: {{ toJson .infra.overrides.tolerations }}
+      {{- end }}
+      {{- end }}

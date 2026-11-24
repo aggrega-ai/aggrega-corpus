@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Manifest
+metadata:
+  name: manifest
+  version: "1.0.0"
+  description: >
+    Ops mapping for the Kubernetes target. Tempo is synthesized to native
+    Kubernetes resources from the platform Workload abstraction, running the
+    official grafana/tempo image in its single-binary shape — no upstream chart.
+    Recipe selection at build time is by component type against the loaded
+    catalog.
+spec:
+  mappings:
+    components:
+      type:
+        core/observability/tempo:1.0.0: helm/tempo:1.0.0

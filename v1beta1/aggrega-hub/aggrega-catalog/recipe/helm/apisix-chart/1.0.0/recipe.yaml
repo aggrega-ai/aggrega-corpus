@@ -1,0 +1,773 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Cognitio S.r.l.
+
+apiVersion: aggrega.ai/v1beta1
+kind: Recipe
+metadata:
+  name: apisix-chart
+  version: 1.0.0
+  license: Apache-2.0
+  description: >
+    Apache APISIX on Kubernetes via the project's own Helm chart, its bundled
+    etcd and ingress controller switched off: a Deployment, a ClusterIP Service
+    for the proxy data plane and the configuration map the gateway reads.
+
+    With nothing wired to the models socket the configuration store is the etcd
+    component wired on the `etcd` socket, and a ClusterIP Service fronts the
+    Admin API, authenticated by the key the `admin_key` slot names: the chart
+    reads it from the Secret the attached credential publishes, so no rendered
+    file carries a key. Its client
+    allowlist, `apisix.admin.allow.ipList`, admits every address, so narrow it
+    wherever the admin port is routable from outside the cluster.
+
+    With a model wired the chart runs in its standalone mode: each connection's
+    routes, through APISIX's AI proxy, sit in a ConfigMap named after the
+    gateway, which reads them with no etcd and no Admin API. A connection's
+    credential, and each key of the callers infra.callers declares, arrives as
+    an env secretKeyRef the routes file names through APISIX's $env://
+    reference, so no key is in the rendered output; each caller is a consumer
+    whose key every route checks. Written onto the routes:
+    core/period-budget as token rate limiting, with one replica;
+    core/semantic-caching as a semantic cache; core/prompt-deny-patterns as a
+    prompt guard — no completion route beside the budget or the guard.
+
+    With `values.metrics_enabled` true, the chart serves the gateway's metrics
+    on its own Service, port 9091, which checks no caller, published as
+    provides.metrics_endpoint; false, that key is empty.
+
+    Reach for it where a chart repository is reachable at build time or a
+    model is served, and for `apisix` where the build must fetch nothing.
+  maintainers:
+    - name: Massimiliano Ferrero
+      email: m.ferrero@cognitio.it
+spec:
+  capability: helm
+  implements: core/gateway/apisix:1.0.0
+
+  source:
+    kind: helm-https-chart
+    url: https://charts.apiseven.com
+    chart: apisix
+    # Default chart version. Override via infra.source_version.
+    version: "{{ optional .infra `source_version` \"2.17.0\" }}"
+
+  # provides.host is the proxy data-plane Service name — the entry point client
+  # traffic is sent to, which is what the Component's provides contract promises.
+  # The valuesMapping below pins the chart's fullnameOverride to the rendered
+  # name, the release name the helm provider gives the chart, which spells the
+  # Component's name in the alphabet a Kubernetes name allows. The chart suffixes
+  # the proxy Service with "-gateway", so that Service is named exactly
+  # "<rendered_name>-gateway". The Admin API Service takes "<rendered_name>-admin"
+  # and is deliberately NOT what this pillar publishes: the
+  # Component's own port description says the published port carries proxied
+  # traffic and never the Admin API, which stays in-cluster. Both suffixes were
+  # read from a render of the chart, not assumed. A same-namespace consumer
+  # reaches the proxy under this name directly; a cross-namespace consumer
+  # qualifies it caller-side.
+  #
+  # The name carries no namespace, so the recipe is independent of where it is
+  # deployed; a consumer in another namespace qualifies the host with the target
+  # namespace on its own side (caller-side routing).
+  #
+  # endpoint is the route the gateway serves for the model values.model names,
+  # under that alias in the path, on the proxy Service name and port; model is
+  # that alias. The Service name is spelled out again on purpose: a provides
+  # entry cannot read another provides entry, so the repetition is forced, and
+  # the entries are edited together. With nothing wired to the models socket
+  # values.model is omitted — the component's assertion halts on any other
+  # combination — and both are empty.
+  #
+  # metrics_endpoint is the address the gateway serves its own metrics at while
+  # values.metrics_enabled is true: the chart then renders a Service of its own
+  # for them, its full name, which the fullnameOverride below pins to the
+  # rendered name, followed by "-prometheus-metrics", on port 9091, and the
+  # gateway serves them there at /apisix/prometheus/metrics. Both the suffix
+  # and the path were read from the pinned chart's templates and values. It is
+  # empty while the value is false, when the chart renders no such Service. It
+  # is spelled out in full on purpose: a provides entry cannot read another.
+  provides:
+    host: "{{ .context.rendered_name }}-gateway"
+    port: "{{ .infra.http_port }}"
+    protocol: "http"
+    endpoint: '{{ with optional .values "model" "" }}http://{{ $.context.rendered_name }}-gateway:{{ $.infra.http_port }}/{{ . }}/v1{{ end }}'
+    model: '{{ optional .values "model" "" }}'
+    metrics_endpoint: "{{ if .values.metrics_enabled }}http://{{ .context.rendered_name }}-prometheus-metrics:9091/apisix/prometheus/metrics{{ end }}"
+
+  # The names the routes ConfigMap below and the value mapping share, each
+  # written once here. The ConfigMap is named after the rendered name followed
+  # by model_routes_config_map_suffix; a locals entry cannot read the rendered
+  # name, so each template composes the two. A models connection's credential
+  # reaches the gateway under two variables, both named after the connection's
+  # alias in capitals with every character other than a letter or a digit as
+  # an underscore, between the fixed parts here: the connection fast carrying a
+  # credential gives AI_PROXY_FAST_API_KEY, which holds the credential, and
+  # AI_PROXY_FAST_AUTHORIZATION, the bearer token composed from it, which the
+  # connection's routes name. A locals entry cannot read a connection, so each
+  # template applies the alias rule itself, the rule the Component's assertion
+  # credential_variables_are_distinct checks.
+  #
+  # A caller infra.callers declares presents its key under two variables named
+  # the same way after the caller's name: the caller alice gives
+  # CALLER_ALICE_KEY, which holds the key, read from the Secret the caller_keys
+  # slot names under the data key alice, and CALLER_ALICE_AUTHORIZATION, the
+  # whole Authorization header composed from it, which the caller's consumer
+  # names. The Component's assertion callers_are_declared_with_their_keys
+  # checks that rule. The password the semantic cache presents to the store
+  # on the cache_store connection travels as cache_store_password_variable.
+  #
+  # callers is the list infra.callers declares, joined by commas — empty with
+  # none — so the realizations of the period budget and the semantic cache,
+  # whose assertions read this Recipe's locals and not the gateway's infra, can
+  # tell whether the gateway authenticates its callers. It is written with the
+  # template language's own range rather than a helper function, because this
+  # Recipe's structured source resolves its locals when the chart is pinned,
+  # with Aggrega's own helpers alone.
+  locals:
+    model_routes_config_map_suffix: "-model-routes"
+    connection_variable_prefix: AI_PROXY_
+    credential_variable_suffix: _API_KEY
+    header_variable_suffix: _AUTHORIZATION
+    caller_variable_prefix: CALLER_
+    caller_key_variable_suffix: _KEY
+    cache_store_password_variable: CACHE_STORE_PASSWORD
+    callers: '{{ with optional .infra "callers" "" }}{{ range $i, $caller := . }}{{ if $i }}, {{ end }}{{ $caller }}{{ end }}{{ end }}'
+
+  # The models the gateway serves, as the routes file of the chart's standalone
+  # mode: a ConfigMap named "<rendered_name>-model-routes", carrying the file
+  # under the data key apisix.yaml, the key the chart mounts from an existing
+  # ConfigMap. Naming it after the gateway keeps two gateways in one namespace
+  # apart, where the chart's own ConfigMap for that file is named apisix.yaml
+  # whatever the release. With nothing wired to the models socket the template
+  # writes nothing, and no file is emitted.
+  #
+  # Each connection, in alias order, gets a chat route and a completion route —
+  # the chat route alone while a period budget is attached, as said below —
+  # ids model-<alias>-chat and model-<alias>-completions, at
+  # /<alias>/v1/chat/completions and /<alias>/v1/completions, each carrying
+  # APISIX's AI proxy for an OpenAI-compatible provider. The proxy sends the
+  # request to the endpoint the model publishes with the operation's path
+  # appended, the whole upstream address it dials, and writes the model name
+  # the model publishes into the request, replacing whatever name the caller
+  # sent, so the path chooses the model. An endpoint that is not an absolute URL
+  # stops the build, naming the connection, and so does an alias making a route
+  # id longer than the 64 characters APISIX accepts in one, which it would
+  # otherwise refuse when it reads the file.
+  #
+  # A connection carrying a credential gives its routes an Authorization header
+  # whose whole value is $env://AI_PROXY_<ALIAS>_AUTHORIZATION, which APISIX
+  # reads from its environment when it serves a request, so the file names the
+  # variable and never the value; the header replaces any the caller sent. One
+  # carrying none writes an empty auth, so the caller's own headers pass on.
+  #
+  # APISIX reads ${{NAME}} anywhere in this file as the value of the environment
+  # variable NAME, before it parses the file, and refuses the file when NAME is
+  # unset. So each string a model publishes is written with every $ as \u0024,
+  # the escape a double-quoted YAML string reads back as $, which that reading
+  # cannot match: a published string reaches the gateway as it was published.
+  # The file ends in #END, without which APISIX refuses it.
+  #
+  # A core/period-budget attachment, which period-budget-apisix realizes and
+  # checks, is written here as APISIX's token rate limiting, ai-rate-limiting,
+  # on a service the model routes name. APISIX keeps that plugin's count under
+  # the object the plugin is declared on, so on a route each route would count
+  # apart, while routes naming one service count together: scope gateway
+  # writes one service, model-budget, named by every route, and scope model one
+  # per connection, model-<alias>-budget, named by that connection's route; an
+  # alias making that id longer than 64 characters stops the build, as for a
+  # route. The plugin takes the limit as a whole number of tokens, the period
+  # as its window in seconds, and the unit as what it counts: total_tokens,
+  # prompt_tokens or completion_tokens, the names the Feature's unit takes. Its
+  # refusal status is left at APISIX's own, 503.
+  #
+  # While the budget is attached each connection gets its chat route only.
+  # APISIX reads the tokens a reply reports through the protocol it recognises
+  # the request as, and it recognises a completion request, whose body carries
+  # a prompt rather than messages, as none it can read usage from: it answers
+  # it and counts nothing. A completion route beside a budget would therefore
+  # serve model traffic the budget never counts, so it is not written. With
+  # no such attachment no service is written and every route is as it would
+  # be without one. Under scope caller the one service model-budget counts
+  # through a rule keyed on the consumer a request authenticated as, so each
+  # caller infra.callers declares has a count of its own across every route.
+  #
+  # With callers declared in infra.callers, each is a consumer, in the order
+  # the Release lists them, whose key-auth key is the whole value of
+  # $env://CALLER_<NAME>_AUTHORIZATION, and every route carries key-auth
+  # reading the Authorization header, so a request presenting no declared key
+  # is refused with HTTP 401 before anything else runs. key-auth matches the
+  # header's whole value, Bearer and the key, which is what an OpenAI client
+  # sends. hide_credentials removes the caller's header from the request
+  # forwarded, so a caller's key never reaches a model, whether or not the
+  # connection carries a credential of its own. A consumer whose variable
+  # does not resolve is skipped, so its key is refused rather than its
+  # reference matched. With no caller declared nothing of this is written.
+  #
+  # A core/semantic-caching attachment, which semantic-caching-apisix
+  # realizes and checks, is written onto each chat route as APISIX's ai-cache
+  # with its exact and semantic layers, the semantic layer being what engages
+  # on a chat request: a reply is stored under the route and the consumer the
+  # request authenticated as (cache_key.include_consumer), so no caller is
+  # served a reply stored for another, and both layers keep it ttl_seconds.
+  # The semantic layer embeds the request's last user message with the
+  # models connection embedding_model names — its published endpoint with
+  # /embeddings appended, its published model, and its credential by $env://
+  # where it carries one, an empty key where it does not — and serves a reply
+  # stored under the same earlier messages whose message is at least
+  # similarity_threshold alike. The store is the cache_store connection: its
+  # published host and port, and its credential by $env:// where it carries
+  # one; a store publishing no vector_search stops the build. A store
+  # publishing valkey-tls or redis-tls is reached over TLS: redis_ssl turns it
+  # on and redis_ssl_verify checks the store's certificate chain against the
+  # authorities APISIX trusts, its system's by default, and not the store's
+  # name, since the gateway's Redis client names no server in the handshake.
+  # APISIX takes those authorities for every connection it makes, so the
+  # socket offers no server_ca, and a privately signed certificate fails the
+  # handshake when the gateway runs. Another value served over TLS stops the
+  # build. Read from APISIX 3.18.0's shared Redis schema and connection code
+  # and its default trusted-certificate setting. The vector index
+  # is named for the gateway and the attachment. A completion route is not
+  # cached, since only the exact layer would act on it.
+  #
+  # A core/prompt-deny-patterns attachment, which prompt-deny-patterns-apisix
+  # realizes and checks, is written onto each chat route as APISIX's
+  # ai-prompt-guard reading every message of every role, its text joined into
+  # one string, with the attachment's deny and allow patterns, and refusing a
+  # request it cannot read as a model request (fail_mode error) rather than
+  # forwarding it unchecked. It reads no completion request, so while it is
+  # attached each connection gets its chat route only, as under a budget.
+  #
+  # Each pattern is written as a JSON string with every $ as \u0024, so its
+  # backslashes, quotes and dollar signs reach APISIX as the attachment wrote
+  # them.
+  artifacts:
+    model-routes.yaml: |
+      {{- $wired := list }}
+      {{- range $alias, $edge := .context.uses }}{{ if eq $edge.socket "models" }}{{ $wired = append $wired $alias }}{{ end }}{{ end }}
+      {{- $budget := dict }}
+      {{- $cache := dict }}
+      {{- $cacheName := "" }}
+      {{- $guard := dict }}
+      {{- range $name, $attachment := (default dict .features) }}
+      {{- $type := first (splitList ":" (toString $attachment.type)) }}
+      {{- if eq $type "core/period-budget" }}{{ $budget = $attachment }}{{ end }}
+      {{- if eq $type "core/semantic-caching" }}{{ $cache = $attachment }}{{ $cacheName = $name }}{{ end }}
+      {{- if eq $type "core/prompt-deny-patterns" }}{{ $guard = $attachment }}{{ end }}
+      {{- end }}
+      {{- $callers := optional .infra "callers" list }}
+      {{- $store := dict }}
+      {{- $storeTLS := false }}
+      {{- range $alias, $edge := .context.uses }}{{ if eq $edge.socket "cache_store" }}{{ $store = $edge }}{{ end }}{{ end }}
+      {{- with $cache }}{{ with $store }}
+      {{- if not (toString (optional (default dict .provides) "vector_search" "")) }}{{ fail (printf "the cache_store socket of %q is wired to %q, a %s publishing no vector_search, but the gateway's semantic cache stores and searches its replies with the Redis query engine's vector search; a store without it would cache nothing while every request still succeeds. Wire a store publishing vector_search to cache_store: a core/datastore/redis on an infra.engine_version from 8.0.0 on, or one whose infra.overrides.image names an image serving that search, with infra.image_serves_vector_search: true set on it in the Release" $.context.instance_id .target (first (splitList ":" (toString .component)))) }}{{ end }}
+      {{- $storeProtocol := toString (optional (default dict .provides) "protocol" "") }}
+      {{- $storeTLS = has $storeProtocol (list "valkey-tls" "redis-tls") }}
+      {{- if and (not $storeTLS) (hasSuffix "-tls" $storeProtocol) }}{{ fail (printf "the cache_store socket of %q is wired to %q, whose published protocol is %q, a store served over TLS that the gateway's semantic cache is not taught to reach: it speaks the Redis protocol, over TLS to a store publishing valkey-tls or redis-tls; wire a Redis-protocol store to the cache_store socket" $.context.instance_id .target $storeProtocol) }}{{ end }}
+      {{- end }}{{ end }}
+      {{- $operations := list "chat" "completions" }}
+      {{- if $guard }}{{ $operations = list "chat" }}{{ end }}
+      {{- $serviceOf := dict }}
+      {{- $services := list }}
+      {{- with $budget }}
+      {{- $operations = list "chat" }}
+      {{- range $alias := $wired }}
+      {{- $id := ternary (printf "model-%s-budget" $alias) "model-budget" (eq $budget.values.scope "model") }}
+      {{- if gt (len $id) 64 }}{{ fail (printf "the models connection %s of %q gives its budget's service the id %q, longer than the 64 characters APISIX accepts in a service id, so the gateway would refuse it; shorten the connection's alias" $alias $.context.instance_id $id) }}{{ end }}
+      {{- $_ := set $serviceOf $alias $id }}
+      {{- if not (has $id $services) }}{{ $services = append $services $id }}{{ end }}
+      {{- end }}
+      {{- end }}
+      {{- if $wired -}}
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: {{ .context.rendered_name }}{{ .locals.model_routes_config_map_suffix }}
+      data:
+        apisix.yaml: |
+      {{- with $budget }}
+      {{- $window := mul (atoi (regexFind "^[0-9]+" .infra.period)) (index (dict "s" 1 "m" 60 "h" 3600 "d" 86400) (regexFind "[a-z]+$" .infra.period)) }}
+          services:
+      {{- range $id := $services }}
+            - id: {{ $id | toJson }}
+              plugins:
+                ai-rate-limiting:
+      {{- if eq $budget.values.scope "caller" }}
+                  rules:
+                    - key: "$consumer_name"
+                      count: {{ int64 $budget.infra.limit }}
+                      time_window: {{ $window }}
+      {{- else }}
+                  limit: {{ int64 $budget.infra.limit }}
+                  time_window: {{ $window }}
+      {{- end }}
+                  limit_strategy: {{ $budget.values.unit | toJson }}
+      {{- end }}
+      {{- end }}
+      {{- with $callers }}
+          consumers:
+      {{- range $caller := . }}
+            - username: {{ $caller | toJson }}
+              plugins:
+                key-auth:
+                  key: {{ printf "$env://%s%s%s" $.locals.caller_variable_prefix (regexReplaceAll "[^A-Z0-9]" (upper $caller) "_") $.locals.header_variable_suffix | toJson }}
+      {{- end }}
+      {{- end }}
+          routes:
+      {{- range $alias, $edge := .context.uses }}
+      {{- if eq $edge.socket "models" }}
+      {{- $u := urlParse $edge.provides.endpoint }}
+      {{- if not (and $u.scheme $u.host) }}{{ fail (printf "the models connection %s of %q reaches %q, whose published endpoint %q is not an absolute URL, so the gateway cannot write the address its route forwards to" $alias $.context.instance_id $edge.target $edge.provides.endpoint) }}{{ end }}
+      {{- $header := printf "%s%s%s" $.locals.connection_variable_prefix (regexReplaceAll "[^A-Z0-9]" (upper $alias) "_") $.locals.header_variable_suffix }}
+      {{- range $operation := $operations }}
+      {{- $path := ternary "/chat/completions" "/completions" (eq $operation "chat") }}
+      {{- $id := printf "model-%s-%s" $alias $operation }}
+      {{- if gt (len $id) 64 }}{{ fail (printf "the models connection %s of %q gives its route the id %q, longer than the 64 characters APISIX accepts in a route id, so the gateway would refuse the route; shorten the connection's alias" $alias $.context.instance_id $id) }}{{ end }}
+            - id: {{ $id | toJson }}
+              uri: {{ printf "/%s/v1%s" $alias $path | toJson }}
+      {{- with get $serviceOf $alias }}
+              service_id: {{ . | toJson }}
+      {{- end }}
+              methods:
+                - POST
+              plugins:
+      {{- if $callers }}
+                key-auth:
+                  header: Authorization
+                  hide_credentials: true
+      {{- end }}
+      {{- with $guard }}
+                ai-prompt-guard:
+                  match_all_roles: true
+                  match_all_conversation_history: true
+                  fail_mode: error
+      {{- with optional .values "allow_patterns" list }}
+                  allow_patterns:
+      {{- range $pattern := . }}
+                    - {{ $pattern | toJson | replace "$" "\\u0024" }}
+      {{- end }}
+      {{- end }}
+                  deny_patterns:
+      {{- range $pattern := .values.deny_patterns }}
+                    - {{ $pattern | toJson | replace "$" "\\u0024" }}
+      {{- end }}
+      {{- end }}
+                ai-proxy:
+                  provider: openai-compatible
+      {{- if hasKey (default dict $edge.features) "credential" }}
+                  auth:
+                    header:
+                      Authorization: {{ printf "$env://%s" $header | toJson }}
+      {{- else }}
+                  auth: {}
+      {{- end }}
+                  options:
+                    model: {{ $edge.provides.model | toJson | replace "$" "\\u0024" }}
+                  override:
+                    endpoint: {{ printf "%s%s" (trimSuffix "/" $edge.provides.endpoint) $path | toJson | replace "$" "\\u0024" }}
+      {{- if and $cache (eq $operation "chat") }}
+      {{- $embedding := get $.context.uses $cache.values.embedding_model }}
+                ai-cache:
+                  layers:
+                    - exact
+                    - semantic
+                  exact:
+                    ttl: {{ int64 $cache.values.ttl_seconds }}
+                  cache_key:
+                    share_across_routes: false
+                    include_consumer: true
+                  policy: redis
+                  redis_host: {{ $store.provides.host | toJson }}
+                  redis_port: {{ $store.provides.port }}
+      {{- if $storeTLS }}
+                  redis_ssl: true
+                  redis_ssl_verify: true
+      {{- end }}
+      {{- if hasKey (default dict $store.features) "credential" }}
+                  redis_password: {{ printf "$env://%s" $.locals.cache_store_password_variable | toJson }}
+      {{- end }}
+                  semantic:
+                    similarity_threshold: {{ $cache.values.similarity_threshold }}
+                    ttl: {{ int64 $cache.values.ttl_seconds }}
+                    embedding:
+                      openai:
+                        endpoint: {{ printf "%s/embeddings" (trimSuffix "/" $embedding.provides.endpoint) | toJson | replace "$" "\\u0024" }}
+                        model: {{ $embedding.provides.model | toJson | replace "$" "\\u0024" }}
+      {{- if hasKey (default dict $embedding.features) "credential" }}
+                        api_key: {{ printf "$env://%s%s%s" $.locals.connection_variable_prefix (regexReplaceAll "[^A-Z0-9]" (upper $cache.values.embedding_model) "_") $.locals.credential_variable_suffix | toJson }}
+      {{- else }}
+                        api_key: ""
+      {{- end }}
+                    vector_search:
+                      redis:
+                        index: {{ printf "%s-%s" $.context.instance_id ($cacheName | replace "_" "-") | toJson }}
+      {{- end }}
+      {{- end }}
+      {{- end }}
+      {{- end }}
+          #END
+      {{- end }}
+
+  # This Recipe reads from infra.overrides:
+  #   image        - map[string]string (image.* fields; overrides the tag pin)
+  #   service_type - string (proxy Service type; how the data plane is exposed, default ClusterIP)
+  #   requests     - { cpu: string, memory: string } (gateway resource requests)
+  #   nodeSelector - map[string]string (pod scheduling)
+  #   tolerations  - []object (pod scheduling)
+  #
+  # The chart is configured for the shape this Component describes. With
+  # nothing wired to the models socket, the configuration store is the etcd
+  # component wired on the `etcd` uses-socket, so the chart's own bundled etcd
+  # is switched off, and so is its Kubernetes ingress controller, because the
+  # Component describes neither. Under this configuration the chart renders a
+  # Deployment for the gateway, a ClusterIP Service for the proxy data plane, a
+  # ClusterIP Service for the Admin API, and the configuration map the gateway
+  # reads its whole runtime configuration from.
+  #
+  # With a model wired, the chart runs in its standalone mode, in the data-plane
+  # role, whose configuration provider is the routes file the artifact above
+  # emits: the gateway reads no etcd and APISIX switches its Admin API off in
+  # that role, so the chart renders no etcd setting, no Admin API Service, no
+  # Admin API port and no admin key. The standalone mode alone keeps the
+  # traditional role, whose provider is etcd, so the role is set with it. The
+  # Component's assertion refuses an etcd connection and an admin_key
+  # attachment in this case, and requires both in the other.
+  #
+  # What it carries that a hand-assembled workload does not is that
+  # configuration map: the gateway's nginx tuning, its plugin set, its router,
+  # its DNS and service-discovery settings and the role it runs in are all
+  # assembled by the chart from named settings, where a workload has to carry a
+  # hand-written configuration file that has to be re-derived by hand every time
+  # the gateway moves.
+  valuesMapping: |
+    ## ── The models the gateway serves ──────────────────────────
+    ## The models connections, in alias order, and those of them carrying a
+    ## credential. Every setting below that differs between the two shapes
+    ## reads $models.
+    {{- $models := list }}
+    {{- $credentialed := list }}
+    {{- range $alias, $edge := .context.uses }}
+      {{- if eq $edge.socket "models" }}
+        {{- $models = append $models $alias }}
+        {{- if hasKey (default dict $edge.features) "credential" }}
+          {{- $credentialed = append $credentialed $alias }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+
+    ## ── The configuration-store edge ───────────────────────────
+    ## The gateway keeps its routes here while nothing is wired to the models
+    ## socket, and the Component's assertion requires the edge then. Its host
+    ## and port arrive on the inject pipe, read through the block below. With a
+    ## model wired the gateway reads no store and the assertion refuses the
+    ## edge, so the etcd socket is required only while $models is empty.
+    {{- /*
+      The connection variables this Recipe reads off the inject pipe, under the
+      socket whose edge delivers them, each beside the provides key the edge's
+      inject block names it from. The pipe is read as a map, and every read of
+      these variables below goes through it, so a variable nothing delivered is
+      told apart from one delivered empty: an edge on one of these sockets
+      leaving any of its variables missing halts the build, naming the edge, the
+      variables and the inject block to write, rather than rendering a
+      connection setting with an empty value. A socket in $required is read
+      whether or not anything is wired to it, so leaving it empty halts too.
+    */ -}}
+    {{- $env := optional (default dict .context.inject) "env" dict -}}
+    {{- $reads := dict "etcd" (dict "APISIX_ETCD_HOST" "host" "APISIX_ETCD_PORT" "port") -}}
+    {{- $required := list }}{{ if not $models }}{{ $required = list "etcd" }}{{ end -}}
+    {{- $gaps := list }}{{ $wired := list -}}
+    {{- range $alias, $edge := .context.uses }}{{ with get $reads $edge.socket -}}
+    {{- $wired = append $wired $edge.socket }}{{ $missing := list }}{{ $shape := list -}}
+    {{- range $var, $from := . }}{{ if not (hasKey $env $var) }}{{ $missing = append $missing $var }}{{ end }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- if $missing }}{{ $gaps = append $gaps (printf "the edge %q on its %s socket delivers no %s, so give that edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $alias $edge.socket (join " or " $missing) (join ", " $shape)) }}{{ end -}}
+    {{- end }}{{ end -}}
+    {{- range $socket := $required }}{{ if not (has $socket $wired) -}}
+    {{- $vars := list }}{{ $shape := list }}{{ range $var, $from := get $reads $socket }}{{ $vars = append $vars $var }}{{ $shape = append $shape (printf "{ in: %s, from: %s }" $var $from) }}{{ end -}}
+    {{- $gaps = append $gaps (printf "nothing is wired to its %s socket to deliver %s, so wire one and give its edge an inject block naming each from its target's provides — inject: { env: [ %s ] }" $socket (join " and " $vars) (join ", " $shape)) -}}
+    {{- end }}{{ end -}}
+    {{- if $gaps }}{{ fail (printf "core/gateway/apisix %q composes its connection settings from variables its edges deliver on its inject pipe, but %s" .context.instance_id (join "; and " $gaps)) }}{{ end -}}
+
+    ## ── The Admin API key's Secret ─────────────────────────────
+    ## The admin_key credential publishes the name of the Secret holding the
+    ## key and the data key it sits under. A credential publishing no such
+    ## locator would leave the chart's secretName empty, and the chart would
+    ## then render its own credentials.admin and credentials.viewer, keys every
+    ## reader of the chart holds, so the build halts on it instead. With a model
+    ## wired the gateway runs no Admin API and the Component's assertion
+    ## refuses the slot, so there is nothing to read.
+    {{- $adminKeyFill := optional (default dict .features) "admin_key" dict }}
+    {{- $adminKeyLocator := optional $adminKeyFill "provides" dict }}
+    {{- $adminKeySecret := optional $adminKeyLocator "name" "" }}
+    {{- $adminKeyDataKey := optional $adminKeyLocator "key" "" }}
+    {{- if and (not $models) (not (and $adminKeySecret $adminKeyDataKey)) }}
+    {{- fail (printf "the credential attached to the admin_key slot of %q publishes no Secret name and data key, so the chart cannot read the Admin API key from a Secret; attach core/referenced-secret or core/random-password, which publish both" .context.instance_id) }}
+    {{- end }}
+
+    ## ── Pin the chart's resource names to the rendered name ────
+    ## Names the proxy Service "<rendered_name>-gateway", matching provides.host,
+    ## and the Admin API Service "<rendered_name>-admin".
+    fullnameOverride: "{{ .context.rendered_name }}"
+
+    ## ── One gateway while a period budget is attached ──────────
+    ## APISIX keeps a period budget's count in the memory of the gateway process
+    ## counting it, so each further replica would count its own share apart and
+    ## the gateway as a whole would serve more than the limit. While a
+    ## core/period-budget attachment is written onto the model routes, the
+    ## chart runs one replica, as a Deployment, with its autoscaler off. These
+    ## are the chart's own defaults, written out so that a chart version moving
+    ## them cannot split the count.
+    {{- $budgeted := false }}
+    {{- range $name, $attachment := (default dict .features) }}
+      {{- if eq (first (splitList ":" (toString $attachment.type))) "core/period-budget" }}
+        {{- $budgeted = true }}
+      {{- end }}
+    {{- end }}
+    {{- if and $models $budgeted }}
+    useDaemonSet: false
+    replicaCount: 1
+    autoscaling:
+      enabled: false
+    {{- end }}
+
+    ## ── Gateway image pin ──────────────────────────────────────
+    ## Pinned explicitly rather than left to whatever the chart's own default
+    ## becomes at the next chart version. The repository is the chart's own
+    ## default, so the image this realization runs is the one its chart is tested
+    ## against, and it is why the Component's engine_version says the
+    ## chart-backed realization pins its own tag. Override the whole block via
+    ## infra.overrides.image.
+    image:
+      {{- if and .infra.overrides .infra.overrides.image }}
+      {{- range $k, $v := .infra.overrides.image }}
+      {{ $k }}: "{{ $v }}"
+      {{- end }}
+      {{- else }}
+      repository: apache/apisix
+      tag: "3.18.0-ubuntu"
+      {{- end }}
+
+    ## ── Chart extras this Component does not describe ──────────
+    ## The chart can also deploy an etcd of its own and a Kubernetes ingress
+    ## controller. The configuration store is wired through the topology rather
+    ## than bundled, and the Component describes no ingress controller, so both
+    ## are switched off rather than rendered unreferenced.
+    etcd:
+      enabled: false
+    ingress-controller:
+      enabled: false
+
+    ## ── The gateway's own control endpoint ─────────────────────
+    ## 🔴 Switched off deliberately, and the reason is worth keeping. The chart
+    ## renders a Service in front of this endpoint while binding the endpoint
+    ## itself to the loopback address, so the Service resolves and answers
+    ## nothing — the same shape as a published address that names no Service,
+    ## which this catalog treats as a defect rather than a quirk. The Component
+    ## describes a proxy data plane and an Admin API and nothing else, so the
+    ## endpoint is not rendered at all instead of being rendered unreachable.
+    ## Established by reading the chart's own defaults for the endpoint's listen
+    ## address and its Service.
+    control:
+      enabled: false
+
+    ## ── The configuration store connection ─────────────────────
+    ## Composed from the `etcd` edge's host and port, which arrive on the inject
+    ## pipe under the variables the workload-synthesis realization reads too.
+    ## The user is emptied deliberately:
+    ## the chart sends credentials whenever one is set, and the standard-library
+    ## etcd Recipes leave authentication off, so presenting a user would fail the
+    ## connection rather than defaulting. With a model wired there is no store,
+    ## so no host is written, and the user stays empty: the chart's default user
+    ## would render an etcd password Secret and a variable for it, which a
+    ## gateway reading no store would carry unreferenced.
+    externalEtcd:
+      {{- if not $models }}
+      host:
+        - "http://{{ $env.APISIX_ETCD_HOST }}:{{ $env.APISIX_ETCD_PORT }}"
+      {{- end }}
+      user: ""
+
+    ## ── Proxy data plane ───────────────────────────────────────
+    ## The client entry point, and the Service provides.host addresses. The chart
+    ## default exposes the gateway on every node; the Component describes an
+    ## in-cluster address, so it is a ClusterIP unless an operator says
+    ## otherwise. infra.http_port sets both the container port and the Service
+    ## port, so the published address and the listener move together.
+    service:
+      {{- if and .infra.overrides .infra.overrides.service_type }}
+      type: "{{ .infra.overrides.service_type }}"
+      {{- else }}
+      type: ClusterIP
+      {{- end }}
+      http:
+        enabled: true
+        servicePort: {{ .infra.http_port }}
+        containerPort: {{ .infra.http_port }}
+
+    apisix:
+      {{- if .values.metrics_enabled }}
+      ## ── The gateway's own metrics ─────────────────────────────
+      ## The chart's switch moves the prometheus plugin's export server from
+      ## the loopback address to every interface on port 9091, declares that
+      ## port on the gateway's container and renders the Service
+      ## provides.metrics_endpoint names. In either mode, since the chart writes
+      ## the export server's settings outside the role it configures.
+      prometheus:
+        enabled: true
+      {{- end }}
+      {{- if $models }}
+      ## ── Standalone mode, for the models the gateway serves ─────
+      ## The data-plane role reading the routes file from the ConfigMap the
+      ## artifact above emits, named after the gateway. APISIX switches the Admin
+      ## API off in that role, and the chart is told so too, so it renders no
+      ## Admin API Service, port or key, and no Admin API section in the
+      ## gateway's configuration.
+      deployment:
+        mode: standalone
+        role: data_plane
+        standalone:
+          existingConfigMap: "{{ .context.rendered_name }}{{ .locals.model_routes_config_map_suffix }}"
+      admin:
+        enabled: false
+      {{- else }}
+      ## ── Admin API ────────────────────────────────────────────
+      ## In-cluster only, on the port the operator set, authenticated by the key
+      ## the admin_key credential publishes. The client allowlist is widened
+      ## because the Admin API is reached from inside the cluster and the chart's
+      ## own default admits the loopback address only, which would leave the
+      ## Service resolving and the API refusing every caller. Never published
+      ## through provides.
+      ##
+      ## The key travels the chart's own secret route: with secretName set, the
+      ## chart's configuration map names an environment variable where each
+      ## role's key goes, and its Deployment delivers both variables from that
+      ## one Secret, so none of the gateway's rendered files carries a key.
+      ##
+      ## ⚠️ The chart provisions a second, read-only Admin API role the Component
+      ## does not model, and reads its key from the same Secret. It takes the same
+      ## data key as the admin role, so no second credential exists and neither
+      ## of the chart's default keys is rendered. A request presenting that key is
+      ## granted the admin role because APISIX grants the role of the first entry
+      ## whose key matches, and the chart lists the admin entry first. A chart
+      ## listing the read-only entry first would leave the gateway with a
+      ## read-only key and no admin one, so check that order before pointing
+      ## infra.source_version at another chart version.
+      admin:
+        enabled: true
+        type: ClusterIP
+        port: {{ .infra.admin_port }}
+        servicePort: {{ .infra.admin_port }}
+        credentials:
+          secretName: "{{ $adminKeySecret }}"
+          secretAdminKey: "{{ $adminKeyDataKey }}"
+          secretViewerKey: "{{ $adminKeyDataKey }}"
+        ## The client allowlist, and 0.0.0.0/0 admits every address. What stands
+        ## in front of the API is the key above and the cluster boundary:
+        ## the Admin API Service is a ClusterIP and is never published through
+        ## provides, so a caller reaches the API only from inside the cluster.
+        ## That assumption is the one to check — wherever the admin port is
+        ## routable from outside the cluster, replace this entry with the ranges
+        ## that should hold it. It is open here so the Recipe renders a gateway
+        ## an operator can administer without first finding this setting, and
+        ## the workload-synthesis realization admits the same range.
+        allow:
+          ipList:
+            - 0.0.0.0/0
+      {{- end }}
+
+    ## ── The callers' keys and the cache store's password ───────
+    ## The callers infra.callers declares read their keys from the Secret the
+    ## caller_keys credential publishes, each under the caller's own name as
+    ## the data key; a credential publishing no Secret name would leave the
+    ## gateway nowhere to read them from, so the build halts on it. The
+    ## Component's assertion holds that the slot is attached exactly when a
+    ## caller is declared. The cache store's password is delivered only while
+    ## core/semantic-caching is attached, the one thing that reads it, from
+    ## the credential on the cache_store connection, which must publish a
+    ## Secret's name and data key.
+    {{- $callers := optional .infra "callers" list }}
+    {{- $callerKeySecret := "" }}
+    {{- with $callers }}
+    {{- $callerKeySecret = optional (optional (optional (default dict $.features) "caller_keys" dict) "provides" dict) "name" "" }}
+    {{- if not $callerKeySecret }}
+    {{- fail (printf "the credential attached to the caller_keys slot of %q publishes no Secret name, so the gateway cannot read its callers' keys from a Secret; attach core/referenced-secret-set, which publishes one" $.context.instance_id) }}
+    {{- end }}
+    {{- end }}
+    {{- $cached := false }}
+    {{- range $name, $attachment := (default dict .features) }}
+      {{- if eq (first (splitList ":" (toString $attachment.type))) "core/semantic-caching" }}
+        {{- $cached = true }}
+      {{- end }}
+    {{- end }}
+    {{- $storeCredential := dict }}
+    {{- if $cached }}
+      {{- range $alias, $edge := .context.uses }}
+        {{- if and (eq $edge.socket "cache_store") (hasKey (default dict $edge.features) "credential") }}
+          {{- $storeCredential = $edge.features.credential }}
+          {{- if not (and (optional (optional $storeCredential "provides" dict) "name" "") (optional (optional $storeCredential "provides" dict) "key" "")) }}
+          {{- fail (printf "the credential on the cache_store connection %s of %q publishes no Secret name and data key, so the gateway cannot read the store's password from a Secret; attach core/referenced-secret, which publishes both" $alias $.context.instance_id) }}
+          {{- end }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+
+    ## ── Model credentials, callers' keys, the store's password ─
+    ## Each models connection carrying a credential delivers it as
+    ## AI_PROXY_<ALIAS>_API_KEY, bound by NAME to the secret its attachment
+    ## publishes, and composes AI_PROXY_<ALIAS>_AUTHORIZATION from it, the
+    ## bearer token the connection's routes read through APISIX's $env://
+    ## reference. Each caller delivers its key as CALLER_<NAME>_KEY and
+    ## composes CALLER_<NAME>_AUTHORIZATION from it, the whole header its
+    ## consumer reads; the store's password is CACHE_STORE_PASSWORD. The chart
+    ## writes these variables in list order, ahead of its own, so each key
+    ## variable comes before the header composed from it, and the cluster
+    ## composes the header; none carries a value in the rendered artifact.
+    {{- if or $credentialed $callers $storeCredential }}
+    extraEnvVars:
+      {{- range $alias := $credentialed }}
+      {{- $name := regexReplaceAll "[^A-Z0-9]" (upper $alias) "_" }}
+      {{- $credential := (get $.context.uses $alias).features.credential }}
+      - name: {{ $.locals.connection_variable_prefix }}{{ $name }}{{ $.locals.credential_variable_suffix }}
+        valueFrom:
+          secretKeyRef:
+            name: "{{ $credential.provides.name }}"
+            key: "{{ $credential.provides.key }}"
+      - name: {{ $.locals.connection_variable_prefix }}{{ $name }}{{ $.locals.header_variable_suffix }}
+        value: "Bearer $({{ $.locals.connection_variable_prefix }}{{ $name }}{{ $.locals.credential_variable_suffix }})"
+      {{- end }}
+      {{- range $caller := $callers }}
+      {{- $name := regexReplaceAll "[^A-Z0-9]" (upper $caller) "_" }}
+      - name: {{ $.locals.caller_variable_prefix }}{{ $name }}{{ $.locals.caller_key_variable_suffix }}
+        valueFrom:
+          secretKeyRef:
+            name: "{{ $callerKeySecret }}"
+            key: "{{ $caller }}"
+      - name: {{ $.locals.caller_variable_prefix }}{{ $name }}{{ $.locals.header_variable_suffix }}
+        value: "Bearer $({{ $.locals.caller_variable_prefix }}{{ $name }}{{ $.locals.caller_key_variable_suffix }})"
+      {{- end }}
+      {{- with $storeCredential }}
+      - name: {{ $.locals.cache_store_password_variable }}
+        valueFrom:
+          secretKeyRef:
+            name: "{{ .provides.name }}"
+            key: "{{ .provides.key }}"
+      {{- end }}
+    {{- end }}
+
+    ## ── Gateway resources ──────────────────────────────────────
+    resources:
+      limits:
+        cpu: "{{ .infra.compute.cpu }}"
+        memory: "{{ .infra.compute.memory }}"
+      {{- if and .infra.overrides .infra.overrides.requests }}
+      requests:
+        cpu: "{{ .infra.overrides.requests.cpu }}"
+        memory: "{{ .infra.overrides.requests.memory }}"
+      {{- end }}
+
+    ## ── Scheduling overrides ───────────────────────────────────
+    {{- if .infra.overrides }}
+    {{- if .infra.overrides.nodeSelector }}
+    nodeSelector: {{ toJson .infra.overrides.nodeSelector }}
+    {{- end }}
+    {{- if .infra.overrides.tolerations }}
+    tolerations: {{ toJson .infra.overrides.tolerations }}
+    {{- end }}
+    {{- end }}

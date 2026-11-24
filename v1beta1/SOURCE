@@ -1,0 +1,35 @@
+The v1beta1 documents of the first published release carrying v1beta1: aggrega-cli v0.9.0-rc.2,
+whose binary pins aggrega-schemas v0.13.0, the first schemas release with v1beta1 schema files.
+
+Each tree below is `git archive` of its repository at the revision named, byte for byte: what was
+committed, nothing a build wrote. Nobody edits these files; a later frozen version goes into a new
+directory.
+
+  aggrega-docs/language-reference/examples/
+      repository  github.com/aggrega-ai/aggrega-docs
+      revision    d1c5b87cf1217b218d8bc5f7c4418fb99d584a85 (tag v0.9.0-rc.2)
+      path        language-reference/examples
+
+  aggrega-docs/scripts/
+      repository  github.com/aggrega-ai/aggrega-docs
+      revision    d1c5b87cf1217b218d8bc5f7c4418fb99d584a85 (tag v0.9.0-rc.2)
+      path        scripts
+
+  aggrega-hub/aggrega-catalog/
+      repository  github.com/aggrega-ai/aggrega-hub
+      revision    2e90f55fc584e20c08473b0a7c7d6b0fb4dd5f29
+      path        aggrega-catalog
+      The hub carries no tags. This revision is the catalog the hub published for that release:
+      every entity at aggrega.ai/v1beta1, the core Plugin entities at 0.9.0-rc.2 included.
+
+outcomes.tsv holds the outcome of every Release, recorded with `frozen-corpus.sh record` by that
+release's own binary: the asset aggrega-0.9.0-rc.2-linux-amd64 of the GitHub release v0.9.0-rc.2 of
+github.com/aggrega-ai/aggrega-cli (built from commit 9e413eaf63c3b903827deb668550b460b60ce615),
+verified against that release's SHA256SUMS.
+
+  sha256   267c2edebf9c637b787a66a5983c643fb0800b08286a191a6083c372e249ee76
+  version  aggrega 0.9.0-rc.2 (committed 2026-11-10T06:58:49Z, commit 9e413eaf, abi v1beta1, go1.26.0)
+
+Recorded on 2026-11-21. The validations ran with no network and the frozen catalog. The builds ran
+with the network open, the frozen catalog and no registry login, so a pull the registry refuses
+without a login, or an artifact it no longer serves, is recorded as the outcome the binary met.
