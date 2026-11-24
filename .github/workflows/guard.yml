@@ -4,7 +4,7 @@ name: Guard
 # on every push to main and every pull request into main.
 #
 # check-frozen holds each frozen directory of the commit to the tree id recorded for
-# it in frozen-trees (scripts/check-frozen.sh --rev HEAD, whose --help is the
+# it in frozen-trees (scripts/check-frozen-corpus.sh --rev HEAD, whose --help is the
 # contract). The check that judges a change is never taken from that change: it is
 # taken from the revision the change is judged against (the pull request's base, or
 # the commit the push moved main from), so a change that also edits the check is
@@ -14,9 +14,10 @@ name: Guard
 # directory and to frozen-trees together passes here, and a consumer that must
 # notice it holds the corpus to its own copy of the ids (--trees).
 #
-# self-tests runs scripts/test-run.sh and scripts/test-check-frozen.sh, which plant
-# each fault the two scripts must refuse in scratch corpora and repositories of
-# their own. Neither needs the network or a built binary.
+# self-tests runs scripts/test-frozen-corpus.sh and scripts/test-check-frozen-corpus.sh,
+# which plant each fault the runner and the check must refuse in scratch corpora and
+# repositories of their own, and lints every script with shellcheck at warning level and
+# above. None of it needs the network or a built binary.
 on:
   push:
     branches: [main]
@@ -50,18 +51,18 @@ jobs:
           set -euo pipefail
           rev="$BASE"
           if [ -z "$rev" ] || [ "$rev" = 0000000000000000000000000000000000000000 ] \
-            || ! git cat-file -e "$rev:scripts/check-frozen.sh" 2>/dev/null; then
+            || ! git cat-file -e "$rev:scripts/check-frozen-corpus.sh" 2>/dev/null; then
             echo "::notice::the revision this change is judged against does not carry the check; taking it from the change itself"
             rev=HEAD
           fi
-          git show "$rev:scripts/check-frozen.sh" > "$RUNNER_TEMP/check-frozen.sh"
+          git show "$rev:scripts/check-frozen-corpus.sh" > "$RUNNER_TEMP/check-frozen-corpus.sh"
           echo "check-frozen: the check of $(git rev-parse --short "$rev")"
 
       - name: Hold every frozen directory to its recorded tree id
-        run: bash "$RUNNER_TEMP/check-frozen.sh" --rev HEAD
+        run: bash "$RUNNER_TEMP/check-frozen-corpus.sh" --rev HEAD
 
   self-tests:
-    name: Self-tests of the runner and the check
+    name: Self-tests and lint of the runner and the check
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -73,7 +74,10 @@ jobs:
           persist-credentials: false
 
       - name: Self-test of the runner
-        run: bash scripts/test-run.sh
+        run: bash scripts/test-frozen-corpus.sh
 
       - name: Self-test of the check
-        run: bash scripts/test-check-frozen.sh
+        run: bash scripts/test-check-frozen-corpus.sh
+
+      - name: Lint the scripts
+        run: shellcheck -S warning scripts/*.sh

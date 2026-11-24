@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# run.sh — run the frozen v1beta1 documents through an aggrega binary and hold each
-# Release to the outcome recorded for it. --help is the contract.
+# frozen-corpus.sh — run the frozen v1beta1 documents through an aggrega binary and
+# hold each Release to the outcome recorded for it. --help is the contract.
 set -uo pipefail
 export LC_ALL=C
 
@@ -11,15 +11,15 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
   cat <<'EOF'
-run.sh — run the frozen v1beta1 documents through an aggrega binary and hold each
-Release to the outcome recorded for it.
+frozen-corpus.sh — run the frozen v1beta1 documents through an aggrega binary and hold
+each Release to the outcome recorded for it.
 
 Usage:
-  scripts/run.sh record --bin AGGREGA [--corpus DIR] [--jobs N]
-  scripts/run.sh fast   --bin AGGREGA [--corpus DIR] [--jobs N]
-  scripts/run.sh live   --bin AGGREGA --catalog DIR [--corpus DIR] [--jobs N]
-  scripts/run.sh full   --bin AGGREGA [--corpus DIR] [--jobs N]
-  scripts/run.sh --help
+  scripts/frozen-corpus.sh record --bin AGGREGA [--corpus DIR] [--jobs N]
+  scripts/frozen-corpus.sh fast   --bin AGGREGA [--corpus DIR] [--jobs N]
+  scripts/frozen-corpus.sh live   --bin AGGREGA --catalog DIR [--corpus DIR] [--jobs N]
+  scripts/frozen-corpus.sh full   --bin AGGREGA [--corpus DIR] [--jobs N]
+  scripts/frozen-corpus.sh --help
 
   --bin AGGREGA  the aggrega binary to judge (a path; required).
   --corpus DIR   the frozen corpus (default: v1beta1 at the root of the repository
@@ -107,7 +107,7 @@ THE BUILD HARNESS (record's build column, full)
   --example <workspace> <release file> -- --auto-pull --no-color, the shared helper each
   example's own build-release.sh calls. The environment is the validation harness's with
   no proxy (a build fetches charts and pulls plugins) and AGGREGA_BIN set; DOCKER_CONFIG is
-  empty, so a pull runs with no registry login. Three halts come from the network or the
+  empty, so a pull runs with no registry login. These halts come from the network or the
   registry rather than from the binary: E0136 (the network could not be reached), E0380
   (the registry answered with a server error) and E0381 (the transfer from the registry
   broke off). A run halting with one of them runs once more; halting with one of them
@@ -125,7 +125,7 @@ THE BUILD HARNESS (record's build column, full)
   check.sh not run first. A build or check.sh meeting E0136, E0380 or E0381 on both its
   runs is left not judged (exit 2), never counted as a difference; a registry that
   refuses a request (a plugin it does not serve, a login it wants) gives a halt like any
-  other. Each line naming a Release left not judged by those three halts ends its reason
+  other. Each line naming a Release left not judged by those halts ends its reason
   with "(the network could not be reached)", the words a caller reads to tell them from
   every other reason: a tier that left Releases not judged by them alone says nothing
   about the binary and can run again once the network can be reached. A build left not
@@ -287,7 +287,7 @@ fi
 
 # --- the scratch directory -----------------------------------------------------------
 # The closed port, its listen check (check_closed_port) and the emptied environment
-# run_env hands every run (env -i with PATH; TMPDIR, HOME, the four XDG directories and
+# run_env hands every run (env -i with PATH; TMPDIR, HOME, the XDG directories and
 # DOCKER_CONFIG inside a scratch directory; and, for a validation, HTTP_PROXY,
 # HTTPS_PROXY, http_proxy, https_proxy at that port, NO_PROXY and no_proxy empty) keep
 # every run off the caller's configuration, caches and registry login, and a validation
@@ -442,7 +442,7 @@ whole_catalog_validate() {
 
 # registry_halt LOG — true when the halt says the Release reaches an entity or plugin that
 # no local catalog holds, which validate does not pull and a build's --auto-pull tries.
-# The first diagnostic decides: its code is one of the three conditions below AND the log
+# The first diagnostic decides: its code is one of the conditions below AND the log
 # carries that condition's message, the text the error reference registers for the code:
 #   E0114  unresolvable-uri              "no entity in the catalog matches this URI"
 #   E0103  unsatisfiable-entity-version  "no catalog version satisfies the referenced

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# scripts/test-run.sh — plants one fault at a time in a tiny scratch corpus and shows
-# that scripts/run.sh (fast, live and full) refuses each with its exit
+# scripts/test-frozen-corpus.sh — plants one fault at a time in a tiny scratch corpus and
+# shows that scripts/frozen-corpus.sh (fast, live and full) refuses each with its exit
 # status and names the Release, and passes the clean case. It fails whenever an expected
 # refusal is not reported. Hermetic and offline: the binary is a stub that halts, loses its
 # result or meets a network or registry halt on a marker in the Release file, the corpus's
@@ -12,7 +12,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUN="${FROZEN_CORPUS_SCRIPT:-$SCRIPT_DIR/run.sh}"
+RUN="${FROZEN_CORPUS_SCRIPT:-$SCRIPT_DIR/frozen-corpus.sh}"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -23,7 +23,7 @@ fail() { echo "FAIL: $*" >&2; echo x >> "$failed"; }
 
 # The stub binary: `validate --catalog DIR` passes; `validate --release FILE` and
 # `build --release FILE` halt with [E0001] when FILE carries the word HALT, kill the
-# run.sh subshell that would record the result when FILE carries LOSE, halt with
+# frozen-corpus.sh subshell that would record the result when FILE carries LOSE, halt with
 # [E0136] when FILE carries NETDOWN, or the first time when it carries NETONCE, with
 # [E0380] (the registry's server error) when it carries SERVERERR, or the first time when it
 # carries SERVERONCE, with [E0381] (a transfer broken off) when it carries BROKEOFF, exit 1
@@ -64,7 +64,7 @@ if grep -q LOSE "$rel"; then
   pid=$$
   while [ "$pid" -gt 1 ]; do
     pid="$(awk '{ print $4 }' "/proc/$pid/stat")"
-    if tr '\0' ' ' < "/proc/$pid/cmdline" | grep -q scripts/run.sh; then kill -9 "$pid"; exit 0; fi
+    if tr '\0' ' ' < "/proc/$pid/cmdline" | grep -qF scripts/frozen-corpus.sh; then kill -9 "$pid"; exit 0; fi
   done
 fi
 exit 0
@@ -99,7 +99,7 @@ BRSH
 # accept CORPUS LINE — append an accepted entry.
 accept() { printf '%s\n' "$2" >> "$1-accepted.tsv"; }
 
-# expect NAME WANT_EXIT NEEDLE ARGS... — runs run.sh with the stub binary.
+# expect NAME WANT_EXIT NEEDLE ARGS... — runs frozen-corpus.sh with the stub binary.
 expect() {
   local name="$1" want="$2" needle="$3" out rc=0
   shift 3
@@ -289,7 +289,7 @@ else
 fi
 
 if [ -s "$failed" ]; then
-  echo "test-run: FAILED" >&2
+  echo "test-frozen-corpus: FAILED" >&2
   exit 1
 fi
-echo "test-run: ok"
+echo "test-frozen-corpus: ok"

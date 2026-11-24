@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# scripts/test-check-frozen.sh — plants one fault at a time in a throwaway repository
-# and shows that scripts/check-frozen.sh refuses each, naming the path, and passes the
-# clean state. It fails whenever an expected refusal is not reported. Hermetic:
-# everything lives under one mktemp directory, removed on exit.
+# scripts/test-check-frozen-corpus.sh — plants one fault at a time in a throwaway
+# repository and shows that scripts/check-frozen-corpus.sh refuses each, naming the
+# path, and passes the clean state. It fails whenever an expected refusal is not
+# reported. Hermetic: everything lives under one mktemp directory, removed on exit.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CHECK="${CHECK_FROZEN_CORPUS:-$SCRIPT_DIR/check-frozen.sh}"
+CHECK="${CHECK_FROZEN_CORPUS:-$SCRIPT_DIR/check-frozen-corpus.sh}"
 TREES=frozen-trees
 
 WORK="$(mktemp -d)"
@@ -33,7 +33,7 @@ git init -q "$base"
   echo one > v1beta1/a.txt
   echo two > v1beta1/sub/b.txt
   echo '*.ignored' > v1beta1/.gitignore
-  echo 'echo run' > scripts/run.sh
+  echo 'echo run' > scripts/frozen-corpus.sh
   git add -A && git commit -q -m corpus
   printf '# comment line\nv1beta1 %s\n' "$(git rev-parse HEAD:v1beta1)" > "$TREES"
   git add -A && git commit -q -m record
@@ -124,9 +124,9 @@ commit_all() { git add -A && git commit -q -m change; }
 )
 
 # A change outside the frozen directories is not the check's to judge.
-( cd "$(fresh)" && echo 'echo other' > scripts/run.sh && commit_all \
+( cd "$(fresh)" && echo 'echo other' > scripts/frozen-corpus.sh && commit_all \
     && expect "rev change outside the frozen directories" 0 "" --rev HEAD )
-( cd "$(fresh)" && echo 'echo other' > scripts/run.sh && git add scripts \
+( cd "$(fresh)" && echo 'echo other' > scripts/frozen-corpus.sh && git add scripts \
     && expect "staged change outside the frozen directories" 0 "" --staged )
 
 # --- the record read from a file outside the repository (--trees) -------
@@ -165,7 +165,7 @@ commit_all() { git add -A && git commit -q -m change; }
 
 failures="$(wc -l < "$failed")"
 if [ "$failures" -gt 0 ]; then
-  echo "test-check-frozen: $failures failure(s)" >&2
+  echo "test-check-frozen-corpus: $failures failure(s)" >&2
   exit 1
 fi
-echo "test-check-frozen: ok"
+echo "test-check-frozen-corpus: ok"

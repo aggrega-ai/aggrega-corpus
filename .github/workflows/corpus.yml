@@ -4,7 +4,7 @@ name: Corpus
 # nightly and on demand, on GitHub-hosted runners.
 #
 #   changed  Reads the heads of aggrega-cli's main and aggrega-hub's main once, so
-#            every later job uses the same two commits. On the nightly schedule it
+#            every later job uses the same commits. On the nightly schedule it
 #            then finds the newest successful run of this workflow on main that
 #            built a binary (its build job's marker artifact, cli-main-<commit>,
 #            names the aggrega-cli commit it built), and skips every later job when
@@ -14,12 +14,13 @@ name: Corpus
 #            scripts/build.sh, the build its release makes the published binary
 #            with: the embedded guests regenerated with the Rust toolchains they pin,
 #            aggrega-hub at the commit changed read checked out beside it for the
-#            embedded plugin entities. It uploads the binary (aggrega-linux-amd64)
-#            and the marker.
+#            embedded plugin entities. It reports the disk the build used, and
+#            uploads the binary (aggrega-linux-amd64) and the marker.
 #   fast, live, full
-#            Each downloads that binary and runs one tier of scripts/run.sh over the
-#            corpus at this run's commit (scripts/run.sh --help is the contract):
-#            fast against the frozen catalog, live against the aggrega-catalog of
+#            Each downloads that binary and runs one tier of
+#            scripts/frozen-corpus.sh over the corpus at this run's commit
+#            (scripts/frozen-corpus.sh --help is the contract): fast against
+#            the frozen catalog, live against the aggrega-catalog of
 #            aggrega-hub at the commit changed read, full building every Release
 #            with the network open and no registry login. They run in parallel; a
 #            red one fails the run, and GitHub's failed-workflow notification
@@ -37,7 +38,7 @@ concurrency:
 
 jobs:
   changed:
-    name: Whether aggrega-cli's main moved
+    name: Whether aggrega-cli's main or this corpus moved since the last green build
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -148,6 +149,13 @@ jobs:
           cp aggrega-cli/aggrega "$RUNNER_TEMP/out/bin/aggrega"
           aggrega-cli/aggrega version > "$RUNNER_TEMP/out/marker/version.txt"
 
+      - name: Report the disk the build used
+        # A standard GitHub-hosted runner has about 14 GB of free disk; this says how much
+        # of it the build took, and what took it.
+        run: |
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          du -sh aggrega-cli aggrega-hub "$RUNNER_TEMP/rust" "$(go env GOMODCACHE)" "$(go env GOCACHE)" 2>/dev/null || true
+
       - name: Upload the binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -187,7 +195,7 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x "$RUNNER_TEMP/bin/aggrega"
-          bash scripts/run.sh fast --bin "$RUNNER_TEMP/bin/aggrega"
+          bash scripts/frozen-corpus.sh fast --bin "$RUNNER_TEMP/bin/aggrega"
 
   live:
     name: live (aggrega-hub's main)
@@ -222,7 +230,7 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x "$RUNNER_TEMP/bin/aggrega"
-          bash corpus/scripts/run.sh live --bin "$RUNNER_TEMP/bin/aggrega" --catalog aggrega-hub/aggrega-catalog
+          bash corpus/scripts/frozen-corpus.sh live --bin "$RUNNER_TEMP/bin/aggrega" --catalog aggrega-hub/aggrega-catalog
 
   full:
     name: full (every Release built)
@@ -247,4 +255,4 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x "$RUNNER_TEMP/bin/aggrega"
-          bash scripts/run.sh full --bin "$RUNNER_TEMP/bin/aggrega"
+          bash scripts/frozen-corpus.sh full --bin "$RUNNER_TEMP/bin/aggrega"

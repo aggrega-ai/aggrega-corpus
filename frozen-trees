@@ -1,8 +1,8 @@
 # <directory> <git tree id>: the content of each frozen directory, recorded once.
-# scripts/check-frozen.sh holds each directory to its id; a new frozen version goes into
-# a new directory with a line of its own.
+# scripts/check-frozen-corpus.sh holds each directory to its id; a new frozen version
+# goes into a new directory with a line of its own.
 #
 # A change made to a directory and to this file together passes a check that reads
 # this file. A consumer that must notice such a change keeps its own copy of these
-# lines and passes it to scripts/check-frozen.sh with --trees.
+# lines and passes it to scripts/check-frozen-corpus.sh with --trees.
 v1beta1 11a8d3dd51ab024a32ddc606a1caf97930208492

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# check-frozen.sh — refuse any change to a frozen directory of this repository.
+# check-frozen-corpus.sh — refuse any change to a frozen directory of this repository.
 #
 # A frozen directory holds the documents of a past release exactly as that release
 # shipped them (v1beta1/ holds the v1beta1 documents), copied once and never edited.
@@ -13,12 +13,12 @@
 # The contract — modes, exit codes — is --help, printed from usage() below.
 set -uo pipefail
 
-PROG="check-frozen"
+PROG="check-frozen-corpus"
 TREES_FILE="frozen-trees"
 
 usage() {
   cat <<'USAGE'
-usage: scripts/check-frozen.sh (--staged | --rev REV) [--trees FILE]
+usage: scripts/check-frozen-corpus.sh (--staged | --rev REV) [--trees FILE]
 
 Refuses a change to a frozen directory, naming each path that differs. A frozen
 directory is a directory at the root of the repository whose name is an API version:
