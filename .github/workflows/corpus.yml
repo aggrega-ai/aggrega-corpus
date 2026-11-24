@@ -1,0 +1,250 @@
+name: Corpus
+
+# Holds the aggrega binary of aggrega-cli's main to the frozen v1beta1 documents,
+# nightly and on demand, on GitHub-hosted runners.
+#
+#   changed  Reads the heads of aggrega-cli's main and aggrega-hub's main once, so
+#            every later job uses the same two commits. On the nightly schedule it
+#            then finds the newest successful run of this workflow on main that
+#            built a binary (its build job's marker artifact, cli-main-<commit>,
+#            names the aggrega-cli commit it built), and skips every later job when
+#            that run built the same aggrega-cli commit over the same commit of this
+#            repository. A run started by hand always runs.
+#   build    Builds aggrega from that aggrega-cli commit with aggrega-cli's own
+#            scripts/build.sh, the build its release makes the published binary
+#            with: the embedded guests regenerated with the Rust toolchains they pin,
+#            aggrega-hub at the commit changed read checked out beside it for the
+#            embedded plugin entities. It uploads the binary (aggrega-linux-amd64)
+#            and the marker.
+#   fast, live, full
+#            Each downloads that binary and runs one tier of scripts/run.sh over the
+#            corpus at this run's commit (scripts/run.sh --help is the contract):
+#            fast against the frozen catalog, live against the aggrega-catalog of
+#            aggrega-hub at the commit changed read, full building every Release
+#            with the network open and no registry login. They run in parallel; a
+#            red one fails the run, and GitHub's failed-workflow notification
+#            reaches the account that last changed the schedule.
+on:
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: corpus-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  changed:
+    name: Whether aggrega-cli's main moved
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      cli: ${{ steps.decide.outputs.cli }}
+      hub: ${{ steps.decide.outputs.hub }}
+    steps:
+      - name: Read the heads and decide
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          CORPUS_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          head_of() { git ls-remote "https://github.com/aggrega-ai/$1.git" refs/heads/main | cut -f1; }
+          cli="$(head_of aggrega-cli)"
+          hub="$(head_of aggrega-hub)"
+          [ -n "$cli" ] && [ -n "$hub" ] || { echo "::error::could not read the main heads of aggrega-cli and aggrega-hub"; exit 1; }
+          printf 'cli=%s\nhub=%s\n' "$cli" "$hub" >> "$GITHUB_OUTPUT"
+          echo "changed: aggrega-cli main $cli, aggrega-hub main $hub, this repository $CORPUS_COMMIT"
+          if [ "$EVENT" != schedule ]; then
+            echo "changed: a $EVENT run always runs"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          workflow="${WORKFLOW_REF%@*}"
+          workflow="${workflow##*/}"
+          built=""
+          built_over=""
+          while read -r id commit; do
+            [ -n "$id" ] || continue
+            built="$(gh api "repos/$REPO/actions/runs/$id/artifacts" \
+              --jq '[.artifacts[].name | select(startswith("cli-main-")) | ltrimstr("cli-main-")] | first // empty')"
+            if [ -n "$built" ]; then built_over="$commit"; break; fi
+          done < <(gh api "repos/$REPO/actions/workflows/$workflow/runs?branch=main&status=success&per_page=30" \
+            --jq '.workflow_runs[] | "\(.id) \(.head_sha)"')
+          if [ "$built" = "$cli" ] && [ "$built_over" = "$CORPUS_COMMIT" ]; then
+            echo "::notice::the newest green run already judged aggrega-cli $cli over this commit; nothing to run"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed: the newest green run that built judged aggrega-cli ${built:-nothing} over ${built_over:-nothing}; running"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build aggrega from aggrega-cli's main
+    needs: changed
+    if: needs.changed.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Check out aggrega-cli at the commit changed read
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: aggrega-ai/aggrega-cli
+          ref: ${{ needs.changed.outputs.cli }}
+          path: aggrega-cli
+          # Every tag, so the binary stamps its version from git describe.
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Check out aggrega-hub beside it at the commit changed read
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: aggrega-ai/aggrega-hub
+          ref: ${{ needs.changed.outputs.hub }}
+          path: aggrega-hub
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: aggrega-cli/go.mod
+          cache: false
+
+      - name: Install the Rust toolchains the guests pin
+        # aggrega-cli's own installer, the one its release build runs: a pinned rustup
+        # in the runner's temporary directory, and in it the toolchain each Rust
+        # guest's rust-toolchain.toml pins.
+        run: |
+          set -euo pipefail
+          homes="$(aggrega-cli/scripts/install-guest-rust-toolchains.sh "$RUNNER_TEMP/rust")"
+          while IFS= read -r line; do
+            case "$line" in
+              RUSTUP_HOME=?*|CARGO_HOME=?*) export "${line?}" ;;
+              *) echo "build: install-guest-rust-toolchains.sh printed $line, not a RUSTUP_HOME or CARGO_HOME setting" >&2; exit 1 ;;
+            esac
+          done <<< "$homes"
+          printf '%s\n' "$homes" >> "$GITHUB_ENV"
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Build the binary with its embedded guests
+        run: aggrega-cli/scripts/build.sh
+
+      - name: Run the binary
+        run: |
+          set -euo pipefail
+          aggrega-cli/aggrega version
+          mkdir -p "$RUNNER_TEMP/out/bin" "$RUNNER_TEMP/out/marker"
+          cp aggrega-cli/aggrega "$RUNNER_TEMP/out/bin/aggrega"
+          aggrega-cli/aggrega version > "$RUNNER_TEMP/out/marker/version.txt"
+
+      - name: Upload the binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: aggrega-linux-amd64
+          path: ${{ runner.temp }}/out/bin/aggrega
+          retention-days: 5
+          if-no-files-found: error
+
+      - name: Upload the marker naming the aggrega-cli commit built
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cli-main-${{ needs.changed.outputs.cli }}
+          path: ${{ runner.temp }}/out/marker/version.txt
+          retention-days: 90
+          if-no-files-found: error
+
+  fast:
+    name: fast (the frozen catalog)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the corpus
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Download the binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: aggrega-linux-amd64
+          path: ${{ runner.temp }}/bin
+
+      - name: Run the fast tier
+        run: |
+          set -euo pipefail
+          chmod +x "$RUNNER_TEMP/bin/aggrega"
+          bash scripts/run.sh fast --bin "$RUNNER_TEMP/bin/aggrega"
+
+  live:
+    name: live (aggrega-hub's main)
+    needs: [changed, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the corpus
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          path: corpus
+          persist-credentials: false
+
+      - name: Check out the catalog of aggrega-hub at the commit changed read
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: aggrega-ai/aggrega-hub
+          ref: ${{ needs.changed.outputs.hub }}
+          path: aggrega-hub
+          sparse-checkout: aggrega-catalog
+          persist-credentials: false
+
+      - name: Download the binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: aggrega-linux-amd64
+          path: ${{ runner.temp }}/bin
+
+      - name: Run the live tier
+        run: |
+          set -euo pipefail
+          chmod +x "$RUNNER_TEMP/bin/aggrega"
+          bash corpus/scripts/run.sh live --bin "$RUNNER_TEMP/bin/aggrega" --catalog aggrega-hub/aggrega-catalog
+
+  full:
+    name: full (every Release built)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the corpus
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Download the binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: aggrega-linux-amd64
+          path: ${{ runner.temp }}/bin
+
+      - name: Run the full tier
+        run: |
+          set -euo pipefail
+          chmod +x "$RUNNER_TEMP/bin/aggrega"
+          bash scripts/run.sh full --bin "$RUNNER_TEMP/bin/aggrega"
