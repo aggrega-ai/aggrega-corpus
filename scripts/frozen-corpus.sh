@@ -292,6 +292,13 @@ fi
 # HTTPS_PROXY, http_proxy, https_proxy at that port, NO_PROXY and no_proxy empty) keep
 # every run off the caller's configuration, caches and registry login, and a validation
 # off the network.
+#
+# DELIBERATE NEAR-DUPLICATE: aggrega-docs' scripts/check-import-examples.sh --isolated
+# hands the checks of the documentation's import examples the same closed port, listen
+# check and emptied environment. This script runs from a lone checkout of its own
+# repository, where no script of aggrega-docs can be sourced or called, so it keeps its
+# own copy; a change to how a run is isolated from the caller's configuration or kept
+# off the network is made in both.
 CLOSED_PORT=9
 PROXY="http://127.0.0.1:$CLOSED_PORT"
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/frozen-corpus-XXXXXX")" || not_judged "cannot create a scratch directory"
