@@ -123,20 +123,12 @@ jobs:
           cache: false
 
       - name: Install the Rust toolchains the guests pin
-        # aggrega-cli's own installer, the one its release build runs: a pinned rustup
-        # in the runner's temporary directory, and in it the toolchain each Rust
-        # guest's rust-toolchain.toml pins.
-        run: |
-          set -euo pipefail
-          homes="$(aggrega-cli/scripts/install-guest-rust-toolchains.sh "$RUNNER_TEMP/rust")"
-          while IFS= read -r line; do
-            case "$line" in
-              RUSTUP_HOME=?*|CARGO_HOME=?*) export "${line?}" ;;
-              *) echo "build: install-guest-rust-toolchains.sh printed $line, not a RUSTUP_HOME or CARGO_HOME setting" >&2; exit 1 ;;
-            esac
-          done <<< "$homes"
-          printf '%s\n' "$homes" >> "$GITHUB_ENV"
-          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+        # aggrega-cli's own installer, the one its release build runs: a pinned and
+        # verified rustup under the runner's temporary directory, installing the
+        # release each guest's rust-toolchain.toml names, with its targets, and
+        # setting RUSTUP_HOME, CARGO_HOME and the path for every later step (see its
+        # --help).
+        run: aggrega-cli/scripts/install-guest-rust-toolchains.sh --github-env "$RUNNER_TEMP/rust"
 
       - name: Build the binary with its embedded guests
         run: aggrega-cli/scripts/build.sh
